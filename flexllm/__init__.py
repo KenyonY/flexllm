@@ -151,7 +151,7 @@ Example:
     cache = ResponseCacheConfig(enabled=True, ttl=3600)   # 自定义 TTL（秒）
 """
 
-__version__ = "0.2.4"
+__version__ = "0.3.0"
 
 # 多模态模型功能
 from .mllm_client import MllmClient
