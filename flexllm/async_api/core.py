@@ -7,15 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional, Callable, AsyncIterator,
 from aiohttp import ClientSession, TCPConnector, ClientTimeout
 from contextlib import asynccontextmanager
 
-# 临时解决方案：直接导入以避免命名冲突
-try:
-    from ..utils.core import async_retry
-except ImportError:
-    # 如果有命名冲突，可能需要更具体的导入
-    def async_retry(retry_times=3, retry_delay=1.0):
-        def decorator(func):
-            return func
-        return decorator
+from ..utils.core import async_retry
 from .interface import RequestResult
 from .progress import ProgressTracker, ProgressBarConfig
 
