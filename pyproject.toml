@@ -1,0 +1,99 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "flexllm"
+description = "High-performance LLM client with batch processing, caching, and checkpoint recovery"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "kunyuan", email = "beidongjiedeguang@gmail.com"}
+]
+keywords = ["llm", "openai", "gemini", "claude", "anthropic", "batch", "async", "cache", "multimodal"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.9"
+
+dynamic = ["version"]
+
+dependencies = [
+    "aiohttp>=3.8.0",
+    "requests>=2.28.0",
+    "tqdm>=4.60.0",
+    "rich>=12.0.0",
+    "loguru>=0.6.0",
+    "orjson",
+    "json5>=0.9.0",
+    "aiolimiter>=1.1.0",
+]
+
+[project.scripts]
+flexllm = "flexllm.__main__:main"
+xllm = "flexllm.__main__:main"
+
+[project.optional-dependencies]
+vertex = [
+    # Vertex AI 模式需要 google-auth 获取访问令牌
+    "google-auth>=2.0.0",
+]
+cache = [
+    "flaxkv2>=0.1.0",
+]
+image = [
+    "pillow>=9.0.0",
+    "opencv-python>=4.5.0",
+    "requests>=2.28.0",
+]
+cli = [
+    "typer>=0.9.0",
+    "pyyaml>=6.0",
+]
+token = [
+    "tiktoken>=0.5.0",
+]
+all = [
+    "flexllm[vertex,cache,image,cli,token]",
+]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.20.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.20.0",
+    "flaxkv2>=0.1.0",
+    "pillow>=9.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/KenyonY/flexllm"
+Repository = "https://github.com/KenyonY/flexllm"
+Documentation = "https://github.com/KenyonY/flexllm#readme"
+Issues = "https://github.com/KenyonY/flexllm/issues"
+
+[tool.hatch.version]
+path = "flexllm/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["flexllm"]
+
+[tool.black]
+line-length = 100
+target-version = ["py39", "py310", "py311", "py312", "py313", "py314"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
