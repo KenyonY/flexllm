@@ -1,7 +1,7 @@
 <h1 align="center">flexllm</h1>
 
 <p align="center">
-    <strong>High-performance LLM client with batch processing, caching, and checkpoint recovery</strong>
+    <strong>高性能 LLM 客户端，支持批量处理、响应缓存和断点续传</strong>
 </p>
 
 <p align="center">
@@ -17,31 +17,31 @@
 </p>
 
 <p align="center">
-    English | <a href="README_zh.md">中文</a>
+    <a href="README.md">English</a> | 中文
 </p>
 
 ---
 
-## Why flexllm?
+## 为什么选择 flexllm？
 
-- **Batch Without Worry**: Checkpoint recovery + response caching. Interruptions don't lose progress, duplicate requests don't cost money
-- **Unified Interface**: One codebase for OpenAI, Gemini, Claude, and self-hosted models
-- **Just Works**: Sensible defaults, minimal configuration
+- **批量处理无忧**：断点续传 + 响应缓存，跑一半挂了不丢进度，重复请求不花钱
+- **统一接口**：一套代码适配 OpenAI、Gemini、Claude 及自托管模型
+- **开箱即用**：合理默认值，最少配置
 
-## Features
+## 特性
 
-- **Multi-Provider**: OpenAI, Gemini, Claude, and any OpenAI-compatible API (vLLM, Ollama, DeepSeek...)
-- **Batch Processing**: Concurrent requests with QPS control and checkpoint recovery
-- **Response Caching**: Avoid duplicate API calls with TTL support
-- **Async-First**: Built on asyncio for maximum performance
+- **多 Provider 支持**：OpenAI、Gemini、Claude 及任何 OpenAI 兼容 API（vLLM、Ollama、DeepSeek...）
+- **批量处理**：并发请求 + QPS 控制 + 断点续传
+- **响应缓存**：避免重复 API 调用，支持 TTL
+- **异步优先**：基于 asyncio 构建，性能最大化
 
-## Installation
+## 安装
 
 ```bash
 pip install flexllm[all]
 ```
 
-## Quick Start
+## 快速开始
 
 ```python
 from flexllm import LLMClient
@@ -52,19 +52,19 @@ client = LLMClient(
     api_key="your-api-key"
 )
 
-# Single request
+# 单次请求
 response = await client.chat_completions([
     {"role": "user", "content": "Hello!"}
 ])
 
-# Batch with checkpoint recovery (re-run resumes from where it stopped)
+# 批量处理 + 断点续传（中断后重新运行会自动恢复）
 results = await client.chat_completions_batch(
     messages_list,
     output_file="results.jsonl",
 )
 ```
 
-### Response Caching
+### 响应缓存
 
 ```python
 from flexllm import LLMClient, ResponseCacheConfig
@@ -76,11 +76,11 @@ client = LLMClient(
     cache=ResponseCacheConfig(enabled=True, ttl=3600),
 )
 
-result1 = await client.chat_completions(messages)  # API call
-result2 = await client.chat_completions(messages)  # Cache hit
+result1 = await client.chat_completions(messages)  # API 调用
+result2 = await client.chat_completions(messages)  # 缓存命中
 ```
 
-### Load Balancing
+### 负载均衡
 
 ```python
 from flexllm import LLMClientPool
@@ -112,12 +112,12 @@ client = ClaudeClient(model="claude-sonnet-4-20250514", api_key="your-key")
 ## CLI
 
 ```bash
-flexllm ask "What is Python?"                # Quick ask
-flexllm batch input.jsonl -o output.jsonl    # Batch processing
-flexllm chat                                 # Interactive chat
-flexllm test                                 # Test connection
+flexllm ask "What is Python?"                # 快速问答
+flexllm batch input.jsonl -o output.jsonl    # 批量处理
+flexllm chat                                 # 交互式聊天
+flexllm test                                 # 测试连接
 ```
 
-## License
+## 许可证
 
 [Apache 2.0](LICENSE)
