@@ -828,6 +828,132 @@ models:
             raise typer.Exit(1)
 
     @app.command()
+    def pricing(
+        model: Annotated[Optional[str], Argument(help="模型名称（支持模糊匹配）")] = None,
+        update: Annotated[bool, Option("--update", help="从 OpenRouter 更新定价表")] = False,
+        json_output: Annotated[bool, Option("--json", help="输出 JSON 格式")] = False,
+    ):
+        """查询模型定价信息
+
+        Examples:
+            flexllm pricing                  # 列出所有模型定价
+            flexllm pricing gpt-4o           # 查询 gpt-4o 定价
+            flexllm pricing claude           # 模糊匹配 claude 相关模型
+            flexllm pricing --update         # 从 OpenRouter 更新定价表
+        """
+        from flexllm.pricing import get_pricing, reload_pricing
+
+        MODEL_PRICING = get_pricing()
+
+        if update:
+            # 调用更新脚本
+            print("正在从 OpenRouter API 获取最新定价...")
+            try:
+                from flexllm.pricing.updater import collect_pricing, update_pricing_file
+
+                pricing_map = collect_pricing()
+                print(f"获取到 {len(pricing_map)} 个模型定价")
+
+                if update_pricing_file(pricing_map):
+                    reload_pricing()  # 重新加载定价数据
+                    print("✓ data.json 已更新")
+                else:
+                    print("✗ 更新失败", file=sys.stderr)
+                    raise typer.Exit(1)
+            except Exception as e:
+                print(f"更新失败: {e}", file=sys.stderr)
+                raise typer.Exit(1)
+            return
+
+        # 查询定价
+        if model:
+            # 模糊匹配
+            matches = {
+                name: price for name, price in MODEL_PRICING.items()
+                if model.lower() in name.lower()
+            }
+
+            if not matches:
+                print(f"未找到匹配 '{model}' 的模型", file=sys.stderr)
+                print(f"\n可用模型: {', '.join(sorted(MODEL_PRICING.keys())[:10])}...", file=sys.stderr)
+                raise typer.Exit(1)
+
+            if json_output:
+                import json as json_module
+                output = {
+                    name: {
+                        "input_per_1m": round(p["input"] * 1e6, 4),
+                        "output_per_1m": round(p["output"] * 1e6, 4),
+                    }
+                    for name, p in sorted(matches.items())
+                }
+                print(json_module.dumps(output, indent=2, ensure_ascii=False))
+            else:
+                print(f"\n模型定价 (匹配 '{model}'):\n")
+                print(f"{'模型':<30} {'输入 ($/1M)':<15} {'输出 ($/1M)':<15}")
+                print("-" * 60)
+                for name in sorted(matches.keys()):
+                    p = matches[name]
+                    input_price = p["input"] * 1e6
+                    output_price = p["output"] * 1e6
+                    print(f"{name:<30} ${input_price:<14.4f} ${output_price:<14.4f}")
+                print(f"\n共 {len(matches)} 个模型")
+        else:
+            # 列出所有模型
+            if json_output:
+                import json as json_module
+                output = {
+                    name: {
+                        "input_per_1m": round(p["input"] * 1e6, 4),
+                        "output_per_1m": round(p["output"] * 1e6, 4),
+                    }
+                    for name, p in sorted(MODEL_PRICING.items())
+                }
+                print(json_module.dumps(output, indent=2, ensure_ascii=False))
+            else:
+                # 按厂商分组显示
+                groups = {}
+                for name, price in MODEL_PRICING.items():
+                    if name.startswith(("gpt-", "o1", "o3", "o4")):
+                        group = "OpenAI"
+                    elif name.startswith("claude-"):
+                        group = "Anthropic"
+                    elif name.startswith("gemini-"):
+                        group = "Google"
+                    elif name.startswith("deepseek"):
+                        group = "DeepSeek"
+                    elif name.startswith(("qwen", "qwen2", "qwen3")):
+                        group = "Alibaba"
+                    elif name.startswith(("mistral", "ministral", "codestral", "devstral")):
+                        group = "Mistral"
+                    elif name.startswith("llama-"):
+                        group = "Meta"
+                    elif name.startswith("grok"):
+                        group = "xAI"
+                    elif name.startswith("nova"):
+                        group = "Amazon"
+                    else:
+                        group = "Other"
+
+                    if group not in groups:
+                        groups[group] = []
+                    groups[group].append((name, price))
+
+                print(f"\n模型定价表 (共 {len(MODEL_PRICING)} 个模型):\n")
+                print(f"{'模型':<30} {'输入 ($/1M)':<15} {'输出 ($/1M)':<15}")
+                print("=" * 60)
+
+                for group_name in ["OpenAI", "Anthropic", "Google", "DeepSeek", "Alibaba", "Mistral", "Meta", "xAI", "Amazon", "Other"]:
+                    if group_name not in groups:
+                        continue
+                    models = groups[group_name]
+                    print(f"\n[{group_name}]")
+                    for name, p in sorted(models):
+                        input_price = p["input"] * 1e6
+                        output_price = p["output"] * 1e6
+                        print(f"  {name:<28} ${input_price:<14.4f} ${output_price:<14.4f}")
+
+    @app.command()
     def version():
         """显示版本信息"""
         try:

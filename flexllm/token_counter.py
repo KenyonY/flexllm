@@ -5,6 +5,7 @@
 Token 计数和成本估算模块
 
 支持使用 tiktoken 精确计算，或在缺失时使用估算方法。
+定价数据从 pricing/data.json 加载，可通过 `flexllm pricing --update` 更新。
 """
 
 import hashlib
@@ -18,54 +19,24 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
+# 从 pricing 模块导入定价功能
+from flexllm.pricing import get_pricing, reload_pricing, estimate_cost as _estimate_cost
 
-# 主流模型定价表 (单位: $/token)
-# 更新于 2025-01
-MODEL_PRICING = {
-    # OpenAI - GPT 系列
-    "gpt-4o": {"input": 2.5 / 1e6, "output": 10 / 1e6},
-    "gpt-4o-mini": {"input": 0.15 / 1e6, "output": 0.6 / 1e6},
-    "gpt-4.1": {"input": 2 / 1e6, "output": 8 / 1e6},
-    "gpt-4.1-mini": {"input": 0.4 / 1e6, "output": 1.6 / 1e6},
-    "gpt-4.1-nano": {"input": 0.1 / 1e6, "output": 0.4 / 1e6},
-    "gpt-4-turbo": {"input": 10 / 1e6, "output": 30 / 1e6},
-    "gpt-4": {"input": 30 / 1e6, "output": 60 / 1e6},
-    "gpt-3.5-turbo": {"input": 0.5 / 1e6, "output": 1.5 / 1e6},
-    # OpenAI - o 系列推理模型
-    "o1": {"input": 15 / 1e6, "output": 60 / 1e6},
-    "o1-mini": {"input": 3 / 1e6, "output": 12 / 1e6},
-    "o3": {"input": 2 / 1e6, "output": 8 / 1e6},
-    "o3-mini": {"input": 1.1 / 1e6, "output": 4.4 / 1e6},
-    "o4-mini": {"input": 1.1 / 1e6, "output": 4.4 / 1e6},
-    # Claude
-    "claude-opus-4-5": {"input": 5 / 1e6, "output": 25 / 1e6},
-    "claude-opus-4": {"input": 15 / 1e6, "output": 75 / 1e6},
-    "claude-sonnet-4-5": {"input": 3 / 1e6, "output": 15 / 1e6},
-    "claude-sonnet-4": {"input": 3 / 1e6, "output": 15 / 1e6},
-    "claude-haiku-4-5": {"input": 1 / 1e6, "output": 5 / 1e6},
-    "claude-haiku-3-5": {"input": 0.8 / 1e6, "output": 4 / 1e6},
-    "claude-haiku-3": {"input": 0.25 / 1e6, "output": 1.25 / 1e6},
-    # Gemini
-    "gemini-2.5-pro": {"input": 1.25 / 1e6, "output": 10 / 1e6},
-    "gemini-2.5-flash": {"input": 0.15 / 1e6, "output": 0.6 / 1e6},
-    "gemini-2.5-flash-lite": {"input": 0.1 / 1e6, "output": 0.4 / 1e6},
-    "gemini-2.0-flash": {"input": 0.1 / 1e6, "output": 0.4 / 1e6},
-    "gemini-2.0-flash-lite": {"input": 0.075 / 1e6, "output": 0.3 / 1e6},
-    "gemini-1.5-pro": {"input": 1.25 / 1e6, "output": 5 / 1e6},
-    "gemini-1.5-flash": {"input": 0.075 / 1e6, "output": 0.3 / 1e6},
-    # DeepSeek (V3.2 统一定价)
-    "deepseek-chat": {"input": 0.28 / 1e6, "output": 0.42 / 1e6},
-    "deepseek-reasoner": {"input": 0.28 / 1e6, "output": 0.42 / 1e6},
-    # Qwen
-    "qwen-turbo": {"input": 0.05 / 1e6, "output": 0.2 / 1e6},
-    "qwen-plus": {"input": 0.4 / 1e6, "output": 1.2 / 1e6},
-    "qwen-max": {"input": 2 / 1e6, "output": 6 / 1e6},
-    "qwen2.5-max": {"input": 1.6 / 1e6, "output": 6.4 / 1e6},
-    "qwen3-max": {"input": 1.2 / 1e6, "output": 6 / 1e6},
-}
+# 兼容旧 API：MODEL_PRICING 现在是动态获取的
+def _get_model_pricing():
+    return get_pricing()
+
+# 为了向后兼容，保留 MODEL_PRICING 变量
+MODEL_PRICING = _get_model_pricing()
 
 # 模型到 tiktoken 编码器的映射
 MODEL_TO_ENCODING = {
+    # GPT-5 系列
+    "gpt-5": "o200k_base",
+    "gpt-5.1": "o200k_base",
+    "gpt-5.1-codex": "o200k_base",
+    "gpt-5.2": "o200k_base",
+    "gpt-5.2-pro": "o200k_base",
     # GPT-4o 系列
     "gpt-4o": "o200k_base",
     "gpt-4o-mini": "o200k_base",
@@ -80,6 +51,7 @@ MODEL_TO_ENCODING = {
     # o 系列推理模型
     "o1": "o200k_base",
     "o1-mini": "o200k_base",
+    "o1-pro": "o200k_base",
     "o3": "o200k_base",
     "o3-mini": "o200k_base",
     "o4-mini": "o200k_base",
@@ -190,18 +162,7 @@ def estimate_cost(
     Returns:
         估算成本 (美元)
     """
-    # 尝试匹配模型名称
-    pricing = None
-    for key in MODEL_PRICING:
-        if key in model.lower():
-            pricing = MODEL_PRICING[key]
-            break
-
-    if not pricing:
-        # 默认使用 gpt-4o-mini 的价格作为保守估计
-        pricing = MODEL_PRICING["gpt-4o-mini"]
-
-    return input_tokens * pricing["input"] + output_tokens * pricing["output"]
+    return _estimate_cost(input_tokens, output_tokens, model)
 
 
 def estimate_batch_cost(
