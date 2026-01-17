@@ -24,10 +24,16 @@ from collections import defaultdict
 import gc
 import contextlib
 
-import cv2
 import numpy as np
 from PIL import Image
 from loguru import logger
+
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    cv2 = None
+    HAS_CV2 = False
 
 # 导入缓存配置
 try:
@@ -438,6 +444,8 @@ class UnifiedImageProcessor:
 
     def _init_opencv_optimizations(self):
         """初始化OpenCV优化设置"""
+        if not HAS_CV2:
+            return
         try:
             with (
                 suppress_all_output()
@@ -491,6 +499,8 @@ class UnifiedImageProcessor:
 
     def _get_encode_params(self, format_type: str) -> List[int]:
         """获取编码参数"""
+        if not HAS_CV2:
+            return []
         try:
             if format_type == "JPEG":
                 return [cv2.IMWRITE_JPEG_QUALITY, self.config.jpeg_quality]
@@ -543,6 +553,10 @@ class UnifiedImageProcessor:
         return_with_mime: bool = True,
     ) -> str:
         """同步处理本地文件"""
+        if not HAS_CV2:
+            raise ImportError(
+                "图像处理功能需要安装 opencv-python。请运行: pip install flexllm[image]"
+            )
         try:
             with (
                 suppress_all_output()

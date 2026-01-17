@@ -36,6 +36,8 @@ dependencies = [
     "orjson",
     "json5>=0.9.0",
     "aiolimiter>=1.1.0",
+    "numpy",
+    "pillow",
 ]
 
 [project.scripts]
@@ -48,12 +50,10 @@ vertex = [
     "google-auth>=2.0.0",
 ]
 cache = [
-    "flaxkv2>=0.1.0",
+    "flaxkv2",
 ]
 image = [
-    "pillow>=9.0.0",
-    "opencv-python>=4.5.0",
-    "numpy>=1.20.0",
+    "opencv-python",
 ]
 cli = [
     "typer>=0.9.0",
@@ -74,11 +74,9 @@ dev = [
 test = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.20.0",
-    "flaxkv2>=0.1.0",
-    "pillow>=9.0.0",
-    "opencv-python>=4.5.0",
-    "numpy>=1.20.0",
     "pandas>=1.3.0",
+    "opencv-python",
+    "flaxkv2",
 ]
 
 [project.urls]

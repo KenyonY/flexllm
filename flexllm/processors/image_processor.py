@@ -300,7 +300,12 @@ async def encode_image_to_base64(
     Returns:
         Base64 encoded string (with optional MIME prefix)
     """
-    import cv2
+    try:
+        import cv2
+    except ImportError:
+        raise ImportError(
+            "图像处理功能需要安装 opencv-python。请运行: pip install flexllm[image]"
+        )
 
     if isinstance(image_source, Image.Image):
         image = image_source

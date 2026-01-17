@@ -12,12 +12,14 @@ LLM 响应缓存模块
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
-from flaxkv2 import FlaxKV
 from loguru import logger
 
 from .token_counter import messages_hash
+
+if TYPE_CHECKING:
+    from flaxkv2 import FlaxKV
 
 
 DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/maque/llm_response")
@@ -133,9 +135,16 @@ class ResponseCache:
     def __init__(self, config: Optional[ResponseCacheConfig] = None):
         self.config = config or ResponseCacheConfig.disabled()
         self._stats = {"hits": 0, "misses": 0}
-        self._db: Optional[FlaxKV] = None
+        self._db: Optional["FlaxKV"] = None
 
         if self.config.enabled:
+            try:
+                from flaxkv2 import FlaxKV
+            except ImportError:
+                raise ImportError(
+                    "缓存功能需要安装 flaxkv2。请运行: pip install flexllm[cache]"
+                )
+
             ttl = self.config.ttl if self.config.ttl > 0 else None
 
             if self.config.use_ipc:

@@ -119,11 +119,23 @@ class MllmClient(MllmClientBase):
         self.processor_instance = UnifiedImageProcessor(self.processor_config)
 
         # 延迟导入避免循环引用
-        from .table_processor import MllmTableProcessor
         from .folder_processor import MllmFolderProcessor
 
-        self.table = MllmTableProcessor(self)
+        self._table = None  # 延迟初始化
         self.folder = MllmFolderProcessor(self)
+
+    @property
+    def table(self):
+        """表格处理器（需要 pandas，延迟加载）"""
+        if self._table is None:
+            try:
+                from .table_processor import MllmTableProcessor
+                self._table = MllmTableProcessor(self)
+            except ImportError:
+                raise ImportError(
+                    "表格处理功能需要安装 pandas。请运行: pip install pandas"
+                )
+        return self._table
 
     def call_llm_sync(
         self,

@@ -391,7 +391,7 @@ class LLMClientBase(ABC):
                 file_buffer = []
                 last_flush_time = time.time()
 
-        def on_file_result(original_idx: int, content: Any, status: str = "success", error: str = None):
+        def on_file_result(original_idx: int, content: Any, status: str = "success", error: str = None, usage: dict = None):
             """文件输出回调"""
             nonlocal last_flush_time
             if file_writer is None:
@@ -404,6 +404,8 @@ class LLMClientBase(ABC):
             }
             if metadata_list is not None:
                 record["metadata"] = metadata_list[original_idx]
+            if usage is not None:
+                record["usage"] = usage
             if error:
                 record["error"] = error
             file_buffer.append(record)
@@ -470,9 +472,11 @@ class LLMClientBase(ABC):
                                     self._response_cache.set(
                                         messages_list[original_idx], extracted, model=effective_model, **kwargs
                                     )
-                                # 文件输出（存储 content）
-                                file_content = extracted.content if return_usage else extracted
-                                on_file_result(original_idx, file_content)
+                                # 文件输出（存储 content 和 usage）
+                                if return_usage:
+                                    on_file_result(original_idx, extracted.content, usage=extracted.usage)
+                                else:
+                                    on_file_result(original_idx, extracted)
                             except Exception as e:
                                 logger.warning(f"提取结果失败: {e}")
                                 cached_responses[original_idx] = None
@@ -516,9 +520,11 @@ class LLMClientBase(ABC):
                             try:
                                 extracted = extract_fn(result)
                                 responses[original_idx] = extracted
-                                # 文件输出（存储 content）
-                                file_content = extracted.content if return_usage else extracted
-                                on_file_result(original_idx, file_content)
+                                # 文件输出（存储 content 和 usage）
+                                if return_usage:
+                                    on_file_result(original_idx, extracted.content, usage=extracted.usage)
+                                else:
+                                    on_file_result(original_idx, extracted)
                             except Exception as e:
                                 logger.warning(f"Error: {e}, set content to None")
                                 responses[original_idx] = None
@@ -728,7 +734,7 @@ class LLMClientBase(ABC):
                 file_buffer = []
                 last_flush_time = time.time()
 
-        def on_file_result(original_idx: int, content: Any, status: str = "success", error: str = None):
+        def on_file_result(original_idx: int, content: Any, status: str = "success", error: str = None, usage: dict = None):
             nonlocal last_flush_time
             if file_writer is None:
                 return
@@ -740,6 +746,8 @@ class LLMClientBase(ABC):
             }
             if metadata_list is not None:
                 record["metadata"] = metadata_list[original_idx]
+            if usage is not None:
+                record["usage"] = usage
             if error:
                 record["error"] = error
             file_buffer.append(record)
@@ -836,15 +844,16 @@ class LLMClientBase(ABC):
                         else:
                             try:
                                 content = extractor(result)
+                                usage = self._extract_usage(result.data) if return_usage else None
                                 # 写入缓存
                                 if use_cache and self._response_cache and content is not None and not return_raw:
                                     self._response_cache.set(
                                         messages_list[original_idx], content, model=effective_model, **kwargs
                                     )
-                                on_file_result(original_idx, content)
+                                on_file_result(original_idx, content, usage=usage)
                                 # 在 result 对象上添加属性
                                 result.content = content
-                                result.usage = self._extract_usage(result.data) if return_usage else None
+                                result.usage = usage
                                 result.original_idx = original_idx
                                 success_count += 1
                                 total_latency += result.latency

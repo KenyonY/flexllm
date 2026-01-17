@@ -119,6 +119,45 @@ class FlexLLMConfig:
                 return path
         return None
 
+    def get_batch_config(self) -> dict:
+        """
+        获取 batch 命令的配置
+
+        配置优先级: 用户配置文件 > 默认值
+        返回合并后的完整配置字典
+        """
+        # 默认值
+        defaults = {
+            # 缓存配置
+            "cache": False,
+            "cache_ttl": 86400,
+            # 网络配置
+            "timeout": 120,
+            "retry_times": 3,
+            "retry_delay": 1.0,
+            # 采样参数
+            "top_p": None,
+            "top_k": None,
+            # 思考模式
+            "thinking": None,
+            # 处理配置
+            "preprocess_msg": False,
+            "flush_interval": 1.0,
+            # 输出配置
+            "return_usage": False,
+        }
+
+        # 从配置文件读取 batch 配置节
+        user_batch_config = self.config.get("batch", {})
+
+        # 合并配置（用户配置覆盖默认值）
+        result = {**defaults}
+        for key in defaults:
+            if key in user_batch_config:
+                result[key] = user_batch_config[key]
+
+        return result
+
 
 # 全局配置实例
 _config: Optional[FlexLLMConfig] = None
@@ -343,14 +382,22 @@ if HAS_TYPER:
         system: Annotated[Optional[str], Option("-s", "--system", help="全局 system prompt")] = None,
         temperature: Annotated[Optional[float], Option("-t", "--temperature", help="采样温度")] = None,
         max_tokens: Annotated[Optional[int], Option("--max-tokens", help="最大生成 token 数")] = None,
+        # 新增 CLI 快捷选项
+        cache: Annotated[Optional[bool], Option("--cache/--no-cache", help="启用/禁用响应缓存")] = None,
+        return_usage: Annotated[bool, Option("--return-usage", help="输出 token 统计")] = False,
+        preprocess_msg: Annotated[bool, Option("--preprocess-msg", help="预处理图片消息")] = False,
     ):
         """批量处理 JSONL 文件（支持断点续传）
 
         自动检测输入格式：openai_chat, alpaca, simple (q/question/prompt)
 
+        高级配置可在 ~/.flexllm/config.yaml 的 batch 节中设置。
+        CLI 参数优先级高于配置文件。
+
         Examples:
             flexllm batch input.jsonl -o output.jsonl
             flexllm batch input.jsonl -o output.jsonl -c 20 -m gpt-4
+            flexllm batch input.jsonl -o output.jsonl --cache --return-usage
             cat input.jsonl | flexllm batch -o output.jsonl
         """
         if not output:
@@ -377,6 +424,14 @@ if HAS_TYPER:
         base_url = model_config.get("base_url")
         api_key = model_config.get("api_key", "EMPTY")
 
+        # 获取 batch 配置（配置文件 + 默认值）
+        batch_config = config.get_batch_config()
+
+        # CLI 参数覆盖配置文件
+        effective_cache = cache if cache is not None else batch_config["cache"]
+        effective_return_usage = return_usage or batch_config["return_usage"]
+        effective_preprocess_msg = preprocess_msg or batch_config["preprocess_msg"]
+
         try:
             records, format_type, message_fields = parse_batch_input(input)
             print(f"输入格式: {format_type}", file=sys.stderr)
@@ -396,35 +451,56 @@ if HAS_TYPER:
 
             async def _run_batch():
                 from flexllm import LLMClient
+                from flexllm.response_cache import ResponseCacheConfig
+
+                # 构建缓存配置
+                cache_config = None
+                if effective_cache:
+                    cache_config = ResponseCacheConfig.ipc(ttl=batch_config["cache_ttl"])
 
                 client_kwargs = {
                     "model": model_id,
                     "base_url": base_url,
                     "api_key": api_key,
                     "concurrency_limit": concurrency,
+                    "timeout": batch_config["timeout"],
+                    "retry_times": batch_config["retry_times"],
+                    "retry_delay": batch_config["retry_delay"],
+                    "cache": cache_config,
                 }
                 if max_qps is not None:
                     client_kwargs["max_qps"] = max_qps
 
                 client = LLMClient(**client_kwargs)
 
+                # 构建 chat_completions_batch 的 kwargs
                 kwargs = {}
                 if temperature is not None:
                     kwargs["temperature"] = temperature
                 if max_tokens is not None:
                     kwargs["max_tokens"] = max_tokens
+                # 从配置文件读取采样参数
+                if batch_config["top_p"] is not None:
+                    kwargs["top_p"] = batch_config["top_p"]
+                if batch_config["top_k"] is not None:
+                    kwargs["top_k"] = batch_config["top_k"]
+                if batch_config["thinking"] is not None:
+                    kwargs["thinking"] = batch_config["thinking"]
 
                 results, summary = await client.chat_completions_batch(
                     messages_list=messages_list,
                     output_jsonl=output,
                     show_progress=True,
                     return_summary=True,
+                    return_usage=effective_return_usage,
+                    preprocess_msg=effective_preprocess_msg,
+                    flush_interval=batch_config["flush_interval"],
                     metadata_list=metadata_list,
                     **kwargs,
                 )
-                return summary
+                return results, summary
 
-            summary = asyncio.run(_run_batch())
+            results, summary = asyncio.run(_run_batch())
 
             if summary:
                 print(f"\n完成: {summary}", file=sys.stderr)
@@ -714,6 +790,32 @@ models:
     provider: openai
     base_url: http://localhost:11434/v1
     api_key: EMPTY
+
+# batch 命令配置（可选）
+# 这些配置可通过 CLI 参数覆盖
+# batch:
+#   # 缓存配置
+#   cache: false              # 是否启用响应缓存
+#   cache_ttl: 86400          # 缓存过期时间（秒），默认 24 小时
+#
+#   # 网络配置
+#   timeout: 120              # 请求超时时间（秒）
+#   retry_times: 3            # 重试次数
+#   retry_delay: 1.0          # 重试延迟（秒）
+#
+#   # 采样参数（覆盖模型默认值）
+#   # top_p: 0.9
+#   # top_k: 50
+#
+#   # 思考模式（适用于支持的模型如 DeepSeek-R1）
+#   # thinking: true          # 或 "minimal"/"low"/"medium"/"high"
+#
+#   # 处理配置
+#   preprocess_msg: false     # 是否预处理图片消息（URL 转 base64）
+#   flush_interval: 1.0       # 文件刷新间隔（秒）
+#
+#   # 输出配置
+#   return_usage: false       # 是否输出 token 统计
 """
 
         try:
