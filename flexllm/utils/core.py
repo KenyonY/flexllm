@@ -1,8 +1,8 @@
 """Core utilities for flexllm"""
 
-from functools import wraps
 import asyncio
 import logging
+from functools import wraps
 
 
 def async_retry(

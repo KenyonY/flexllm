@@ -6,8 +6,7 @@ flexllm 快速入门示例
 安装: pip install flexllm[all]
 """
 
-import asyncio
-from flexllm import LLMClient, GeminiClient, LLMClientPool, ResponseCacheConfig
+from flexllm import GeminiClient, LLMClient, LLMClientPool, ResponseCacheConfig
 
 # ============================================================
 # 1. 基础用法 - 单次请求
@@ -37,19 +36,17 @@ async def single_request():
 # ============================================================
 # 核心特性：中断后重新运行，自动从断点恢复
 
+
 async def batch_processing():
     client = LLMClient(
         model="gpt-4o-mini",
         base_url="https://api.openai.com/v1",
         api_key="your-api-key",
         concurrency_limit=50,  # 并发数
-        max_qps=100,           # QPS 限制
+        max_qps=100,  # QPS 限制
     )
 
-    messages_list = [
-        [{"role": "user", "content": f"{i}+{i}等于多少？"}]
-        for i in range(100)
-    ]
+    messages_list = [[{"role": "user", "content": f"{i}+{i}等于多少？"}] for i in range(100)]
 
     results = await client.chat_completions_batch(
         messages_list,
@@ -62,6 +59,7 @@ async def batch_processing():
 # ============================================================
 # 3. 响应缓存 - 避免重复调用
 # ============================================================
+
 
 async def with_cache():
     client = LLMClient(
@@ -81,6 +79,7 @@ async def with_cache():
 # ============================================================
 # 4. 流式输出
 # ============================================================
+
 
 async def streaming():
     async for chunk in client.chat_completions_stream(messages):
@@ -113,6 +112,7 @@ local = LLMClient(
 # 6. 负载均衡 - 多节点故障转移
 # ============================================================
 
+
 async def load_balancing():
     pool = LLMClientPool(
         endpoints=[
@@ -120,7 +120,7 @@ async def load_balancing():
             {"base_url": "http://host2:8000/v1", "api_key": "k2", "model": "qwen"},
         ],
         load_balance="round_robin",  # round_robin/weighted/random/fallback
-        fallback=True,               # 节点故障自动切换
+        fallback=True,  # 节点故障自动切换
     )
 
     # 和 LLMClient API 完全一致
@@ -135,19 +135,22 @@ async def load_balancing():
 # 7. 工具调用 (Function Calling)
 # ============================================================
 
+
 async def tool_use():
-    tools = [{
-        "type": "function",
-        "function": {
-            "name": "get_weather",
-            "description": "获取天气",
-            "parameters": {
-                "type": "object",
-                "properties": {"location": {"type": "string"}},
-                "required": ["location"]
-            }
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "获取天气",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                },
+            },
         }
-    }]
+    ]
 
     result = await client.chat_completions(
         messages=[{"role": "user", "content": "东京天气怎么样？"}],

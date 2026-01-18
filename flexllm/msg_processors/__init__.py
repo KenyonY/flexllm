@@ -3,38 +3,38 @@
 # 核心图像处理功能
 from .image_processor import (
     ImageCacheConfig,
+    decode_base64_to_bytes,
+    decode_base64_to_file,
+    decode_base64_to_pil,
+    encode_base64_from_local_path,
+    encode_base64_from_pil,
     encode_image_to_base64,
     encode_to_base64,
     get_pil_image,
     get_pil_image_sync,
-    decode_base64_to_pil,
-    decode_base64_to_file,
-    decode_base64_to_bytes,
-    encode_base64_from_local_path,
-    encode_base64_from_pil,
-)
-
-# 基础消息处理功能
-from .messages_processor import (
-    process_content_recursive,
-    messages_preprocess,
-    batch_messages_preprocess,
-    batch_process_messages,  # 别名
-)
-
-# 统一高性能处理器（推荐用于生产环境）
-from .unified_processor import (
-    UnifiedProcessorConfig,
-    UnifiedImageProcessor,
-    UnifiedMemoryCache,
-    batch_process_messages as unified_batch_process_messages,
-    unified_encode_image_to_base64,
-    get_global_unified_processor,
-    cleanup_global_unified_processor,
 )
 
 # 便捷的类接口
 from .image_processor_helper import ImageProcessor
+
+# 基础消息处理功能
+from .messages_processor import (
+    batch_messages_preprocess,
+    batch_process_messages,  # 别名
+    messages_preprocess,
+    process_content_recursive,
+)
+
+# 统一高性能处理器（推荐用于生产环境）
+from .unified_processor import (
+    UnifiedImageProcessor,
+    UnifiedMemoryCache,
+    UnifiedProcessorConfig,
+    cleanup_global_unified_processor,
+    get_global_unified_processor,
+    unified_encode_image_to_base64,
+)
+from .unified_processor import batch_process_messages as unified_batch_process_messages
 
 __all__ = [
     # 图像缓存配置

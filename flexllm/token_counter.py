@@ -1,5 +1,4 @@
 #! /usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 Token 计数和成本估算模块
@@ -10,21 +9,25 @@ Token 计数和成本估算模块
 
 import hashlib
 import json
-from typing import Union, List, Dict, Any, Optional
+from typing import Any
 
 # tiktoken 是可选依赖
 try:
     import tiktoken
+
     TIKTOKEN_AVAILABLE = True
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
 # 从 pricing 模块导入定价功能
-from .pricing import get_pricing, reload_pricing, estimate_cost as _estimate_cost
+from .pricing import estimate_cost as _estimate_cost
+from .pricing import get_pricing
+
 
 # 兼容旧 API：MODEL_PRICING 现在是动态获取的
 def _get_model_pricing():
     return get_pricing()
+
 
 # 为了向后兼容，保留 MODEL_PRICING 变量
 MODEL_PRICING = _get_model_pricing()
@@ -58,7 +61,7 @@ MODEL_TO_ENCODING = {
 }
 
 # 编码器缓存
-_encoding_cache: Dict[str, Any] = {}
+_encoding_cache: dict[str, Any] = {}
 
 
 def _get_encoding(model: str):
@@ -77,15 +80,12 @@ def _estimate_tokens_simple(text: str) -> int:
     if not text:
         return 0
     # 粗略统计中文字符
-    chinese_chars = sum(1 for c in text if '\u4e00' <= c <= '\u9fff')
+    chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
     other_chars = len(text) - chinese_chars
     return chinese_chars // 2 + other_chars // 4 + 1
 
 
-def count_tokens(
-    content: Union[str, List[Dict], Dict],
-    model: str = "gpt-4o"
-) -> int:
+def count_tokens(content: str | list[dict] | dict, model: str = "gpt-4o") -> int:
     """
     计算 token 数量
 
@@ -129,10 +129,7 @@ def count_tokens(
         return _estimate_tokens_simple(text)
 
 
-def count_messages_tokens(
-    messages_list: List[List[Dict]],
-    model: str = "gpt-4o"
-) -> int:
+def count_messages_tokens(messages_list: list[list[dict]], model: str = "gpt-4o") -> int:
     """
     批量计算 messages 的 token 总数
 
@@ -146,11 +143,7 @@ def count_messages_tokens(
     return sum(count_tokens(msgs, model) for msgs in messages_list)
 
 
-def estimate_cost(
-    input_tokens: int,
-    output_tokens: int = 0,
-    model: str = "gpt-4o"
-) -> float:
+def estimate_cost(input_tokens: int, output_tokens: int = 0, model: str = "gpt-4o") -> float:
     """
     估算 API 调用成本
 
@@ -166,10 +159,8 @@ def estimate_cost(
 
 
 def estimate_batch_cost(
-    messages_list: List[List[Dict]],
-    model: str = "gpt-4o",
-    avg_output_tokens: int = 500
-) -> Dict[str, Any]:
+    messages_list: list[list[dict]], model: str = "gpt-4o", avg_output_tokens: int = 500
+) -> dict[str, Any]:
     """
     估算批量处理的成本
 
@@ -195,7 +186,7 @@ def estimate_batch_cost(
     }
 
 
-def _normalize_message_for_hash(message: Dict) -> Dict:
+def _normalize_message_for_hash(message: dict) -> dict:
     """
     规范化消息用于 hash 计算，将 base64 图片替换为其内容 hash
 
@@ -227,7 +218,7 @@ def _normalize_message_for_hash(message: Dict) -> Dict:
                         # 用短 hash 替代完整 base64
                         normalized_item = {
                             "type": item.get("type", "image_url"),
-                            "image_url": {"url": f"img_hash:{img_hash}"}
+                            "image_url": {"url": f"img_hash:{img_hash}"},
                         }
                         normalized_content.append(normalized_item)
                     else:
@@ -241,11 +232,7 @@ def _normalize_message_for_hash(message: Dict) -> Dict:
     return result
 
 
-def messages_hash(
-    messages: List[Dict],
-    model: str = "",
-    **kwargs
-) -> str:
+def messages_hash(messages: list[dict], model: str = "", **kwargs) -> str:
     """
     生成 messages 的唯一哈希值，用于缓存键
 
@@ -264,7 +251,7 @@ def messages_hash(
     cache_key_data = {
         "messages": normalized_messages,
         "model": model,
-        **{k: v for k, v in kwargs.items() if v is not None}
+        **{k: v for k, v in kwargs.items() if v is not None},
     }
     content = json.dumps(cache_key_data, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(content.encode()).hexdigest()

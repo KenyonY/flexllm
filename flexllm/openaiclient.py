@@ -4,7 +4,7 @@ OpenAI 兼容 API 客户端
 支持 OpenAI、vLLM、通义千问、DeepSeek 等兼容 OpenAI API 的服务。
 """
 
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import TYPE_CHECKING
 
 from loguru import logger
 
@@ -12,7 +12,7 @@ from .base_client import LLMClientBase
 from .cache import ResponseCacheConfig
 
 if TYPE_CHECKING:
-    from .async_api.interface import RequestResult
+    pass
 
 
 class OpenAIClient(LLMClientBase):
@@ -69,7 +69,7 @@ class OpenAIClient(LLMClientBase):
         retry_delay: float = 0.55,
         cache_image: bool = False,
         cache_dir: str = "image_cache",
-        cache: Optional[ResponseCacheConfig] = None,
+        cache: ResponseCacheConfig | None = None,
         **kwargs,
     ):
         super().__init__(
@@ -101,11 +101,11 @@ class OpenAIClient(LLMClientBase):
 
     def _build_request_body(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str,
         stream: bool = False,
         max_tokens: int = None,
-        thinking: Union[bool, None] = None,
+        thinking: bool | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -142,14 +142,14 @@ class OpenAIClient(LLMClientBase):
         body.update(kwargs)
         return body
 
-    def _extract_content(self, response_data: dict) -> Optional[str]:
+    def _extract_content(self, response_data: dict) -> str | None:
         try:
             return response_data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:
             logger.warning(f"Failed to extract content: {e}")
             return None
 
-    def _extract_stream_content(self, data: dict) -> Optional[str]:
+    def _extract_stream_content(self, data: dict) -> str | None:
         try:
             if "choices" in data and len(data["choices"]) > 0:
                 return data["choices"][0].get("delta", {}).get("content")
@@ -170,11 +170,7 @@ class OpenAIClient(LLMClientBase):
             if not tool_calls_data:
                 return None
             return [
-                ToolCall(
-                    id=tc["id"],
-                    type=tc["type"],
-                    function=tc["function"]
-                )
+                ToolCall(id=tc["id"], type=tc["type"], function=tc["function"])
                 for tc in tool_calls_data
             ]
         except (KeyError, IndexError):
@@ -244,7 +240,7 @@ class OpenAIClient(LLMClientBase):
 
     # ========== OpenAI 特有方法 ==========
 
-    def model_list(self) -> List[str]:
+    def model_list(self) -> list[str]:
         """获取可用模型列表"""
         import requests
 

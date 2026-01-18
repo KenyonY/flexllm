@@ -27,26 +27,27 @@ Example:
 """
 
 import asyncio
-from typing import List, Dict, Any, Union, Optional, Literal
 from dataclasses import dataclass
+from typing import Any, Literal
 
 from loguru import logger
 
-from .llm_client import LLMClient
 from .base_client import ChatCompletionResult
-from .provider_router import ProviderRouter, ProviderConfig, Strategy
+from .llm_client import LLMClient
+from .provider_router import ProviderConfig, ProviderRouter, Strategy
 
 
 @dataclass
 class EndpointConfig:
     """Endpoint 配置"""
+
     base_url: str
     api_key: str = "EMPTY"
     model: str = None
     provider: Literal["openai", "gemini", "auto"] = "auto"
     weight: float = 1.0
     # 其他 LLMClient 参数
-    extra: Dict[str, Any] = None
+    extra: dict[str, Any] = None
 
     def __post_init__(self):
         if self.extra is None:
@@ -71,8 +72,8 @@ class LLMClientPool:
 
     def __init__(
         self,
-        endpoints: List[Union[Dict, EndpointConfig]] = None,
-        clients: List[LLMClient] = None,
+        endpoints: list[dict | EndpointConfig] = None,
+        clients: list[LLMClient] = None,
         load_balance: Strategy = "round_robin",
         fallback: bool = True,
         max_fallback_attempts: int = None,
@@ -182,12 +183,12 @@ class LLMClientPool:
 
     async def chat_completions(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         **kwargs,
-    ) -> Union[str, ChatCompletionResult]:
+    ) -> str | ChatCompletionResult:
         """
         单条聊天完成（支持故障转移）
 
@@ -226,7 +227,7 @@ class LLMClientPool:
                 )
 
                 # 检查是否返回了 RequestResult（表示失败）
-                if hasattr(result, 'status') and result.status != 'success':
+                if hasattr(result, "status") and result.status != "success":
                     raise RuntimeError(f"请求失败: {getattr(result, 'error', result)}")
 
                 self._router.mark_success(provider)
@@ -244,12 +245,12 @@ class LLMClientPool:
 
     def chat_completions_sync(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         **kwargs,
-    ) -> Union[str, ChatCompletionResult]:
+    ) -> str | ChatCompletionResult:
         """同步版本的聊天完成"""
         return asyncio.run(
             self.chat_completions(
@@ -263,17 +264,17 @@ class LLMClientPool:
 
     async def chat_completions_batch(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         distribute: bool = True,
         **kwargs,
-    ) -> Union[List[str], List[ChatCompletionResult], tuple]:
+    ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
         批量聊天完成（支持负载均衡和故障转移）
 
@@ -326,13 +327,13 @@ class LLMClientPool:
 
     async def _batch_with_fallback(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         **kwargs,
     ):
@@ -377,13 +378,13 @@ class LLMClientPool:
 
     async def _batch_distributed(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         **kwargs,
     ):
@@ -396,6 +397,7 @@ class LLMClientPool:
         import json
         import time
         from pathlib import Path
+
         from tqdm import tqdm
 
         n = len(messages_list)
@@ -411,7 +413,7 @@ class LLMClientPool:
             output_path = Path(output_jsonl)
             if output_path.exists():
                 records = []
-                with open(output_path, "r", encoding="utf-8") as f:
+                with open(output_path, encoding="utf-8") as f:
                     for line in f:
                         try:
                             record = json.loads(line.strip())
@@ -455,7 +457,13 @@ class LLMClientPool:
         if pending_count == 0:
             logger.info("所有任务已完成，无需执行")
             if return_summary:
-                return results, {"total": n, "success": n, "failed": 0, "cached": cached_count, "elapsed": 0}
+                return results, {
+                    "total": n,
+                    "success": n,
+                    "failed": 0,
+                    "cached": cached_count,
+                    "elapsed": 0,
+                }
             return results
 
         logger.info(f"待执行: {pending_count}/{n}")
@@ -508,7 +516,7 @@ class LLMClientPool:
                     )
 
                     # 检查是否返回了 RequestResult（表示失败）
-                    if hasattr(result, 'status') and result.status != 'success':
+                    if hasattr(result, "status") and result.status != "success":
                         raise RuntimeError(f"请求失败: {getattr(result, 'error', result)}")
 
                     results[idx] = result
@@ -520,12 +528,14 @@ class LLMClientPool:
 
                         # 写入文件
                         if file_writer:
-                            file_buffer.append({
-                                "index": idx,
-                                "output": result,
-                                "status": "success",
-                                "input": msg,
-                            })
+                            file_buffer.append(
+                                {
+                                    "index": idx,
+                                    "output": result,
+                                    "status": "success",
+                                    "input": msg,
+                                }
+                            )
                             if time.time() - last_flush_time >= flush_interval:
                                 flush_to_file()
 
@@ -540,13 +550,15 @@ class LLMClientPool:
 
                         # 写入失败记录
                         if file_writer:
-                            file_buffer.append({
-                                "index": idx,
-                                "output": None,
-                                "status": "error",
-                                "error": str(e),
-                                "input": msg,
-                            })
+                            file_buffer.append(
+                                {
+                                    "index": idx,
+                                    "output": None,
+                                    "status": "error",
+                                    "error": str(e),
+                                    "input": msg,
+                                }
+                            )
                             if time.time() - last_flush_time >= flush_interval:
                                 flush_to_file()
 
@@ -556,7 +568,7 @@ class LLMClientPool:
             workers = []
             for client_idx, client in enumerate(self._clients):
                 # 获取 client 的并发限制
-                concurrency = getattr(client._client, '_concurrency_limit', 10)
+                concurrency = getattr(client._client, "_concurrency_limit", 10)
                 for _ in range(concurrency):
                     workers.append(worker(client_idx))
 
@@ -584,17 +596,17 @@ class LLMClientPool:
 
     def chat_completions_batch_sync(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         distribute: bool = True,
         **kwargs,
-    ) -> Union[List[str], List[ChatCompletionResult], tuple]:
+    ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
         return asyncio.run(
             self.chat_completions_batch(
@@ -613,7 +625,7 @@ class LLMClientPool:
 
     async def chat_completions_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_usage: bool = False,
         **kwargs,

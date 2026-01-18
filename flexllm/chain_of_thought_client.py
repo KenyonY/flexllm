@@ -1,29 +1,29 @@
 #! /usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 Chain of Thought client for orchestrating multiple LLM calls.
 """
 
 import asyncio
-import time
-from abc import ABC, abstractmethod
-from enum import Enum
-from typing import Callable, Dict, Any, Optional, List, Union
-from dataclasses import dataclass, field
-
 import logging
 import sys
+import time
+from abc import ABC, abstractmethod
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime
-from .openaiclient import OpenAIClient
-from .async_api.progress import ProgressTracker, ProgressBarConfig
-from .async_api.concurrent_call import concurrent_executor
-
-# Rich库安全导入和使用
+from enum import Enum
+from typing import Any
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
+
+from .async_api.progress import ProgressBarConfig, ProgressTracker
+from .openaiclient import OpenAIClient
+
+# Rich库安全导入和使用
+
 
 # 创建全局console实例
 chain_console = Console(force_terminal=True, width=100, color_system="auto")
@@ -80,15 +80,11 @@ class ChainProgressTracker:
                 latency: float = 0.0
 
             self.ChainResult = ChainResult
-            self.tracker = ProgressTracker(
-                total_chains, concurrency=1, config=self.config
-            )
+            self.tracker = ProgressTracker(total_chains, concurrency=1, config=self.config)
         else:
             self.tracker = None
 
-    def update(
-        self, chain_index: int, success: bool = True, execution_time: float = 0.0
-    ):
+    def update(self, chain_index: int, success: bool = True, execution_time: float = 0.0):
         """更新进度"""
         self.completed_chains += 1
 
@@ -119,9 +115,9 @@ class ChainProgressTracker:
         return {
             "completed": self.completed_chains,
             "total": self.total_chains,
-            "progress_percent": (self.completed_chains / self.total_chains * 100)
-            if self.total_chains > 0
-            else 0,
+            "progress_percent": (
+                (self.completed_chains / self.total_chains * 100) if self.total_chains > 0 else 0
+            ),
             "elapsed_time": elapsed_time,
             "remaining_time": remaining_time,
             "rate": self.completed_chains / elapsed_time if elapsed_time > 0 else 0,
@@ -221,8 +217,8 @@ class ExecutionConfig:
         enable_progress: 是否显示进度信息
     """
 
-    step_timeout: Optional[float] = None
-    chain_timeout: Optional[float] = None
+    step_timeout: float | None = None
+    chain_timeout: float | None = None
     max_retries: int = 0
     retry_delay: float = 1.0
     enable_monitoring: bool = True
@@ -247,11 +243,11 @@ class StepExecutionInfo:
 
     step_name: str
     status: StepStatus = StepStatus.RUNNING
-    start_time: Optional[float] = None
-    end_time: Optional[float] = None
-    execution_time: Optional[float] = None
+    start_time: float | None = None
+    end_time: float | None = None
+    execution_time: float | None = None
     retry_count: int = 0
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -272,12 +268,12 @@ class ChainExecutionInfo:
 
     chain_id: str
     status: ChainStatus = ChainStatus.RUNNING
-    start_time: Optional[float] = None
-    end_time: Optional[float] = None
-    total_execution_time: Optional[float] = None
-    steps_info: List[StepExecutionInfo] = field(default_factory=list)
+    start_time: float | None = None
+    end_time: float | None = None
+    total_execution_time: float | None = None
+    steps_info: list[StepExecutionInfo] = field(default_factory=list)
     completed_steps: int = 0
-    error: Optional[str] = None
+    error: str | None = None
 
 
 class ChainMonitor(ABC):
@@ -313,9 +309,7 @@ class ChainMonitor(ABC):
         pass
 
     @abstractmethod
-    async def on_timeout(
-        self, timeout_type: str, chain_info: ChainExecutionInfo
-    ) -> None:
+    async def on_timeout(self, timeout_type: str, chain_info: ChainExecutionInfo) -> None:
         """超时时调用"""
         pass
 
@@ -336,9 +330,7 @@ class DefaultChainMonitor(ChainMonitor):
     def _should_log(self, level: str) -> bool:
         return self.log_levels.get(level, 1) >= self.current_level
 
-    def _log(
-        self, level: str, message: str, chain_info: Optional[ChainExecutionInfo] = None
-    ) -> None:
+    def _log(self, level: str, message: str, chain_info: ChainExecutionInfo | None = None) -> None:
         if self._should_log(level):
             # 添加简化的链条ID前缀以区分不同链条的日志
             if chain_info:
@@ -360,7 +352,7 @@ class DefaultChainMonitor(ChainMonitor):
 
     async def on_chain_start(self, chain_info: ChainExecutionInfo) -> None:
         if self.config.enable_monitoring:
-            self._log("INFO", f"链条开始执行", chain_info)
+            self._log("INFO", "链条开始执行", chain_info)
 
     async def on_chain_end(self, chain_info: ChainExecutionInfo) -> None:
         if self.config.enable_monitoring:
@@ -375,9 +367,7 @@ class DefaultChainMonitor(ChainMonitor):
     ) -> None:
         if self.config.enable_monitoring:
             progress = f"({chain_info.completed_steps + 1})"
-            self._log(
-                "DEBUG", f"步骤 {step_info.step_name} 开始执行 {progress}", chain_info
-            )
+            self._log("DEBUG", f"步骤 {step_info.step_name} 开始执行 {progress}", chain_info)
 
             if self.config.enable_progress:
                 # 使用带链条ID的格式
@@ -390,9 +380,7 @@ class DefaultChainMonitor(ChainMonitor):
         self, step_info: StepExecutionInfo, chain_info: ChainExecutionInfo
     ) -> None:
         if self.config.enable_monitoring:
-            status_msg = (
-                f"步骤 {step_info.step_name} 执行完成 - 状态: {step_info.status.value}"
-            )
+            status_msg = f"步骤 {step_info.step_name} 执行完成 - 状态: {step_info.status.value}"
             if step_info.execution_time:
                 status_msg += f", 耗时: {step_info.execution_time:.2f}秒"
             if step_info.retry_count > 0:
@@ -403,9 +391,7 @@ class DefaultChainMonitor(ChainMonitor):
         if self.config.enable_monitoring:
             self._log("ERROR", f"发生错误: {str(error)}", chain_info)
 
-    async def on_timeout(
-        self, timeout_type: str, chain_info: ChainExecutionInfo
-    ) -> None:
+    async def on_timeout(self, timeout_type: str, chain_info: ChainExecutionInfo) -> None:
         if self.config.enable_monitoring:
             self._log("WARNING", f"{timeout_type}超时", chain_info)
 
@@ -416,7 +402,7 @@ class ExecutionController:
     def __init__(self, config: ExecutionConfig):
         self.config = config
 
-    async def check_timeout(self, start_time: float, timeout: Optional[float]) -> bool:
+    async def check_timeout(self, start_time: float, timeout: float | None) -> bool:
         """检查是否超时"""
         if timeout is None:
             return False
@@ -440,13 +426,13 @@ class StepResult:
     """
 
     step_name: str
-    messages: List[Dict[str, Any]]
+    messages: list[dict[str, Any]]
     response: str
-    model_params: Dict[str, Any] = field(default_factory=dict)
-    execution_time: Optional[float] = None
+    model_params: dict[str, Any] = field(default_factory=dict)
+    execution_time: float | None = None
     status: StepStatus = StepStatus.COMPLETED
     retry_count: int = 0
-    error: Optional[str] = None
+    error: str | None = None
 
 
 @dataclass
@@ -461,16 +447,16 @@ class Context:
         execution_info: 链条执行信息（用于监控）
     """
 
-    history: List[StepResult] = field(default_factory=list)
-    query: Optional[str] = None
-    custom_data: Dict[str, Any] = field(default_factory=dict)
-    execution_info: Optional[ChainExecutionInfo] = None
+    history: list[StepResult] = field(default_factory=list)
+    query: str | None = None
+    custom_data: dict[str, Any] = field(default_factory=dict)
+    execution_info: ChainExecutionInfo | None = None
 
-    def get_last_response(self) -> Optional[str]:
+    def get_last_response(self) -> str | None:
         """获取最后一个步骤的响应。"""
         return self.history[-1].response if self.history else None
 
-    def get_response_by_step(self, step_name: str) -> Optional[str]:
+    def get_response_by_step(self, step_name: str) -> str | None:
         """根据步骤名称获取响应。"""
         for step_result in self.history:
             if step_result.step_name == step_name:
@@ -489,25 +475,23 @@ class Context:
         """获取自定义数据。"""
         return self.custom_data.get(key, default)
 
-    def get_execution_summary(self) -> Dict[str, Any]:
+    def get_execution_summary(self) -> dict[str, Any]:
         """获取执行摘要信息"""
         total_time = sum(s.execution_time or 0 for s in self.history)
         total_retries = sum(s.retry_count for s in self.history)
-        failed_steps = [
-            s.step_name for s in self.history if s.status == StepStatus.FAILED
-        ]
+        failed_steps = [s.step_name for s in self.history if s.status == StepStatus.FAILED]
 
         return {
             "total_steps": len(self.history),
             "total_execution_time": total_time,
             "total_retries": total_retries,
             "failed_steps": failed_steps,
-            "success_rate": len(
-                [s for s in self.history if s.status == StepStatus.COMPLETED]
-            )
-            / len(self.history)
-            if self.history
-            else 0,
+            "success_rate": (
+                len([s for s in self.history if s.status == StepStatus.COMPLETED])
+                / len(self.history)
+                if self.history
+                else 0
+            ),
         }
 
 
@@ -524,9 +508,9 @@ class Step:
     """
 
     name: str
-    prepare_messages_fn: Callable[[Context], List[Dict[str, Any]]]
-    get_next_step_fn: Callable[[str, Context], Optional[str]]
-    model_params: Dict[str, Any] = field(default_factory=dict)
+    prepare_messages_fn: Callable[[Context], list[dict[str, Any]]]
+    get_next_step_fn: Callable[[str, Context], str | None]
+    model_params: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -541,8 +525,8 @@ class LinearStep:
     """
 
     name: str
-    prepare_messages_fn: Callable[[Context], List[Dict[str, Any]]]
-    model_params: Dict[str, Any] = field(default_factory=dict)
+    prepare_messages_fn: Callable[[Context], list[dict[str, Any]]]
+    model_params: dict[str, Any] = field(default_factory=dict)
 
 
 class ChainOfThoughtClient:
@@ -554,7 +538,7 @@ class ChainOfThoughtClient:
     def __init__(
         self,
         openai_client: OpenAIClient,
-        execution_config: Optional[ExecutionConfig] = None,
+        execution_config: ExecutionConfig | None = None,
     ):
         """
         初始化思想链客户端。
@@ -564,7 +548,7 @@ class ChainOfThoughtClient:
             execution_config: 执行配置，如果为None则使用默认配置。
         """
         self.openai_client = openai_client
-        self.steps: Dict[str, Step] = {}
+        self.steps: dict[str, Step] = {}
         self.execution_config = execution_config or ExecutionConfig()
         self.monitor: ChainMonitor = DefaultChainMonitor(self.execution_config)
         self._chain_counter = 0
@@ -584,7 +568,7 @@ class ChainOfThoughtClient:
             raise ValueError(f"步骤 '{step.name}' 已存在。请确保每个步骤名称唯一。")
         self.steps[step.name] = step
 
-    def add_steps(self, steps: List[Step]):
+    def add_steps(self, steps: list[Step]):
         """
         向客户端批量注册多个步骤。
 
@@ -594,9 +578,7 @@ class ChainOfThoughtClient:
         for step in steps:
             self.add_step(step)
 
-    def create_linear_chain(
-        self, linear_steps: List[LinearStep], chain_name: str = "linear_chain"
-    ):
+    def create_linear_chain(self, linear_steps: list[LinearStep], chain_name: str = "linear_chain"):
         """
         创建一个线性的步骤链条，每个步骤按顺序执行。
 
@@ -610,7 +592,7 @@ class ChainOfThoughtClient:
         def create_next_step_fn(current_index: int, total_steps: int):
             """为线性链条创建next_step函数"""
 
-            def next_step_fn(response: str, context: Context) -> Optional[str]:
+            def next_step_fn(response: str, context: Context) -> str | None:
                 if current_index < total_steps - 1:
                     return f"{chain_name}_{current_index + 1}"
                 else:
@@ -631,7 +613,7 @@ class ChainOfThoughtClient:
 
         return f"{chain_name}_0"  # 返回第一个步骤的名称
 
-    def create_context(self, initial_data: Optional[Dict[str, Any]] = None) -> Context:
+    def create_context(self, initial_data: dict[str, Any] | None = None) -> Context:
         """
         创建一个新的上下文对象。
 
@@ -667,7 +649,7 @@ class ChainOfThoughtClient:
         step_info: StepExecutionInfo,
         chain_info: ChainExecutionInfo,
         show_step_details: bool = False,
-    ) -> Optional[str]:
+    ) -> str | None:
         """执行单个步骤，包含重试逻辑"""
         last_error = None
 
@@ -683,9 +665,7 @@ class ChainOfThoughtClient:
                     chain_short_id = chain_info.chain_id.split("_")[-1][-4:]
                     chain_prefix = f"[链条{chain_short_id}] "
 
-                    chain_logger.info(
-                        f"{chain_prefix}\n📝 步骤 '{step_info.step_name}' 输入消息:"
-                    )
+                    chain_logger.info(f"{chain_prefix}\n📝 步骤 '{step_info.step_name}' 输入消息:")
                     for i, msg in enumerate(messages):
                         role = msg.get("role", "unknown")
                         content = msg.get("content", "")
@@ -724,15 +704,11 @@ class ChainOfThoughtClient:
                 if show_step_details:
                     chain_short_id = chain_info.chain_id.split("_")[-1][-4:]
                     chain_prefix = f"[链条{chain_short_id}] "
-                    chain_logger.success(
-                        f"{chain_prefix}✅ 步骤 '{step_info.step_name}' 输出响应:"
-                    )
+                    chain_logger.success(f"{chain_prefix}✅ 步骤 '{step_info.step_name}' 输出响应:")
                     chain_logger.info(
                         f"{chain_prefix}   📄 响应内容: {response_content[:200]}{'...' if len(response_content) > 200 else ''}"
                     )
-                    chain_logger.info(
-                        f"{chain_prefix}   ⏱️  执行时间: {execution_time:.3f}秒"
-                    )
+                    chain_logger.info(f"{chain_prefix}   ⏱️  执行时间: {execution_time:.3f}秒")
                     if attempt > 0:
                         chain_logger.success(f"{chain_prefix}   🔄 重试成功")
 
@@ -741,15 +717,11 @@ class ChainOfThoughtClient:
 
             except asyncio.TimeoutError:
                 step_info.status = StepStatus.TIMEOUT
-                step_info.error = (
-                    f"步骤执行超时（{self.execution_config.step_timeout}秒）"
-                )
+                step_info.error = f"步骤执行超时（{self.execution_config.step_timeout}秒）"
                 if show_step_details:
                     chain_short_id = chain_info.chain_id.split("_")[-1][-4:]
                     chain_prefix = f"[链条{chain_short_id}] "
-                    chain_logger.error(
-                        f"{chain_prefix}⏰ 步骤 '{step_info.step_name}' 执行超时"
-                    )
+                    chain_logger.error(f"{chain_prefix}⏰ 步骤 '{step_info.step_name}' 执行超时")
                     chain_logger.warning(
                         f"{chain_prefix}   ⚠️  超时时间: {self.execution_config.step_timeout}秒"
                     )
@@ -762,12 +734,8 @@ class ChainOfThoughtClient:
                 if show_step_details:
                     chain_short_id = chain_info.chain_id.split("_")[-1][-4:]
                     chain_prefix = f"[链条{chain_short_id}] "
-                    chain_logger.error(
-                        f"{chain_prefix}❌ 步骤 '{step_info.step_name}' 执行失败"
-                    )
-                    chain_logger.error(
-                        f"{chain_prefix}   🐛 错误类型: {type(e).__name__}"
-                    )
+                    chain_logger.error(f"{chain_prefix}❌ 步骤 '{step_info.step_name}' 执行失败")
+                    chain_logger.error(f"{chain_prefix}   🐛 错误类型: {type(e).__name__}")
                     chain_logger.error(f"{chain_prefix}   📝 错误信息: {str(e)}")
                     if attempt < self.execution_config.max_retries:
                         chain_logger.warning(
@@ -789,7 +757,7 @@ class ChainOfThoughtClient:
     async def execute_chain(
         self,
         initial_step_name: str,
-        initial_context: Optional[Union[Dict[str, Any], Context]] = None,
+        initial_context: dict[str, Any] | Context | None = None,
         show_step_details: bool = False,
     ) -> Context:
         """
@@ -826,7 +794,7 @@ class ChainOfThoughtClient:
         try:
             await self.monitor.on_chain_start(chain_info)
 
-            current_step_name: Optional[str] = initial_step_name
+            current_step_name: str | None = initial_step_name
             chain_start_time = time.time()
 
             while current_step_name:
@@ -840,9 +808,7 @@ class ChainOfThoughtClient:
                         break
 
                 if current_step_name not in self.steps:
-                    raise ValueError(
-                        f"执行过程中发现未注册的步骤 '{current_step_name}'。"
-                    )
+                    raise ValueError(f"执行过程中发现未注册的步骤 '{current_step_name}'。")
 
                 step = self.steps[current_step_name]
 
@@ -871,9 +837,7 @@ class ChainOfThoughtClient:
                         break  # 步骤执行失败或被取消
 
                     step_info.end_time = time.time()
-                    step_info.execution_time = step_info.end_time - (
-                        step_info.start_time or 0
-                    )
+                    step_info.execution_time = step_info.end_time - (step_info.start_time or 0)
 
                     # 记录步骤结果
                     step_result = StepResult(
@@ -909,9 +873,7 @@ class ChainOfThoughtClient:
 
             # 设置链条结束状态
             chain_info.end_time = time.time()
-            chain_info.total_execution_time = (
-                chain_info.end_time - chain_info.start_time
-            )
+            chain_info.total_execution_time = chain_info.end_time - chain_info.start_time
 
             if chain_info.status == ChainStatus.RUNNING:
                 chain_info.status = ChainStatus.COMPLETED
@@ -923,9 +885,7 @@ class ChainOfThoughtClient:
             chain_info.error = str(e)
             chain_info.end_time = time.time()
             if chain_info.start_time:
-                chain_info.total_execution_time = (
-                    chain_info.end_time - chain_info.start_time
-                )
+                chain_info.total_execution_time = chain_info.end_time - chain_info.start_time
 
             await self.monitor.on_error(e, chain_info)
             await self.monitor.on_chain_end(chain_info)
@@ -935,10 +895,10 @@ class ChainOfThoughtClient:
 
     async def execute_chains_batch(
         self,
-        chain_requests: List[Dict[str, Any]],
+        chain_requests: list[dict[str, Any]],
         show_step_details: bool = False,
         show_progress: bool = True,
-    ) -> List[Context]:
+    ) -> list[Context]:
         """
         并发执行多个思想链。
 
@@ -968,7 +928,7 @@ class ChainOfThoughtClient:
             safe_chain_print(f"[dim]{'=' * 80}[/dim]")
 
         # 包装任务以便跟踪进度
-        async def wrapped_execute_chain(request_index: int, request: Dict[str, Any]):
+        async def wrapped_execute_chain(request_index: int, request: dict[str, Any]):
             try:
                 result = await self.execute_chain(
                     initial_step_name=request["initial_step_name"],
@@ -1049,16 +1009,12 @@ class ChainOfThoughtClient:
                 try:
                     result_text = Text()
                     result_text.append("批处理执行完成!\n\n", style="bold green")
-                    result_text.append(
-                        f"📊 总计: {total_chains} 个链条\n", style="cyan"
-                    )
+                    result_text.append(f"📊 总计: {total_chains} 个链条\n", style="cyan")
                     result_text.append(
                         f"⏱️  总耗时: {progress_info['elapsed_time']:.2f}秒\n",
                         style="cyan",
                     )
-                    result_text.append(
-                        f"✅ 成功: {successful_chains} 个\n", style="green"
-                    )
+                    result_text.append(f"✅ 成功: {successful_chains} 个\n", style="green")
                     result_text.append(
                         f"❌ 失败: {failed_chains} 个\n",
                         style="red" if failed_chains > 0 else "dim",
@@ -1093,9 +1049,7 @@ class ChainOfThoughtClient:
                     safe_chain_print(
                         f"[yellow]📈 成功率: {successful_chains / total_chains * 100:.1f}%[/yellow]"
                     )
-                    safe_chain_print(
-                        f"[blue]⚡ 平均速率: {progress_info['rate']:.2f} 链/秒[/blue]"
-                    )
+                    safe_chain_print(f"[blue]⚡ 平均速率: {progress_info['rate']:.2f} 链/秒[/blue]")
             else:
                 # 没有Rich库时的简单输出
                 safe_chain_print("批处理执行完成!")
@@ -1103,9 +1057,7 @@ class ChainOfThoughtClient:
                 safe_chain_print(f"总耗时: {progress_info['elapsed_time']:.2f}秒")
                 safe_chain_print(f"成功: {successful_chains} 个")
                 safe_chain_print(f"失败: {failed_chains} 个")
-                safe_chain_print(
-                    f"成功率: {successful_chains / total_chains * 100:.1f}%"
-                )
+                safe_chain_print(f"成功率: {successful_chains / total_chains * 100:.1f}%")
                 safe_chain_print(f"平均速率: {progress_info['rate']:.2f} 链/秒")
 
         if self.execution_config.enable_monitoring and not (

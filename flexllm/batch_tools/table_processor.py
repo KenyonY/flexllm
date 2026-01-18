@@ -3,8 +3,10 @@ Table processor for MLLM client
 专门处理表格数据的处理器类
 """
 
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any
+
 import pandas as pd
-from typing import List, Callable, Optional, Any, Union, TYPE_CHECKING
 
 # 使用TYPE_CHECKING避免运行时循环引用
 if TYPE_CHECKING:
@@ -16,57 +18,57 @@ class MllmTableProcessor:
     表格处理器类
     专门处理表格数据与MLLM客户端的交互
     """
-    
+
     def __init__(self, mllm_client: "MllmClient"):
         """
         初始化表格处理器
-        
+
         Args:
             mllm_client: MLLM客户端实例
         """
         self.mllm_client = mllm_client
-    
+
     # 属性委托：委托给mllm_client的核心方法
     @property
     def call_llm(self):
         """委托给mllm_client的call_llm方法"""
         return self.mllm_client.call_llm
-    
+
     @property
     def call_llm_with_selection(self):
         """委托给mllm_client的call_llm_with_selection方法"""
         return self.mllm_client.call_llm_with_selection
-    
+
     @property
     def call_llm_sync(self):
         """委托给mllm_client的call_llm_sync方法"""
         return self.mllm_client.call_llm_sync
-    
+
     # 数据预处理工具方法（独立于mllm_client）
     def process_text(self, text: str) -> str:
         """
         预处理文本
-        
+
         Args:
             text: 输入文本
-            
+
         Returns:
             str: 处理后的文本
         """
         return text
-    
+
     def process_image(self, image: str) -> str:
         """
         预处理图像
-        
+
         Args:
             image: 图片路径或URL
-            
+
         Returns:
             str: 处理后的图片路径或URL
         """
         return image
-    
+
     def load_dataframe(
         self,
         table_path: str,
@@ -104,7 +106,7 @@ class MllmTableProcessor:
             raise ValueError(f"读取文件失败: {str(e)}")
 
         if df.empty:
-            print(f"警告: 过滤后数据为空")
+            print("警告: 过滤后数据为空")
             return df
 
         # 应用数量限制
@@ -116,11 +118,11 @@ class MllmTableProcessor:
         print(f"{df.head(2)=}")
 
         return df
-    
+
     def preprocess_dataframe(
         self,
         df: pd.DataFrame,
-        image_col: Optional[str],
+        image_col: str | None,
         text_col: str,
     ):
         """
@@ -135,24 +137,24 @@ class MllmTableProcessor:
     def _build_messages_from_dataframe(
         self,
         df: pd.DataFrame,
-        image_col: Optional[str],
+        image_col: str | None,
         text_col: str,
-    ) -> List[List[dict]]:
+    ) -> list[list[dict]]:
         """
         从dataframe构建消息列表
-        
+
         Args:
             df: 数据框
             image_col: 图片列名，如果为None或列不存在则只使用文本
             text_col: 文本列名
-            
+
         Returns:
             messages_list: 消息列表
         """
         messages_list = []
         # 检查是否有图像列
         has_image_col = image_col and image_col in df.columns
-        
+
         for index, row in df.iterrows():
             if has_image_col:
                 # 有图像列时，包含图像和文本
@@ -162,21 +164,17 @@ class MllmTableProcessor:
                             "role": "user",
                             "content": [
                                 {"type": "text", "text": f"{row[text_col]}"},
-                                {"type": "image_url", "image_url": {"url": f"{str(row[image_col])}"}},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"{str(row[image_col])}"},
+                                },
                             ],
                         }
                     ]
                 )
             else:
                 # 没有图像列时，只包含文本
-                messages_list.append(
-                    [
-                        {
-                            "role": "user", 
-                            "content": f"{row[text_col]}"
-                        }
-                    ]
-                )
+                messages_list.append([{"role": "user", "content": f"{row[text_col]}"}])
         return messages_list
 
     def _build_image_messages_from_dataframe(
@@ -185,39 +183,38 @@ class MllmTableProcessor:
         image_col: str,
         system_prompt: str = "",
         text_prompt: str = "请描述这幅图片",
-    ) -> List[List[dict]]:
+    ) -> list[list[dict]]:
         """
         从dataframe构建图像处理消息列表
-        
+
         Args:
             df: 数据框
             image_col: 图片列名
             system_prompt: 系统提示词
             text_prompt: 文本提示词
-            
+
         Returns:
             messages_list: 消息列表
         """
         messages_list = []
         for index, row in df.iterrows():
             messages = []
-            
+
             # 添加系统提示词（如果提供）
             if system_prompt:
-                messages.append({
-                    "role": "system",
-                    "content": system_prompt
-                })
-            
+                messages.append({"role": "system", "content": system_prompt})
+
             # 添加用户消息（包含文本提示和图像）
-            messages.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": text_prompt},
-                    {"type": "image_url", "image_url": {"url": f"{str(row[image_col])}"}},
-                ],
-            })
-            
+            messages.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": text_prompt},
+                        {"type": "image_url", "image_url": {"url": f"{str(row[image_col])}"}},
+                    ],
+                }
+            )
+
             messages_list.append(messages)
         return messages_list
 
@@ -225,15 +222,15 @@ class MllmTableProcessor:
         self,
         df: pd.DataFrame,
         text_col: str,
-        image_col: Optional[str] = None,
+        image_col: str | None = None,
         use_selection: bool = False,
         n_predictions: int = 3,
-        selector_fn: Optional[Callable[[List[Any]], Any]] = None,
+        selector_fn: Callable[[list[Any]], Any] | None = None,
         **kwargs,
     ):
         """
         调用dataframe
-        
+
         Args:
             df: 数据框
             image_col: 图片列名，如果为None或列不存在则只使用文本
@@ -242,46 +239,42 @@ class MllmTableProcessor:
             n_predictions: 每条消息预测次数（仅在use_selection=True时有效）
             selector_fn: 选择函数（仅在use_selection=True时有效）
             **kwargs: 模型请求参数
-            
+
         Returns:
             response_list: 响应列表
-            
+
         Examples:
             # 纯文本模式（推荐的默认方式）
             await processor.call_dataframe(df, image_col=None, text_col="text")
-            
+
             # 图像+文本模式（需要显式指定图像列）
             await processor.call_dataframe(df, image_col="image", text_col="text")
         """
         df = self.preprocess_dataframe(df, image_col, text_col)
         messages_list = self._build_messages_from_dataframe(df, image_col, text_col)
-        
+
         if use_selection:
             return await self.call_llm_with_selection(
-                messages_list, 
-                n_predictions=n_predictions,
-                selector_fn=selector_fn,
-                **kwargs
+                messages_list, n_predictions=n_predictions, selector_fn=selector_fn, **kwargs
             )
         else:
             return await self.call_llm(messages_list, **kwargs)
 
-    
     async def call_table(
         self,
         table_path: str,
         text_col: str = "text",
-        image_col: Optional[str] = None,
+        image_col: str | None = None,
         sheet_name: str = 0,
         max_num: int = None,
         use_selection: bool = False,
         n_predictions: int = 1,
-        selector_fn: Optional[Callable[[List[Any]], Any]] = None,
+        selector_fn: Callable[[list[Any]], Any] | None = None,
         **kwargs,
     ):
         """
         调用table
-        
+
         Args:
             table_path: 表格文件路径
             image_col: 图片列名，默认为None（纯文本模式），指定列名则启用图像+文本模式
@@ -292,7 +285,7 @@ class MllmTableProcessor:
             n_predictions: 每条消息预测次数（仅在use_selection=True时有效）
             selector_fn: 选择函数（仅在use_selection=True时有效）
             **kwargs: 其他参数
-            
+
         Returns:
             response_list: 响应列表
         """
@@ -304,9 +297,8 @@ class MllmTableProcessor:
             use_selection=use_selection,
             n_predictions=n_predictions,
             selector_fn=selector_fn,
-            **kwargs
+            **kwargs,
         )
-    
 
     async def call_table_images(
         self,
@@ -318,12 +310,12 @@ class MllmTableProcessor:
         max_num: int = None,
         use_selection: bool = False,
         n_predictions: int = 1,
-        selector_fn: Optional[Callable[[List[Any]], Any]] = None,
+        selector_fn: Callable[[list[Any]], Any] | None = None,
         **kwargs,
     ):
         """
         对表格中的图像列进行批量请求大模型
-        
+
         Args:
             table_path: 表格文件路径
             image_col: 图片列名，默认为"image"（此方法专门处理图像，必须指定有效的图像列）
@@ -335,29 +327,26 @@ class MllmTableProcessor:
             n_predictions: 每条消息预测次数（仅在use_selection=True时有效）
             selector_fn: 选择函数（仅在use_selection=True时有效）
             **kwargs: 其他参数
-            
+
         Returns:
             response_list: 响应列表
         """
         df = self.load_dataframe(table_path, sheet_name, max_num)
-        
+
         # 检查图像列是否存在
         if not image_col or image_col not in df.columns:
             raise ValueError(f"图像列 '{image_col}' 不存在于表格中")
-        
+
         # 预处理图像列
         df[image_col] = df[image_col].apply(self.process_image)
-        
+
         messages_list = self._build_image_messages_from_dataframe(
             df, image_col, system_prompt, text_prompt
         )
-        
+
         if use_selection:
             return await self.call_llm_with_selection(
-                messages_list,
-                n_predictions=n_predictions,
-                selector_fn=selector_fn,
-                **kwargs
+                messages_list, n_predictions=n_predictions, selector_fn=selector_fn, **kwargs
             )
         else:
             return await self.call_llm(messages_list, **kwargs)

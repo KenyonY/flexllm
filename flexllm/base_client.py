@@ -8,17 +8,17 @@ import asyncio
 import json
 import time
 from abc import ABC
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Union, Optional, Any
+from typing import TYPE_CHECKING, Any, Union
 
 from loguru import logger
 
 from .async_api import ConcurrentRequester
+from .cache import ResponseCache, ResponseCacheConfig
 from .msg_processors.image_processor import ImageCacheConfig
 from .msg_processors.messages_processor import messages_preprocess
 from .msg_processors.unified_processor import batch_process_messages as optimized_batch_preprocess
-from .cache import ResponseCache, ResponseCacheConfig
 
 if TYPE_CHECKING:
     from .async_api.interface import RequestResult
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 @dataclass
 class ToolCall:
     """工具调用信息"""
+
     id: str
     type: str  # "function"
     function: dict  # {"name": "...", "arguments": "..."}
@@ -35,20 +36,22 @@ class ToolCall:
 @dataclass
 class ChatCompletionResult:
     """聊天完成的结果，包含内容和 token 用量信息"""
+
     content: str
-    usage: Optional[dict] = None  # {"prompt_tokens": x, "completion_tokens": y, "total_tokens": z}
-    reasoning_content: Optional[str] = None  # 思考内容（DeepSeek-R1、Qwen3 等）
-    tool_calls: Optional[List["ToolCall"]] = None  # 工具调用列表
+    usage: dict | None = None  # {"prompt_tokens": x, "completion_tokens": y, "total_tokens": z}
+    reasoning_content: str | None = None  # 思考内容（DeepSeek-R1、Qwen3 等）
+    tool_calls: list["ToolCall"] | None = None  # 工具调用列表
 
 
 @dataclass
 class BatchResultItem:
     """批量请求中单条结果，包含索引、内容和 usage"""
+
     index: int
-    content: Optional[str]
-    usage: Optional[dict] = None
+    content: str | None
+    usage: dict | None = None
     status: str = "success"  # success, error, cached
-    error: Optional[str] = None
+    error: str | None = None
     latency: float = 0.0
 
 
@@ -79,7 +82,7 @@ class LLMClientBase(ABC):
         retry_delay: float = 1.0,
         cache_image: bool = False,
         cache_dir: str = "image_cache",
-        cache: Union[bool, ResponseCacheConfig, None] = None,
+        cache: bool | ResponseCacheConfig | None = None,
         **kwargs,
     ):
         """
@@ -136,26 +139,26 @@ class LLMClientBase(ABC):
         raise NotImplementedError
 
     def _build_request_body(
-        self, messages: List[dict], model: str, stream: bool = False, **kwargs
+        self, messages: list[dict], model: str, stream: bool = False, **kwargs
     ) -> dict:
         raise NotImplementedError
 
-    def _extract_content(self, response_data: dict) -> Optional[str]:
+    def _extract_content(self, response_data: dict) -> str | None:
         raise NotImplementedError
 
-    def _extract_usage(self, response_data: dict) -> Optional[dict]:
+    def _extract_usage(self, response_data: dict) -> dict | None:
         """提取 usage 信息（子类可覆盖）"""
         if not response_data:
             return None
         return response_data.get("usage")
 
-    def _extract_tool_calls(self, response_data: dict) -> Optional[List[ToolCall]]:
+    def _extract_tool_calls(self, response_data: dict) -> list[ToolCall] | None:
         """提取工具调用信息（子类可覆盖）"""
         return None
 
     # ========== 可选覆盖的钩子方法 ==========
 
-    def _extract_stream_content(self, data: dict) -> Optional[str]:
+    def _extract_stream_content(self, data: dict) -> str | None:
         return self._extract_content(data)
 
     def _get_stream_url(self, model: str) -> str:
@@ -170,8 +173,8 @@ class LLMClientBase(ABC):
         return effective_model
 
     async def _preprocess_messages(
-        self, messages: List[dict], preprocess_msg: bool = False
-    ) -> List[dict]:
+        self, messages: list[dict], preprocess_msg: bool = False
+    ) -> list[dict]:
         """消息预处理（图片转 base64 等）"""
         if preprocess_msg:
             return await messages_preprocess(
@@ -180,12 +183,14 @@ class LLMClientBase(ABC):
         return messages
 
     async def _preprocess_messages_batch(
-        self, messages_list: List[List[dict]], preprocess_msg: bool = False
-    ) -> List[List[dict]]:
+        self, messages_list: list[list[dict]], preprocess_msg: bool = False
+    ) -> list[list[dict]]:
         """批量消息预处理"""
         if preprocess_msg:
             return await optimized_batch_preprocess(
-                messages_list, max_concurrent=self._concurrency_limit, cache_config=self._cache_config
+                messages_list,
+                max_concurrent=self._concurrency_limit,
+                cache_config=self._cache_config,
             )
         return messages_list
 
@@ -193,7 +198,7 @@ class LLMClientBase(ABC):
 
     async def chat_completions(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
@@ -237,7 +242,10 @@ class LLMClientBase(ABC):
         effective_url = url or self._get_url(effective_model, stream=False)
 
         results, _ = await self._client.process_requests(
-            request_params=[request_params], url=effective_url, method="POST", show_progress=show_progress
+            request_params=[request_params],
+            url=effective_url,
+            method="POST",
+            show_progress=show_progress,
         )
 
         data = results[0]
@@ -258,7 +266,7 @@ class LLMClientBase(ABC):
 
     def chat_completions_sync(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
@@ -267,25 +275,29 @@ class LLMClientBase(ABC):
         """同步版本的聊天完成"""
         return asyncio.run(
             self.chat_completions(
-                messages=messages, model=model, return_raw=return_raw, return_usage=return_usage, **kwargs
+                messages=messages,
+                model=model,
+                return_raw=return_raw,
+                return_usage=return_usage,
+                **kwargs,
             )
         )
 
     async def chat_completions_batch(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
         preprocess_msg: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
-        metadata_list: Optional[List[dict]] = None,
+        metadata_list: list[dict] | None = None,
         url: str = None,
         **kwargs,
-    ) -> Union[List[str], List[ChatCompletionResult], tuple]:
+    ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
         批量聊天完成（支持断点续传）
 
@@ -349,7 +361,7 @@ class LLMClientBase(ABC):
             if output_path.exists():
                 # 读取所有有效记录
                 records = []
-                with open(output_path, "r", encoding="utf-8") as f:
+                with open(output_path, encoding="utf-8") as f:
                     for line in f:
                         try:
                             record = json.loads(line.strip())
@@ -372,7 +384,9 @@ class LLMClientBase(ABC):
                 if file_valid:
                     completed_indices = {r["index"] for r in records}
                     if completed_indices:
-                        logger.info(f"从文件恢复: 已完成 {len(completed_indices)}/{len(messages_list)}")
+                        logger.info(
+                            f"从文件恢复: 已完成 {len(completed_indices)}/{len(messages_list)}"
+                        )
                 else:
                     raise ValueError(
                         f"文件校验失败: {output_jsonl} 中的 input 与当前 messages_list 不匹配。"
@@ -391,7 +405,13 @@ class LLMClientBase(ABC):
                 file_buffer = []
                 last_flush_time = time.time()
 
-        def on_file_result(original_idx: int, content: Any, status: str = "success", error: str = None, usage: dict = None):
+        def on_file_result(
+            original_idx: int,
+            content: Any,
+            status: str = "success",
+            error: str = None,
+            usage: dict = None,
+        ):
             """文件输出回调"""
             nonlocal last_flush_time
             if file_writer is None:
@@ -441,7 +461,10 @@ class LLMClientBase(ABC):
 
                     uncached_messages = [messages_list[i] for i in actual_uncached]
                     request_params = [
-                        {"json": self._build_request_body(m, effective_model, **kwargs), "headers": headers}
+                        {
+                            "json": self._build_request_body(m, effective_model, **kwargs),
+                            "headers": headers,
+                        }
                         for m in uncached_messages
                     ]
 
@@ -459,7 +482,11 @@ class LLMClientBase(ABC):
                             original_idx = actual_uncached[result.request_id]
                             # 检查请求状态
                             if result.status != "success":
-                                error_msg = result.data.get("error", "Unknown error") if isinstance(result.data, dict) else str(result.data)
+                                error_msg = (
+                                    result.data.get("error", "Unknown error")
+                                    if isinstance(result.data, dict)
+                                    else str(result.data)
+                                )
                                 logger.warning(f"请求失败: {error_msg}")
                                 cached_responses[original_idx] = None
                                 on_file_result(original_idx, None, "error", error_msg)
@@ -470,11 +497,16 @@ class LLMClientBase(ABC):
                                 # 写入缓存（仅当不需要 usage 时，因为缓存不存储 usage）
                                 if not return_usage:
                                     self._response_cache.set(
-                                        messages_list[original_idx], extracted, model=effective_model, **kwargs
+                                        messages_list[original_idx],
+                                        extracted,
+                                        model=effective_model,
+                                        **kwargs,
                                     )
                                 # 文件输出（存储 content 和 usage）
                                 if return_usage:
-                                    on_file_result(original_idx, extracted.content, usage=extracted.usage)
+                                    on_file_result(
+                                        original_idx, extracted.content, usage=extracted.usage
+                                    )
                                 else:
                                     on_file_result(original_idx, extracted)
                             except Exception as e:
@@ -487,7 +519,9 @@ class LLMClientBase(ABC):
                 responses = cached_responses
             else:
                 # 不使用缓存，直接批量执行（流式处理以支持增量保存）
-                indices_to_run = [i for i in range(len(messages_list)) if i not in completed_indices]
+                indices_to_run = [
+                    i for i in range(len(messages_list)) if i not in completed_indices
+                ]
                 responses = [None] * len(messages_list)
 
                 # 选择提取器
@@ -497,7 +531,10 @@ class LLMClientBase(ABC):
                 if indices_to_run:
                     messages_to_run = [messages_list[i] for i in indices_to_run]
                     request_params = [
-                        {"json": self._build_request_body(m, effective_model, **kwargs), "headers": headers}
+                        {
+                            "json": self._build_request_body(m, effective_model, **kwargs),
+                            "headers": headers,
+                        }
                         for m in messages_to_run
                     ]
                     # 使用流式处理，每完成一个请求就写入文件
@@ -512,7 +549,11 @@ class LLMClientBase(ABC):
                             original_idx = indices_to_run[result.request_id]
                             # 检查请求状态
                             if result.status != "success":
-                                error_msg = result.data.get("error", "Unknown error") if isinstance(result.data, dict) else str(result.data)
+                                error_msg = (
+                                    result.data.get("error", "Unknown error")
+                                    if isinstance(result.data, dict)
+                                    else str(result.data)
+                                )
                                 logger.warning(f"请求失败: {error_msg}")
                                 responses[original_idx] = None
                                 on_file_result(original_idx, None, "error", error_msg)
@@ -522,7 +563,9 @@ class LLMClientBase(ABC):
                                 responses[original_idx] = extracted
                                 # 文件输出（存储 content 和 usage）
                                 if return_usage:
-                                    on_file_result(original_idx, extracted.content, usage=extracted.usage)
+                                    on_file_result(
+                                        original_idx, extracted.content, usage=extracted.usage
+                                    )
                                 else:
                                     on_file_result(original_idx, extracted)
                             except Exception as e:
@@ -550,7 +593,7 @@ class LLMClientBase(ABC):
         tmp_path = file_path + ".tmp"
         try:
             records = {}
-            with open(file_path, "r", encoding="utf-8") as f:
+            with open(file_path, encoding="utf-8") as f:
                 for line in f:
                     if not line.strip():
                         continue
@@ -577,17 +620,17 @@ class LLMClientBase(ABC):
 
     def chat_completions_batch_sync(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
-        metadata_list: Optional[List[dict]] = None,
+        metadata_list: list[dict] | None = None,
         **kwargs,
-    ) -> Union[List[str], List[ChatCompletionResult], tuple]:
+    ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
         return asyncio.run(
             self.chat_completions_batch(
@@ -606,15 +649,15 @@ class LLMClientBase(ABC):
 
     async def iter_chat_completions_batch(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         preprocess_msg: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
-        metadata_list: Optional[List[dict]] = None,
+        metadata_list: list[dict] | None = None,
         batch_size: int = None,
         url: str = None,
         **kwargs,
@@ -693,7 +736,7 @@ class LLMClientBase(ABC):
             output_path = Path(output_jsonl)
             if output_path.exists():
                 records = []
-                with open(output_path, "r", encoding="utf-8") as f:
+                with open(output_path, encoding="utf-8") as f:
                     for line in f:
                         try:
                             record = json.loads(line.strip())
@@ -716,7 +759,9 @@ class LLMClientBase(ABC):
                 if file_valid:
                     completed_indices = {r["index"] for r in records}
                     if completed_indices:
-                        logger.info(f"从文件恢复: 已完成 {len(completed_indices)}/{len(messages_list)}")
+                        logger.info(
+                            f"从文件恢复: 已完成 {len(completed_indices)}/{len(messages_list)}"
+                        )
                 else:
                     raise ValueError(
                         f"文件校验失败: {output_jsonl} 中的 input 与当前 messages_list 不匹配。"
@@ -734,7 +779,13 @@ class LLMClientBase(ABC):
                 file_buffer = []
                 last_flush_time = time.time()
 
-        def on_file_result(original_idx: int, content: Any, status: str = "success", error: str = None, usage: dict = None):
+        def on_file_result(
+            original_idx: int,
+            content: Any,
+            status: str = "success",
+            error: str = None,
+            usage: dict = None,
+        ):
             nonlocal last_flush_time
             if file_writer is None:
                 return
@@ -815,7 +866,10 @@ class LLMClientBase(ABC):
 
                 uncached_messages = [messages_list[i] for i in actual_uncached]
                 request_params = [
-                    {"json": self._build_request_body(m, effective_model, **kwargs), "headers": headers}
+                    {
+                        "json": self._build_request_body(m, effective_model, **kwargs),
+                        "headers": headers,
+                    }
                     for m in uncached_messages
                 ]
 
@@ -834,7 +888,11 @@ class LLMClientBase(ABC):
 
                         # 检查请求状态
                         if result.status != "success":
-                            error_msg = result.data.get("error", "Unknown error") if isinstance(result.data, dict) else str(result.data)
+                            error_msg = (
+                                result.data.get("error", "Unknown error")
+                                if isinstance(result.data, dict)
+                                else str(result.data)
+                            )
                             logger.warning(f"请求失败: {error_msg}")
                             on_file_result(original_idx, None, "error", error_msg)
                             result.content = None
@@ -846,9 +904,17 @@ class LLMClientBase(ABC):
                                 content = extractor(result)
                                 usage = self._extract_usage(result.data) if return_usage else None
                                 # 写入缓存
-                                if use_cache and self._response_cache and content is not None and not return_raw:
+                                if (
+                                    use_cache
+                                    and self._response_cache
+                                    and content is not None
+                                    and not return_raw
+                                ):
                                     self._response_cache.set(
-                                        messages_list[original_idx], content, model=effective_model, **kwargs
+                                        messages_list[original_idx],
+                                        content,
+                                        model=effective_model,
+                                        **kwargs,
                                     )
                                 on_file_result(original_idx, content, usage=usage)
                                 # 在 result 对象上添加属性
@@ -888,7 +954,7 @@ class LLMClientBase(ABC):
 
     async def chat_completions_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_usage: bool = False,
         preprocess_msg: bool = False,
@@ -914,8 +980,9 @@ class LLMClientBase(ABC):
             - return_usage=False: str 内容片段
             - return_usage=True: dict，包含 type 和对应数据
         """
-        import aiohttp
         import json
+
+        import aiohttp
 
         effective_model = self._get_effective_model(model)
         messages = await self._preprocess_messages(messages, preprocess_msg)
@@ -933,7 +1000,9 @@ class LLMClientBase(ABC):
         aio_timeout = aiohttp.ClientTimeout(total=effective_timeout)
 
         async with aiohttp.ClientSession(trust_env=True) as session:
-            async with session.post(effective_url, json=body, headers=headers, timeout=aio_timeout) as response:
+            async with session.post(
+                effective_url, json=body, headers=headers, timeout=aio_timeout
+            ) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise Exception(f"HTTP {response.status}: {error_text}")
@@ -961,7 +1030,7 @@ class LLMClientBase(ABC):
                         except json.JSONDecodeError:
                             continue
 
-    def model_list(self) -> List[str]:
+    def model_list(self) -> list[str]:
         raise NotImplementedError("子类需要实现 model_list 方法")
 
     def __repr__(self) -> str:

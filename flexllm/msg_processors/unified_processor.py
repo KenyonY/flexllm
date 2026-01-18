@@ -5,31 +5,28 @@
 """
 
 import asyncio
-import aiohttp
-import time
-import os
 import base64
-import hashlib
-import json
-import sys
-import io
-import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple, Union, Callable
-from dataclasses import dataclass
-from functools import lru_cache
-from copy import deepcopy
-from collections import defaultdict
-import gc
 import contextlib
+import gc
+import hashlib
+import io
+import os
+import sys
+import threading
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-import numpy as np
-from PIL import Image
+import aiohttp
 from loguru import logger
 
 try:
     import cv2
+
     HAS_CV2 = True
 except ImportError:
     cv2 = None
@@ -37,12 +34,7 @@ except ImportError:
 
 # 导入缓存配置
 try:
-    from .image_processor import (
-        ImageCacheConfig,
-        DEFAULT_CACHE_DIR,
-        get_target_size,
-        LANCZOS,
-    )
+    from .image_processor import DEFAULT_CACHE_DIR, LANCZOS, ImageCacheConfig, get_target_size
 
     HAS_IMAGE_PROCESSOR = True
 except ImportError:
@@ -101,8 +93,7 @@ def safe_repr_source(source: str, max_length: int = 100) -> str:
 
     # 检查是否是纯base64字符串（很长且只包含base64字符）
     if len(source) > 100 and all(
-        c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/="
-        for c in source
+        c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in source
     ):
         return f"[base64数据 长度:{len(source)}]"
 
@@ -217,8 +208,9 @@ class UnifiedProcessorConfig:
     def auto_detect(cls) -> "UnifiedProcessorConfig":
         """自适应配置，根据系统资源自动调整"""
         try:
-            import psutil
             import os
+
+            import psutil
 
             # 获取系统信息
             cpu_count = os.cpu_count() or 4
@@ -294,9 +286,9 @@ class UnifiedMemoryCache:
     def _generate_cache_key(
         self,
         source: str,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        max_pixels: int | None = None,
         **kwargs,
     ) -> str:
         """生成缓存键"""
@@ -329,7 +321,7 @@ class UnifiedMemoryCache:
         except Exception:
             return hashlib.md5(source.encode()).hexdigest()
 
-    def get(self, source: str, **kwargs) -> Optional[str]:
+    def get(self, source: str, **kwargs) -> str | None:
         """获取缓存数据"""
         cache_key = self._generate_cache_key(source, **kwargs)
 
@@ -355,9 +347,7 @@ class UnifiedMemoryCache:
                     return
 
                 # 清理空间
-                while (
-                    self.current_size + data_size > self.max_size_bytes and self.cache
-                ):
+                while self.current_size + data_size > self.max_size_bytes and self.cache:
                     self._evict_lru()
 
                 # 存储数据
@@ -378,45 +368,47 @@ class UnifiedMemoryCache:
             self.current_size = 0
             gc.collect()
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """获取缓存统计"""
         with self.lock:
             total_requests = self.hit_count + self.miss_count
-            hit_rate = (
-                (self.hit_count / total_requests * 100) if total_requests > 0 else 0
-            )
+            hit_rate = (self.hit_count / total_requests * 100) if total_requests > 0 else 0
 
             return {
                 "cached_items": len(self.cache),
                 "current_size_mb": self.current_size / 1024 / 1024,
                 "max_size_mb": self.max_size_bytes / 1024 / 1024,
-                "usage_percent": (self.current_size / self.max_size_bytes * 100)
-                if self.max_size_bytes > 0
-                else 0,
+                "usage_percent": (
+                    (self.current_size / self.max_size_bytes * 100)
+                    if self.max_size_bytes > 0
+                    else 0
+                ),
                 "hit_count": self.hit_count,
                 "miss_count": self.miss_count,
                 "hit_rate_percent": hit_rate,
                 "total_requests": total_requests,
-                "avg_item_size_kb": (self.current_size / 1024 / len(self.cache))
-                if self.cache
-                else 0,
-                "cache_efficiency": "excellent"
-                if hit_rate > 80
-                else "good"
-                if hit_rate > 60
-                else "fair"
-                if hit_rate > 40
-                else "poor",
+                "avg_item_size_kb": (
+                    (self.current_size / 1024 / len(self.cache)) if self.cache else 0
+                ),
+                "cache_efficiency": (
+                    "excellent"
+                    if hit_rate > 80
+                    else "good"
+                    if hit_rate > 60
+                    else "fair"
+                    if hit_rate > 40
+                    else "poor"
+                ),
             }
 
 
 class UnifiedImageProcessor:
     """统一的图像处理器，支持本地文件和URL"""
 
-    def __init__(self, config: Optional[UnifiedProcessorConfig] = None):
+    def __init__(self, config: UnifiedProcessorConfig | None = None):
         self.config = config or UnifiedProcessorConfig.default()
         self.memory_cache = UnifiedMemoryCache(self.config.memory_cache_size_mb)
-        
+
         # 磁盘缓存配置
         self.disk_cache_config = None
         if self.config.enable_disk_cache and HAS_IMAGE_PROCESSOR:
@@ -424,12 +416,12 @@ class UnifiedImageProcessor:
                 enabled=True,
                 cache_dir=self.config.disk_cache_dir,
                 force_refresh=self.config.force_refresh_disk_cache,
-                retry_failed=self.config.retry_failed_disk_cache
+                retry_failed=self.config.retry_failed_disk_cache,
             )
 
         # 线程池和锁
         self.executor = None
-        self.processing_locks: Dict[str, asyncio.Lock] = {}
+        self.processing_locks: dict[str, asyncio.Lock] = {}
         self.lock = asyncio.Lock()
         self._executor_initialized = False
         self._init_lock = threading.Lock()
@@ -497,7 +489,7 @@ class UnifiedImageProcessor:
         except Exception:
             return "JPEG"
 
-    def _get_encode_params(self, format_type: str) -> List[int]:
+    def _get_encode_params(self, format_type: str) -> list[int]:
         """获取编码参数"""
         if not HAS_CV2:
             return []
@@ -517,10 +509,10 @@ class UnifiedImageProcessor:
         self,
         original_width: int,
         original_height: int,
-        max_width: Optional[int],
-        max_height: Optional[int],
-        max_pixels: Optional[int],
-    ) -> Tuple[int, int]:
+        max_width: int | None,
+        max_height: int | None,
+        max_pixels: int | None,
+    ) -> tuple[int, int]:
         """计算目标尺寸"""
         try:
             width, height = original_width, original_height
@@ -547,9 +539,9 @@ class UnifiedImageProcessor:
     def _process_local_file_sync(
         self,
         file_path: str,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        max_pixels: int | None = None,
         return_with_mime: bool = True,
     ) -> str:
         """同步处理本地文件"""
@@ -614,9 +606,9 @@ class UnifiedImageProcessor:
         self,
         url: str,
         session: aiohttp.ClientSession,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        max_pixels: int | None = None,
         return_with_mime: bool = True,
     ) -> str:
         """异步处理URL"""
@@ -626,8 +618,13 @@ class UnifiedImageProcessor:
                 from .image_processor import encode_image_to_base64
 
                 return await encode_image_to_base64(
-                    url, session, max_width, max_height, max_pixels, 
-                    return_with_mime, cache_config=self.disk_cache_config
+                    url,
+                    session,
+                    max_width,
+                    max_height,
+                    max_pixels,
+                    return_with_mime,
+                    cache_config=self.disk_cache_config,
                 )
             else:
                 # 简单的URL处理实现
@@ -638,9 +635,7 @@ class UnifiedImageProcessor:
                         base64_data = base64.b64encode(content).decode("utf-8")
 
                         if return_with_mime:
-                            content_type = response.headers.get(
-                                "content-type", "image/jpeg"
-                            )
+                            content_type = response.headers.get("content-type", "image/jpeg")
                             return f"data:{content_type};base64,{base64_data}"
                         return base64_data
                     else:
@@ -653,10 +648,10 @@ class UnifiedImageProcessor:
     async def process_single_source(
         self,
         source: str,
-        session: Optional[aiohttp.ClientSession] = None,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        session: aiohttp.ClientSession | None = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        max_pixels: int | None = None,
         return_with_mime: bool = True,
     ) -> str:
         """处理单个图像源（本地文件或URL）"""
@@ -773,13 +768,13 @@ class UnifiedImageProcessor:
 
     async def process_batch(
         self,
-        sources: List[str],
-        session: Optional[aiohttp.ClientSession] = None,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        sources: list[str],
+        session: aiohttp.ClientSession | None = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        max_pixels: int | None = None,
         return_with_mime: bool = True,
-    ) -> List[str]:
+    ) -> list[str]:
         """批量处理图像源"""
         if not sources:
             return []
@@ -796,7 +791,7 @@ class UnifiedImageProcessor:
         # 创建信号量控制并发
         semaphore = asyncio.Semaphore(self.config.max_concurrent)
 
-        async def process_single_with_semaphore(source: str) -> Tuple[str, str]:
+        async def process_single_with_semaphore(source: str) -> tuple[str, str]:
             async with semaphore:
                 result = await self.process_single_source(
                     source, session, max_width, max_height, max_pixels, return_with_mime
@@ -830,35 +825,43 @@ class UnifiedImageProcessor:
 
         return final_results
 
-    def get_cache_stats(self) -> Dict[str, Any]:
+    def get_cache_stats(self) -> dict[str, Any]:
         """获取缓存统计信息"""
         stats = {"memory_cache": self.memory_cache.get_stats()}
-        
+
         # 如果启用了磁盘缓存，添加磁盘缓存统计
-        if self.config.enable_disk_cache and self.disk_cache_config and self.disk_cache_config.enabled:
+        if (
+            self.config.enable_disk_cache
+            and self.disk_cache_config
+            and self.disk_cache_config.enabled
+        ):
             disk_stats = self._get_disk_cache_stats()
             stats["disk_cache"] = disk_stats
-            
+
         return stats
-        
-    def _get_disk_cache_stats(self) -> Dict[str, Any]:
+
+    def _get_disk_cache_stats(self) -> dict[str, Any]:
         """获取磁盘缓存统计信息"""
         if not self.disk_cache_config or not self.disk_cache_config.enabled:
             return {"enabled": False}
-            
+
         try:
             cache_dir = Path(self.disk_cache_config.cache_dir)
             if not cache_dir.exists():
                 return {"enabled": True, "cached_files": 0, "total_size_mb": 0}
-                
+
             # 统计缓存文件
             image_files = list(cache_dir.glob("*"))
-            image_files = [f for f in image_files if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.webp', '.gif']]
+            image_files = [
+                f
+                for f in image_files
+                if f.suffix.lower() in [".jpg", ".jpeg", ".png", ".webp", ".gif"]
+            ]
             error_files = list(cache_dir.glob("*.error"))
-            
+
             # 计算总大小
             total_size = sum(f.stat().st_size for f in image_files if f.is_file())
-            
+
             return {
                 "enabled": True,
                 "cache_dir": str(cache_dir),
@@ -872,13 +875,11 @@ class UnifiedImageProcessor:
         except Exception as e:
             return {"enabled": True, "error": str(e)}
 
-    def get_performance_stats(self) -> Dict[str, Any]:
+    def get_performance_stats(self) -> dict[str, Any]:
         """获取性能统计信息"""
         uptime = time.time() - self._start_time
         avg_processing_time = (
-            self._total_processing_time / self._total_processed
-            if self._total_processed > 0
-            else 0
+            self._total_processing_time / self._total_processed if self._total_processed > 0 else 0
         )
         throughput = self._total_processed / uptime if uptime > 0 else 0
 
@@ -901,11 +902,11 @@ class UnifiedImageProcessor:
         """清空缓存"""
         # 清空内存缓存
         self.memory_cache.clear()
-        
+
         # 可选地清空磁盘缓存
         if clear_disk_cache and self.disk_cache_config and self.disk_cache_config.enabled:
             self._clear_disk_cache()
-            
+
     def _clear_disk_cache(self):
         """清空磁盘缓存"""
         try:
@@ -915,7 +916,7 @@ class UnifiedImageProcessor:
                 for cache_file in cache_dir.iterdir():
                     if cache_file.is_file():
                         cache_file.unlink()
-                        
+
                 logger.info(f"已清空磁盘缓存目录: {cache_dir}")
         except Exception as e:
             logger.warning(f"清空磁盘缓存失败: {e}")
@@ -936,7 +937,7 @@ _unified_processor_lock = threading.Lock()
 
 
 def get_global_unified_processor(
-    config: Optional[UnifiedProcessorConfig] = None,
+    config: UnifiedProcessorConfig | None = None,
 ) -> UnifiedImageProcessor:
     """获取全局统一处理器实例（单例模式）"""
     global _global_unified_processor
@@ -951,8 +952,8 @@ def get_global_unified_processor(
 
 async def process_content_recursive(
     content: Any,
-    session: Optional[aiohttp.ClientSession] = None,
-    processor: Optional[UnifiedImageProcessor] = None,
+    session: aiohttp.ClientSession | None = None,
+    processor: UnifiedImageProcessor | None = None,
     **kwargs,
 ):
     """递归处理内容中的图像URL"""
@@ -964,9 +965,7 @@ async def process_content_recursive(
             if key == "url" and isinstance(value, str):
                 # 处理图像URL
                 try:
-                    base64_data = await processor.process_single_source(
-                        value, session, **kwargs
-                    )
+                    base64_data = await processor.process_single_source(value, session, **kwargs)
                     if base64_data:
                         content[key] = base64_data
                 except Exception as e:
@@ -981,11 +980,11 @@ async def process_content_recursive(
 
 
 async def unified_messages_preprocess(
-    messages: List[Dict[str, Any]],
+    messages: list[dict[str, Any]],
     inplace: bool = False,
-    processor_config: Optional[UnifiedProcessorConfig] = None,
+    processor_config: UnifiedProcessorConfig | None = None,
     **kwargs,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """
     统一的单个消息列表预处理
 
@@ -1023,19 +1022,19 @@ async def unified_messages_preprocess(
 
 
 async def unified_batch_messages_preprocess(
-    messages_list: Union[List[List[Dict[str, Any]]], Any],
+    messages_list: list[list[dict[str, Any]]] | Any,
     max_concurrent: int = 10,
     inplace: bool = False,
-    processor_config: Optional[UnifiedProcessorConfig] = None,
+    processor_config: UnifiedProcessorConfig | None = None,
     as_iterator: bool = False,
-    progress_callback: Optional[Callable] = None,
+    progress_callback: Callable | None = None,
     show_progress: bool = False,
     progress_desc: str = "统一处理消息",
-    max_width: Optional[int] = None,
-    max_height: Optional[int] = None,
-    max_pixels: Optional[int] = None,
+    max_width: int | None = None,
+    max_height: int | None = None,
+    max_pixels: int | None = None,
     **kwargs,
-) -> Union[List[List[Dict[str, Any]]], Any]:
+) -> list[list[dict[str, Any]]] | Any:
     """
     统一的批量消息预处理函数
 
@@ -1098,14 +1097,10 @@ async def unified_batch_messages_preprocess(
                     "total": total,
                     "percentage": (current / total * 100) if total > 0 else 0,
                     "elapsed_time": elapsed_time,
-                    "estimated_total_time": (elapsed_time / current * total)
-                    if current > 0
-                    else 0,
+                    "estimated_total_time": (elapsed_time / current * total) if current > 0 else 0,
                     "estimated_remaining_time": (
-                        elapsed_time / current * (total - current)
-                    )
-                    if current > 0
-                    else 0,
+                        (elapsed_time / current * (total - current)) if current > 0 else 0
+                    ),
                     "rate": current / elapsed_time if elapsed_time > 0 else 0,
                 }
 
@@ -1263,9 +1258,7 @@ async def unified_batch_messages_preprocess(
         pbar = None
         start_time = time.time()
         if show_progress and TQDM_AVAILABLE:
-            bar_format = (
-                "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
-            )
+            bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
             pbar = tqdm(
                 total=total_count,
                 desc=progress_desc,
@@ -1313,14 +1306,14 @@ opencv_batch_messages_preprocess = unified_batch_messages_preprocess
 
 # 便捷函数
 async def unified_encode_image_to_base64(
-    image_source: Union[str, List[str]],
-    session: Optional[aiohttp.ClientSession] = None,
-    max_width: Optional[int] = None,
-    max_height: Optional[int] = None,
-    max_pixels: Optional[int] = None,
+    image_source: str | list[str],
+    session: aiohttp.ClientSession | None = None,
+    max_width: int | None = None,
+    max_height: int | None = None,
+    max_pixels: int | None = None,
     return_with_mime: bool = True,
-    processor_config: Optional[UnifiedProcessorConfig] = None,
-) -> Union[str, List[str]]:
+    processor_config: UnifiedProcessorConfig | None = None,
+) -> str | list[str]:
     """
     统一的图像编码函数，支持本地文件和URL
 

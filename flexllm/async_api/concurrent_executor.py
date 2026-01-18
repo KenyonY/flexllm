@@ -1,34 +1,25 @@
 import asyncio
-import time
-import itertools
+import heapq
 import inspect
+import itertools
 import os
+import time
 import uuid
 from asyncio import Queue
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterable
+from dataclasses import dataclass, field
 from typing import (
     Any,
-    Dict,
-    Iterable,
-    List,
-    Optional,
-    Callable,
-    AsyncIterator,
-    AsyncGenerator,
-    Tuple,
-    Union,
-    Awaitable,
     Protocol,
 )
-from dataclasses import dataclass, field
-import heapq
 
-from ..utils.core import async_retry
 from .interface import RequestResult
-from .progress import ProgressTracker, ProgressBarConfig
+from .progress import ProgressBarConfig, ProgressTracker
 
 # FlaxKV2 用于检查点存储
 try:
     from flaxkv2 import FlaxKV
+
     FLAXKV_AVAILABLE = True
 except ImportError:
     FLAXKV_AVAILABLE = False
@@ -47,9 +38,9 @@ class TaskContext:
 
     task_id: int
     data: Any
-    meta: Optional[dict] = None
+    meta: dict | None = None
     retry_count: int = 0
-    executor_kwargs: Optional[dict] = None
+    executor_kwargs: dict | None = None
 
 
 @dataclass
@@ -59,7 +50,7 @@ class TaskItem:
     priority: int
     task_id: int
     data: Any
-    meta: Optional[dict] = field(default_factory=dict)
+    meta: dict | None = field(default_factory=dict)
 
     def __lt__(self, other):
         return self.priority < other.priority
@@ -72,9 +63,9 @@ class ExecutionResult:
     task_id: int
     data: Any
     status: str  # 'success' or 'error'
-    meta: Optional[dict] = None
+    meta: dict | None = None
     latency: float = 0.0
-    error: Optional[Exception] = None
+    error: Exception | None = None
     retry_count: int = 0  # 重试次数
 
 
@@ -82,15 +73,15 @@ class ExecutionResult:
 class StreamingExecutionResult:
     """流式执行结果"""
 
-    completed_tasks: List[ExecutionResult]
-    progress: Optional[ProgressTracker]
+    completed_tasks: list[ExecutionResult]
+    progress: ProgressTracker | None
     is_final: bool
 
 
 class RateLimiter:
     """速率限制器"""
 
-    def __init__(self, max_qps: Optional[float] = None):
+    def __init__(self, max_qps: float | None = None):
         self.max_qps = max_qps
         self.min_interval = 1 / max_qps if max_qps else 0
         self.last_request_time = 0
@@ -181,10 +172,10 @@ class ConcurrentExecutor:
     def __init__(
         self,
         concurrency_limit: int,
-        max_qps: Optional[float] = None,
+        max_qps: float | None = None,
         retry_times: int = 3,
         retry_delay: float = 0.3,
-        error_handler: Optional[Callable[[Exception, Any, int], bool]] = None,
+        error_handler: Callable[[Exception, Any, int], bool] | None = None,
     ):
         self._concurrency_limit = concurrency_limit
         self._rate_limiter = RateLimiter(max_qps)
@@ -231,7 +222,7 @@ class ConcurrentExecutor:
         self,
         func: Callable,
         task_context: TaskContext,
-        executor_kwargs: Optional[dict] = None,
+        executor_kwargs: dict | None = None,
     ) -> Any:
         """智能调用函数，根据函数签名自动适配参数"""
         sig_info = self._inspect_function_signature(func)
@@ -255,9 +246,9 @@ class ConcurrentExecutor:
         async_func: Callable[..., Awaitable[Any]],
         task_data: Any,
         task_id: int,
-        meta: Optional[dict] = None,
-        executor_kwargs: Optional[dict] = None,
-        task_adapter: Optional[Callable] = None,
+        meta: dict | None = None,
+        executor_kwargs: dict | None = None,
+        task_adapter: Callable | None = None,
         **kwargs,
     ) -> ExecutionResult:
         """执行单个异步任务"""
@@ -283,9 +274,7 @@ class ConcurrentExecutor:
 
                     # 使用适配器或智能调用
                     if task_adapter:
-                        args, kwargs_from_adapter = task_adapter(
-                            task_data, task_context
-                        )
+                        args, kwargs_from_adapter = task_adapter(task_data, task_context)
                         if isinstance(args, (list, tuple)):
                             result = await async_func(
                                 *args, **{**executor_kwargs, **kwargs_from_adapter}
@@ -338,7 +327,7 @@ class ConcurrentExecutor:
         self,
         async_func: Callable[..., Awaitable[Any]],
         tasks_data: Iterable[Any],
-        progress: Optional[ProgressTracker] = None,
+        progress: ProgressTracker | None = None,
         batch_size: int = 1,
         **kwargs,
     ) -> AsyncGenerator[StreamingExecutionResult, Any]:
@@ -394,28 +383,24 @@ class ConcurrentExecutor:
                     yield result
 
             active_tasks.add(
-                asyncio.create_task(
-                    self._execute_single_task(async_func, data, task_id, **kwargs)
-                )
+                asyncio.create_task(self._execute_single_task(async_func, data, task_id, **kwargs))
             )
             task_id += 1
 
         # 处理剩余任务
         if active_tasks:
             done, _ = await asyncio.wait(active_tasks)
-            async for result in handle_completed_tasks(
-                done, completed_batch, is_final=True
-            ):
+            async for result in handle_completed_tasks(done, completed_batch, is_final=True):
                 yield result
 
     async def execute_batch(
         self,
         async_func: Callable[..., Awaitable[Any]],
         tasks_data: Iterable[Any],
-        total_tasks: Optional[int] = None,
+        total_tasks: int | None = None,
         show_progress: bool = True,
         **kwargs,
-    ) -> Tuple[List[ExecutionResult], Optional[ProgressTracker]]:
+    ) -> tuple[list[ExecutionResult], ProgressTracker | None]:
         """
         批量执行异步任务
 
@@ -457,9 +442,9 @@ class ConcurrentExecutor:
         queue: Queue,
         async_func: Callable[..., Awaitable[Any]],
         tasks_data: Iterable[Any],
-        total_tasks: Optional[int] = None,
+        total_tasks: int | None = None,
         show_progress: bool = True,
-        batch_size: Optional[int] = None,
+        batch_size: int | None = None,
         **kwargs,
     ):
         """流式执行任务并将结果放入队列"""
@@ -493,9 +478,9 @@ class ConcurrentExecutor:
         self,
         async_func: Callable[..., Awaitable[Any]],
         tasks_data: Iterable[Any],
-        total_tasks: Optional[int] = None,
+        total_tasks: int | None = None,
         show_progress: bool = True,
-        batch_size: Optional[int] = None,
+        batch_size: int | None = None,
         **kwargs,
     ) -> AsyncIterator[StreamingExecutionResult]:
         """
@@ -539,17 +524,16 @@ class ConcurrentExecutor:
         self,
         async_func: Callable[..., Awaitable[Any]],
         tasks_data: Iterable[Any],
-        total_tasks: Optional[int] = None,
+        total_tasks: int | None = None,
         show_progress: bool = True,
         **kwargs,
-    ) -> Tuple[List[ExecutionResult], Optional[ProgressTracker]]:
+    ) -> tuple[list[ExecutionResult], ProgressTracker | None]:
         """同步版本的批量执行"""
         try:
             # 检查是否已经在事件循环中
             loop = asyncio.get_running_loop()
             # 如果已经在事件循环中，使用新的线程执行
             import concurrent.futures
-            import threading
 
             def run_in_thread():
                 return asyncio.run(
@@ -581,10 +565,10 @@ class ConcurrentExecutor:
     async def execute_priority_batch(
         self,
         async_func: Callable[..., Awaitable[Any]],
-        priority_tasks: List[TaskItem],
+        priority_tasks: list[TaskItem],
         show_progress: bool = True,
         **kwargs,
-    ) -> Tuple[List[ExecutionResult], Optional[ProgressTracker]]:
+    ) -> tuple[list[ExecutionResult], ProgressTracker | None]:
         """
         按优先级批量执行任务
 
@@ -669,12 +653,12 @@ class ConcurrentExecutor:
         self,
         async_func: Callable[..., Awaitable[Any]],
         tasks_data: Iterable[Any],
-        task_adapter: Callable[[Any, TaskContext], Tuple[Any, Dict]],
-        executor_kwargs: Optional[dict] = None,
-        total_tasks: Optional[int] = None,
+        task_adapter: Callable[[Any, TaskContext], tuple[Any, dict]],
+        executor_kwargs: dict | None = None,
+        total_tasks: int | None = None,
         show_progress: bool = True,
         **kwargs,
-    ) -> Tuple[List[ExecutionResult], Optional[ProgressTracker]]:
+    ) -> tuple[list[ExecutionResult], ProgressTracker | None]:
         """
         使用任务适配器的批量执行
 
@@ -737,11 +721,11 @@ class ConcurrentExecutor:
         self,
         async_func: Callable[[TaskContext], Awaitable[Any]],
         tasks_data: Iterable[Any],
-        executor_kwargs: Optional[dict] = None,
-        total_tasks: Optional[int] = None,
+        executor_kwargs: dict | None = None,
+        total_tasks: int | None = None,
         show_progress: bool = True,
         **kwargs,
-    ) -> Tuple[List[ExecutionResult], Optional[ProgressTracker]]:
+    ) -> tuple[list[ExecutionResult], ProgressTracker | None]:
         """
         使用上下文模式的批量执行，函数直接接收TaskContext对象
 
@@ -782,10 +766,10 @@ class ConcurrentExecutor:
         self,
         func_factory: Callable[[TaskContext], Callable[..., Awaitable[Any]]],
         tasks_data: Iterable[Any],
-        total_tasks: Optional[int] = None,
+        total_tasks: int | None = None,
         show_progress: bool = True,
         **kwargs,
-    ) -> Tuple[List[ExecutionResult], Optional[ProgressTracker]]:
+    ) -> tuple[list[ExecutionResult], ProgressTracker | None]:
         """
         使用函数工厂的批量执行，可以为每个任务动态创建不同的执行函数
 
@@ -840,6 +824,7 @@ class CheckpointConfig:
         checkpoint_dir: 检查点存储目录
         checkpoint_interval: 每完成 N 个任务保存一次检查点
     """
+
     enabled: bool = False
     checkpoint_dir: str = DEFAULT_CHECKPOINT_DIR
     checkpoint_interval: int = 100
@@ -875,12 +860,12 @@ class CheckpointManager:
         completed, pending_indices = checkpoint.load(checkpoint_id, total_tasks=1000)
     """
 
-    def __init__(self, config: Optional[CheckpointConfig] = None):
+    def __init__(self, config: CheckpointConfig | None = None):
         if not FLAXKV_AVAILABLE:
             raise ImportError("检查点功能需要安装 flaxkv2: pip install flaxkv2")
 
         self.config = config or CheckpointConfig.disabled()
-        self._db: Optional[FlaxKV] = None
+        self._db: FlaxKV | None = None
 
         if self.config.enabled:
             self._db = FlaxKV(
@@ -940,7 +925,7 @@ class CheckpointManager:
     def save_pending(
         self,
         checkpoint_id: str,
-        pending_data: List[Tuple[int, Any]],
+        pending_data: list[tuple[int, Any]],
     ) -> None:
         """
         保存待处理的任务数据
@@ -957,7 +942,7 @@ class CheckpointManager:
         self,
         checkpoint_id: str,
         total_tasks: int,
-    ) -> Tuple[List[ExecutionResult], List[int]]:
+    ) -> tuple[list[ExecutionResult], list[int]]:
         """
         加载检查点
 
@@ -999,14 +984,11 @@ class CheckpointManager:
         if self._db is None:
             return
 
-        keys_to_delete = [
-            key for key in self._db.keys()
-            if key.startswith(f"{checkpoint_id}:")
-        ]
+        keys_to_delete = [key for key in self._db.keys() if key.startswith(f"{checkpoint_id}:")]
         for key in keys_to_delete:
             del self._db[key]
 
-    def list_checkpoints(self) -> List[Dict[str, Any]]:
+    def list_checkpoints(self) -> list[dict[str, Any]]:
         """列出所有检查点"""
         if self._db is None:
             return []
@@ -1016,10 +998,12 @@ class CheckpointManager:
             if key.endswith(":meta"):
                 checkpoint_id = key.replace(":meta", "")
                 meta = self._db[key]
-                checkpoints.append({
-                    "id": checkpoint_id,
-                    **meta,
-                })
+                checkpoints.append(
+                    {
+                        "id": checkpoint_id,
+                        **meta,
+                    }
+                )
 
         return sorted(checkpoints, key=lambda x: x.get("created_at", 0), reverse=True)
 

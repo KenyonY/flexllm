@@ -1,30 +1,29 @@
 import asyncio
 import os
-from typing import Optional, Union, Tuple, List, Dict, Any
+from typing import Any
 
 import aiohttp
 from PIL import Image
 
 from .image_processor import (
+    LANCZOS,
+    ImageCacheConfig,
+    decode_base64_to_bytes,
+    decode_base64_to_file,
+    decode_base64_to_pil,
     encode_base64_from_local_path,
     encode_base64_from_pil,
     encode_image_to_base64,
     encode_to_base64,
-    decode_base64_to_pil,
-    decode_base64_to_file,
-    decode_base64_to_bytes,
-    DEFAULT_CACHE_DIR,
     get_pil_image,
     get_pil_image_sync,
-    LANCZOS,
-    ImageCacheConfig,
 )
 
 # 导入消息处理功能
 from .messages_processor import (
-    process_content_recursive,
-    messages_preprocess,
     batch_process_messages,
+    messages_preprocess,
+    process_content_recursive,
 )
 
 
@@ -60,7 +59,7 @@ class ImageProcessor:
 
     """
 
-    def __init__(self, session: Optional[aiohttp.ClientSession] = None):
+    def __init__(self, session: aiohttp.ClientSession | None = None):
         """初始化ImageProcessor
 
         Args:
@@ -84,11 +83,7 @@ class ImageProcessor:
 
     async def close(self):
         """关闭session（如果是由本类创建的）"""
-        if (
-            self._own_session
-            and self._session_initialized
-            and self._session is not None
-        ):
+        if self._own_session and self._session_initialized and self._session is not None:
             await self._session.close()
             self._session = None
             self._session_initialized = False
@@ -103,9 +98,7 @@ class ImageProcessor:
         await self.close()
 
     # 同步方法（不需要session）
-    def encode_from_local_path(
-        self, file_path: str, return_with_mime: bool = True
-    ) -> str:
+    def encode_from_local_path(self, file_path: str, return_with_mime: bool = True) -> str:
         """从本地文件路径编码图像为base64字符串
 
         Args:
@@ -129,9 +122,7 @@ class ImageProcessor:
         """
         return encode_base64_from_pil(image, return_with_mime)
 
-    def encode_from_url_sync(
-        self, url: str, cache_config: Optional[ImageCacheConfig] = None
-    ) -> str:
+    def encode_from_url_sync(self, url: str, cache_config: ImageCacheConfig | None = None) -> str:
         """从URL同步编码图像为base64字符串
 
         Args:
@@ -155,9 +146,7 @@ class ImageProcessor:
         """
         return decode_base64_to_pil(base64_string)
 
-    def decode_to_file(
-        self, base64_string: str, output_path: str, format: str = "JPEG"
-    ) -> None:
+    def decode_to_file(self, base64_string: str, output_path: str, format: str = "JPEG") -> None:
         """将base64字符串解码并保存为文件
 
         Args:
@@ -183,7 +172,7 @@ class ImageProcessor:
         self,
         url: str,
         return_with_mime: bool = True,
-        cache_config: Optional[ImageCacheConfig] = None,
+        cache_config: ImageCacheConfig | None = None,
     ) -> str:
         """从URL异步编码图像为base64字符串
 
@@ -204,12 +193,12 @@ class ImageProcessor:
     async def get_pil_image(
         self,
         image_source: str,
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
-        max_pixels: Optional[int] = None,
-        cache_config: Optional[ImageCacheConfig] = None,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        max_pixels: int | None = None,
+        cache_config: ImageCacheConfig | None = None,
         return_cache_path: bool = False,
-    ) -> Union[Image.Image, Tuple[Image.Image, str]]:
+    ) -> Image.Image | tuple[Image.Image, str]:
         """获取图像，支持多种输入源和大小限制
 
         Args:
@@ -265,12 +254,12 @@ class ImageProcessor:
 
     async def encode_image(
         self,
-        image_source: Union[str, Image.Image],
-        max_width: Optional[int] = None,
-        max_height: Optional[int] = None,
-        max_pixels: Optional[int] = None,
+        image_source: str | Image.Image,
+        max_width: int | None = None,
+        max_height: int | None = None,
+        max_pixels: int | None = None,
         return_with_mime: bool = True,
-        cache_config: Optional[ImageCacheConfig] = None,
+        cache_config: ImageCacheConfig | None = None,
     ) -> str:
         """编码图像为base64字符串，支持多种输入源和大小限制
 
@@ -298,11 +287,11 @@ class ImageProcessor:
 
     async def encode_to_base64(
         self,
-        file_source: Union[str, Image.Image],
+        file_source: str | Image.Image,
         return_with_mime: bool = True,
         return_pil: bool = False,
-        cache_config: Optional[ImageCacheConfig] = None,
-    ) -> Union[str, Tuple[str, Image.Image], Image.Image]:
+        cache_config: ImageCacheConfig | None = None,
+    ) -> str | tuple[str, Image.Image] | Image.Image:
         """通用的编码方法，支持多种输入源和返回格式
 
         Args:
@@ -326,11 +315,11 @@ class ImageProcessor:
 
     async def process_content(
         self,
-        content: Dict[str, Any],
+        content: dict[str, Any],
         inplace: bool = True,
-        cache_config: Optional[ImageCacheConfig] = None,
+        cache_config: ImageCacheConfig | None = None,
         **kwargs,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """递归处理内容中的图像URL
 
         Args:
@@ -350,11 +339,11 @@ class ImageProcessor:
 
     async def preprocess_messages(
         self,
-        messages: List[Dict[str, Any]],
+        messages: list[dict[str, Any]],
         inplace: bool = False,
-        cache_config: Optional[ImageCacheConfig] = None,
+        cache_config: ImageCacheConfig | None = None,
         **kwargs,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """预处理消息列表中的图像URL
 
         Args:
@@ -375,12 +364,12 @@ class ImageProcessor:
 
     async def batch_process_messages(
         self,
-        messages_list: List[List[Dict[str, Any]]],
+        messages_list: list[list[dict[str, Any]]],
         max_concurrent: int = 5,
         inplace: bool = False,
-        cache_config: Optional[ImageCacheConfig] = None,
+        cache_config: ImageCacheConfig | None = None,
         **kwargs,
-    ) -> List[List[Dict[str, Any]]]:
+    ) -> list[list[dict[str, Any]]]:
         """批量处理多组消息列表
 
         Args:
@@ -432,9 +421,7 @@ if __name__ == "__main__":
         # 使用上下文管理器自动管理session生命周期
         async with ImageProcessor() as processor:
             # 从URL编码图像
-            base64_data = await processor.encode_from_url(
-                "https://example.com/image.jpg"
-            )
+            base64_data = await processor.encode_from_url("https://example.com/image.jpg")
             # print(f"Encoded image length: {len(base64_data)}")
 
             # 使用缓存配置

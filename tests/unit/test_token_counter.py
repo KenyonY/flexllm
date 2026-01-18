@@ -1,14 +1,12 @@
 """Tests for token_counter module."""
 
-import pytest
-
 from flexllm import (
-    count_tokens,
-    count_messages_tokens,
-    estimate_cost,
-    estimate_batch_cost,
-    messages_hash,
     MODEL_PRICING,
+    count_messages_tokens,
+    count_tokens,
+    estimate_batch_cost,
+    estimate_cost,
+    messages_hash,
 )
 
 
@@ -179,6 +177,4 @@ class TestModelPricing:
         """Test that common models are in pricing."""
         common_models = ["gpt-4o", "gpt-4", "gpt-3.5-turbo"]
         for model in common_models:
-            assert model in MODEL_PRICING or any(
-                model in key for key in MODEL_PRICING.keys()
-            )
+            assert model in MODEL_PRICING or any(model in key for key in MODEL_PRICING.keys())

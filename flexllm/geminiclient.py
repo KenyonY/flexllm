@@ -5,7 +5,7 @@ Gemini API Client - Google Gemini 模型的批量调用客户端
 """
 
 import re
-from typing import List, Optional, Any, Union
+from typing import Any
 
 from loguru import logger
 
@@ -67,7 +67,7 @@ class GeminiClient(LLMClientBase):
         retry_delay: float = 1.0,
         cache_image: bool = False,
         cache_dir: str = "image_cache",
-        cache: Optional[ResponseCacheConfig] = None,
+        cache: ResponseCacheConfig | None = None,
         use_vertex_ai: bool = False,
         project_id: str = None,
         location: str = "us-central1",
@@ -129,16 +129,16 @@ class GeminiClient(LLMClientBase):
 
     def _build_request_body(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str,
         stream: bool = False,
         max_tokens: int = None,
         temperature: float = None,
         top_p: float = None,
         top_k: int = None,
-        stop_sequences: List[str] = None,
-        safety_settings: List[dict] = None,
-        thinking: Union[bool, str, None] = None,
+        stop_sequences: list[str] = None,
+        safety_settings: list[dict] = None,
+        thinking: bool | str | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -193,7 +193,7 @@ class GeminiClient(LLMClientBase):
 
         return body
 
-    def _extract_content(self, response_data: dict) -> Optional[str]:
+    def _extract_content(self, response_data: dict) -> str | None:
         try:
             candidates = response_data.get("candidates", [])
             if not candidates:
@@ -210,7 +210,7 @@ class GeminiClient(LLMClientBase):
             logger.warning(f"Failed to extract response text: {e}")
             return None
 
-    def _extract_usage(self, response_data: dict) -> Optional[dict]:
+    def _extract_usage(self, response_data: dict) -> dict | None:
         """
         提取 Gemini API 的 usage 信息
 
@@ -263,6 +263,7 @@ class GeminiClient(LLMClientBase):
         }
         """
         import json
+
         from .base_client import ToolCall
 
         try:
@@ -275,14 +276,16 @@ class GeminiClient(LLMClientBase):
             for i, part in enumerate(parts):
                 if "functionCall" in part:
                     fc = part["functionCall"]
-                    tool_calls.append(ToolCall(
-                        id=f"call_{i}",  # Gemini 没有 id，生成一个
-                        type="function",
-                        function={
-                            "name": fc.get("name", ""),
-                            "arguments": json.dumps(fc.get("args", {}))
-                        }
-                    ))
+                    tool_calls.append(
+                        ToolCall(
+                            id=f"call_{i}",  # Gemini 没有 id，生成一个
+                            type="function",
+                            function={
+                                "name": fc.get("name", ""),
+                                "arguments": json.dumps(fc.get("args", {})),
+                            },
+                        )
+                    )
             return tool_calls if tool_calls else None
         except Exception:
             return None
@@ -339,7 +342,7 @@ class GeminiClient(LLMClientBase):
             logger.warning(f"Failed to parse thoughts: {e}")
             return {"thought": "", "answer": ""}
 
-    def _extract_stream_content(self, data: dict) -> Optional[str]:
+    def _extract_stream_content(self, data: dict) -> str | None:
         """
         从 Gemini 流式响应中提取文本内容
 
@@ -372,7 +375,7 @@ class GeminiClient(LLMClientBase):
 
     async def chat_completions_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_usage: bool = False,
         preprocess_msg: bool = False,
@@ -397,8 +400,9 @@ class GeminiClient(LLMClientBase):
             - return_usage=False: str 内容片段
             - return_usage=True: dict，包含 type 和对应数据
         """
-        import aiohttp
         import json
+
+        import aiohttp
 
         effective_model = self._get_effective_model(model)
         messages = await self._preprocess_messages(messages, preprocess_msg)
@@ -413,7 +417,9 @@ class GeminiClient(LLMClientBase):
         aio_timeout = aiohttp.ClientTimeout(total=effective_timeout)
 
         async with aiohttp.ClientSession(trust_env=True) as session:
-            async with session.post(effective_url, json=body, headers=headers, timeout=aio_timeout) as response:
+            async with session.post(
+                effective_url, json=body, headers=headers, timeout=aio_timeout
+            ) as response:
                 if response.status != 200:
                     error_text = await response.text()
                     raise Exception(f"HTTP {response.status}: {error_text}")
@@ -457,9 +463,10 @@ class GeminiClient(LLMClientBase):
             import google.auth
             import google.auth.transport.requests
 
-            credentials = self._credentials or google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"]
-            )[0]
+            credentials = (
+                self._credentials
+                or google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])[0]
+            )
 
             request = google.auth.transport.requests.Request()
             credentials.refresh(request)
@@ -473,8 +480,8 @@ class GeminiClient(LLMClientBase):
             raise RuntimeError(f"获取 Vertex AI 访问令牌失败: {e}")
 
     def _convert_messages_to_contents(
-        self, messages: List[dict], system_instruction: str = None
-    ) -> tuple[List[dict], Optional[dict]]:
+        self, messages: list[dict], system_instruction: str = None
+    ) -> tuple[list[dict], dict | None]:
         """将 OpenAI 格式的 messages 转换为 Gemini 格式"""
         contents = []
         extracted_system = system_instruction
@@ -500,7 +507,7 @@ class GeminiClient(LLMClientBase):
         system_obj = {"parts": [{"text": extracted_system}]} if extracted_system else None
         return contents, system_obj
 
-    def _convert_content_to_parts(self, content: Any) -> List[dict]:
+    def _convert_content_to_parts(self, content: Any) -> list[dict]:
         """将 OpenAI 格式的 content 转换为 Gemini 格式的 parts"""
         if content is None:
             return []
@@ -525,7 +532,7 @@ class GeminiClient(LLMClientBase):
             return parts
         return []
 
-    def _convert_image_url(self, image_url_obj: dict) -> Optional[dict]:
+    def _convert_image_url(self, image_url_obj: dict) -> dict | None:
         """将 OpenAI 的 image_url 格式转换为 Gemini 的 inline_data 格式"""
         url = image_url_obj.get("url", "")
         if not url:
@@ -539,14 +546,16 @@ class GeminiClient(LLMClientBase):
         logger.warning(f"Gemini API 不直接支持外部 URL，请先转换为 base64: {url[:50]}...")
         return None
 
-    def _convert_image_direct(self, image_obj: dict) -> Optional[dict]:
+    def _convert_image_direct(self, image_obj: dict) -> dict | None:
         """处理直接的图片数据"""
         data = image_obj.get("data", "")
         if data:
-            return {"inline_data": {"mime_type": image_obj.get("mime_type", "image/jpeg"), "data": data}}
+            return {
+                "inline_data": {"mime_type": image_obj.get("mime_type", "image/jpeg"), "data": data}
+            }
         return None
 
-    def model_list(self) -> List[str]:
+    def model_list(self) -> list[str]:
         """获取可用模型列表"""
         import requests
 

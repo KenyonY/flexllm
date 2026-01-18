@@ -1,11 +1,13 @@
 from __future__ import annotations
-import asyncio
-import aiohttp
-import time
-from copy import deepcopy
-from typing import Optional, Callable, TYPE_CHECKING
-from loguru import logger
 
+import asyncio
+import time
+from collections.abc import Callable
+from copy import deepcopy
+from typing import TYPE_CHECKING
+
+import aiohttp
+from loguru import logger
 
 if TYPE_CHECKING:
     from .image_processor import ImageCacheConfig
@@ -21,7 +23,7 @@ except ImportError:
 
 
 async def process_content_recursive(
-    content, session, cache_config: Optional["ImageCacheConfig"] = None, **kwargs
+    content, session, cache_config: ImageCacheConfig | None = None, **kwargs
 ):
     """Recursively process a content dictionary, replacing any URL with its Base64 equivalent.
 
@@ -47,18 +49,14 @@ async def process_content_recursive(
                 if base64_data:
                     content[key] = base64_data
             else:
-                await process_content_recursive(
-                    value, session, cache_config=cache_config, **kwargs
-                )
+                await process_content_recursive(value, session, cache_config=cache_config, **kwargs)
     elif isinstance(content, list):
         for item in content:
-            await process_content_recursive(
-                item, session, cache_config=cache_config, **kwargs
-            )
+            await process_content_recursive(item, session, cache_config=cache_config, **kwargs)
 
 
 async def messages_preprocess(
-    messages, inplace=False, cache_config: Optional["ImageCacheConfig"] = None, **kwargs
+    messages, inplace=False, cache_config: ImageCacheConfig | None = None, **kwargs
 ):
     """Process a list of messages, converting URLs in any type of content to Base64.
 
@@ -73,9 +71,7 @@ async def messages_preprocess(
 
     async with aiohttp.ClientSession() as session:
         tasks = [
-            process_content_recursive(
-                message, session, cache_config=cache_config, **kwargs
-            )
+            process_content_recursive(message, session, cache_config=cache_config, **kwargs)
             for message in messages
         ]
         await asyncio.gather(*tasks)
@@ -86,9 +82,9 @@ async def batch_messages_preprocess(
     messages_list,
     max_concurrent=5,
     inplace=False,
-    cache_config: Optional["ImageCacheConfig"] = None,
+    cache_config: ImageCacheConfig | None = None,
     as_iterator=False,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
+    progress_callback: Callable[[int, int], None] | None = None,
     show_progress: bool = False,
     progress_desc: str = "处理消息",
     **kwargs,
@@ -135,14 +131,10 @@ async def batch_messages_preprocess(
                     "total": total,
                     "percentage": (current / total * 100) if total > 0 else 0,
                     "elapsed_time": elapsed_time,
-                    "estimated_total_time": (elapsed_time / current * total)
-                    if current > 0
-                    else 0,
+                    "estimated_total_time": (elapsed_time / current * total) if current > 0 else 0,
                     "estimated_remaining_time": (
-                        elapsed_time / current * (total - current)
-                    )
-                    if current > 0
-                    else 0,
+                        (elapsed_time / current * (total - current)) if current > 0 else 0
+                    ),
                     "rate": current / elapsed_time if elapsed_time > 0 else 0,
                 }
 
@@ -301,9 +293,7 @@ async def batch_messages_preprocess(
         start_time = time.time()
         if show_progress and TQDM_AVAILABLE:
             # 自定义进度条格式，显示时间信息
-            bar_format = (
-                "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
-            )
+            bar_format = "{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
             pbar = tqdm(
                 total=total_count,
                 desc=progress_desc,

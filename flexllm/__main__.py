@@ -8,18 +8,19 @@ flexllm CLI - LLM 客户端命令行工具
     flexllm models
     flexllm test
 """
+
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
-import asyncio
 from pathlib import Path
-from typing import Optional, List, Tuple, Annotated
+from typing import Annotated
 
 try:
     import typer
-    from typer import Typer, Option, Argument
+    from typer import Argument, Option, Typer
 
     app = Typer(
         name="flexllm",
@@ -55,7 +56,7 @@ class FlexLLMConfig:
                 try:
                     import yaml
 
-                    with open(config_path, "r", encoding="utf-8") as f:
+                    with open(config_path, encoding="utf-8") as f:
                         file_config = yaml.safe_load(f)
                     if file_config:
                         return {**default_config, **file_config}
@@ -71,7 +72,7 @@ class FlexLLMConfig:
 
         return default_config
 
-    def _config_from_env(self) -> Optional[dict]:
+    def _config_from_env(self) -> dict | None:
         """从环境变量构建配置"""
         base_url = os.environ.get("FLEXLLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
         api_key = os.environ.get("FLEXLLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -87,7 +88,7 @@ class FlexLLMConfig:
             }
         return None
 
-    def get_model_config(self, name_or_id: str = None) -> Optional[dict]:
+    def get_model_config(self, name_or_id: str = None) -> dict | None:
         """获取模型配置"""
         models = self.config.get("models", [])
 
@@ -112,7 +113,7 @@ class FlexLLMConfig:
 
         return None
 
-    def get_config_path(self) -> Optional[Path]:
+    def get_config_path(self) -> Path | None:
         """获取存在的配置文件路径"""
         for path in self._get_config_paths():
             if path.exists():
@@ -160,7 +161,7 @@ class FlexLLMConfig:
 
 
 # 全局配置实例
-_config: Optional[FlexLLMConfig] = None
+_config: FlexLLMConfig | None = None
 
 
 def get_config() -> FlexLLMConfig:
@@ -173,7 +174,7 @@ def get_config() -> FlexLLMConfig:
 # ========== 输入格式处理 ==========
 
 
-def detect_input_format(record: dict) -> Tuple[str, List[str]]:
+def detect_input_format(record: dict) -> tuple[str, list[str]]:
     """检测输入记录的格式类型"""
     if "messages" in record:
         return "openai_chat", ["messages"]
@@ -186,8 +187,8 @@ def detect_input_format(record: dict) -> Tuple[str, List[str]]:
 
 
 def convert_to_messages(
-    record: dict, format_type: str, message_fields: List[str], global_system: str = None
-) -> Tuple[List[dict], dict]:
+    record: dict, format_type: str, message_fields: list[str], global_system: str = None
+) -> tuple[list[dict], dict]:
     """将输入记录转换为 messages 格式"""
     messages = []
     used_fields = set()
@@ -231,12 +232,12 @@ def convert_to_messages(
     return messages, metadata
 
 
-def parse_batch_input(input_path: str = None) -> Tuple[List[dict], str, List[str]]:
+def parse_batch_input(input_path: str = None) -> tuple[list[dict], str, list[str]]:
     """解析批量输入文件或 stdin"""
     records = []
 
     if input_path:
-        with open(input_path, "r", encoding="utf-8") as f:
+        with open(input_path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -272,9 +273,9 @@ if HAS_TYPER:
 
     @app.command()
     def ask(
-        prompt: Annotated[Optional[str], Argument(help="用户问题")] = None,
-        system: Annotated[Optional[str], Option("-s", "--system", help="系统提示词")] = None,
-        model: Annotated[Optional[str], Option("-m", "--model", help="模型名称")] = None,
+        prompt: Annotated[str | None, Argument(help="用户问题")] = None,
+        system: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
+        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
     ):
         """LLM 快速问答（支持管道输入）
 
@@ -338,11 +339,11 @@ if HAS_TYPER:
 
     @app.command()
     def chat(
-        message: Annotated[Optional[str], Argument(help="单条消息（不提供则进入多轮对话）")] = None,
-        model: Annotated[Optional[str], Option("-m", "--model", help="模型名称")] = None,
-        base_url: Annotated[Optional[str], Option("--base-url", help="API 地址")] = None,
-        api_key: Annotated[Optional[str], Option("--api-key", help="API 密钥")] = None,
-        system_prompt: Annotated[Optional[str], Option("-s", "--system", help="系统提示词")] = None,
+        message: Annotated[str | None, Argument(help="单条消息（不提供则进入多轮对话）")] = None,
+        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
+        system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
         temperature: Annotated[float, Option("-t", "--temperature", help="采样温度")] = 0.7,
         max_tokens: Annotated[int, Option("--max-tokens", help="最大生成 token 数")] = 4096,
         no_stream: Annotated[bool, Option("--no-stream", help="禁用流式输出")] = False,
@@ -368,22 +369,28 @@ if HAS_TYPER:
         stream = not no_stream
 
         if message:
-            _single_chat(message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream)
+            _single_chat(
+                message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream
+            )
         else:
-            _interactive_chat(model, base_url, api_key, system_prompt, temperature, max_tokens, stream)
+            _interactive_chat(
+                model, base_url, api_key, system_prompt, temperature, max_tokens, stream
+            )
 
     @app.command()
     def batch(
-        input: Annotated[Optional[str], Argument(help="输入文件路径（省略则从 stdin 读取）")] = None,
-        output: Annotated[Optional[str], Option("-o", "--output", help="输出文件路径（必需）")] = None,
-        model: Annotated[Optional[str], Option("-m", "--model", help="模型名称")] = None,
+        input: Annotated[str | None, Argument(help="输入文件路径（省略则从 stdin 读取）")] = None,
+        output: Annotated[str | None, Option("-o", "--output", help="输出文件路径（必需）")] = None,
+        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
         concurrency: Annotated[int, Option("-c", "--concurrency", help="并发数")] = 10,
-        max_qps: Annotated[Optional[float], Option("--max-qps", help="每秒最大请求数")] = None,
-        system: Annotated[Optional[str], Option("-s", "--system", help="全局 system prompt")] = None,
-        temperature: Annotated[Optional[float], Option("-t", "--temperature", help="采样温度")] = None,
-        max_tokens: Annotated[Optional[int], Option("--max-tokens", help="最大生成 token 数")] = None,
+        max_qps: Annotated[float | None, Option("--max-qps", help="每秒最大请求数")] = None,
+        system: Annotated[str | None, Option("-s", "--system", help="全局 system prompt")] = None,
+        temperature: Annotated[float | None, Option("-t", "--temperature", help="采样温度")] = None,
+        max_tokens: Annotated[int | None, Option("--max-tokens", help="最大生成 token 数")] = None,
         # 新增 CLI 快捷选项
-        cache: Annotated[Optional[bool], Option("--cache/--no-cache", help="启用/禁用响应缓存")] = None,
+        cache: Annotated[
+            bool | None, Option("--cache/--no-cache", help="启用/禁用响应缓存")
+        ] = None,
         return_usage: Annotated[bool, Option("--return-usage", help="输出 token 统计")] = False,
         preprocess_msg: Annotated[bool, Option("--preprocess-msg", help="预处理图片消息")] = False,
     ):
@@ -441,7 +448,9 @@ if HAS_TYPER:
             metadata_list = []
 
             for record in records:
-                messages, metadata = convert_to_messages(record, format_type, message_fields, system)
+                messages, metadata = convert_to_messages(
+                    record, format_type, message_fields, system
+                )
                 messages_list.append(messages)
                 metadata_list.append(metadata if metadata else None)
 
@@ -451,6 +460,7 @@ if HAS_TYPER:
 
             async def _run_batch():
                 from flexllm import LLMClient
+
                 from .cache import ResponseCacheConfig
 
                 # 构建缓存配置
@@ -521,9 +531,9 @@ if HAS_TYPER:
 
     @app.command()
     def models(
-        base_url: Annotated[Optional[str], Option("--base-url", help="API 地址")] = None,
-        api_key: Annotated[Optional[str], Option("--api-key", help="API 密钥")] = None,
-        name: Annotated[Optional[str], Option("-n", "--name", help="模型配置名称")] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
+        name: Annotated[str | None, Option("-n", "--name", help="模型配置名称")] = None,
     ):
         """列出远程服务器上的可用模型"""
         import requests
@@ -549,12 +559,14 @@ if HAS_TYPER:
                 response = requests.get(url, timeout=10)
             else:
                 headers = {"Authorization": f"Bearer {api_key}"}
-                response = requests.get(f"{base_url.rstrip('/')}/models", headers=headers, timeout=10)
+                response = requests.get(
+                    f"{base_url.rstrip('/')}/models", headers=headers, timeout=10
+                )
 
             if response.status_code == 200:
                 models_data = response.json()
 
-                print(f"\n可用模型列表")
+                print("\n可用模型列表")
                 print(f"服务器: {base_url}")
                 print("-" * 50)
 
@@ -648,7 +660,7 @@ if HAS_TYPER:
         try:
             import yaml
 
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 file_config = yaml.safe_load(f) or {}
 
             default_value = model_config.get("name", model_config.get("id"))
@@ -673,17 +685,18 @@ if HAS_TYPER:
 
     @app.command()
     def test(
-        model: Annotated[Optional[str], Option("-m", "--model", help="模型名称")] = None,
-        base_url: Annotated[Optional[str], Option("--base-url", help="API 地址")] = None,
-        api_key: Annotated[Optional[str], Option("--api-key", help="API 密钥")] = None,
+        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
         message: Annotated[
             str, Option("--message", help="测试消息")
         ] = "Hello, please respond with 'OK' if you can see this message.",
         timeout: Annotated[int, Option("--timeout", help="超时时间（秒）")] = 30,
     ):
         """测试 LLM 服务连接"""
-        import requests
         import time
+
+        import requests
 
         config = get_config()
         model_config = config.get_model_config(model)
@@ -696,10 +709,10 @@ if HAS_TYPER:
             print("错误: 未配置 base_url", file=sys.stderr)
             raise typer.Exit(1)
 
-        print(f"\nLLM 服务连接测试")
+        print("\nLLM 服务连接测试")
         print("-" * 50)
 
-        print(f"\n1. 测试服务器连接...")
+        print("\n1. 测试服务器连接...")
         print(f"   地址: {base_url}")
         try:
             start = time.time()
@@ -728,14 +741,21 @@ if HAS_TYPER:
             raise typer.Exit(1)
 
         if model:
-            print(f"\n2. 测试 Chat API...")
+            print("\n2. 测试 Chat API...")
             print(f"   模型: {model}")
             try:
                 start = time.time()
                 response = requests.post(
                     f"{base_url.rstrip('/')}/chat/completions",
-                    headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-                    json={"model": model, "messages": [{"role": "user", "content": message}], "max_tokens": 50},
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": message}],
+                        "max_tokens": 50,
+                    },
                     timeout=timeout,
                 )
                 elapsed = time.time() - start
@@ -755,7 +775,7 @@ if HAS_TYPER:
 
     @app.command()
     def init(
-        path: Annotated[Optional[str], Option("-p", "--path", help="配置文件路径")] = None,
+        path: Annotated[str | None, Option("-p", "--path", help="配置文件路径")] = None,
     ):
         """初始化配置文件"""
         if path is None:
@@ -829,7 +849,7 @@ models:
 
     @app.command()
     def pricing(
-        model: Annotated[Optional[str], Argument(help="模型名称（支持模糊匹配）")] = None,
+        model: Annotated[str | None, Argument(help="模型名称（支持模糊匹配）")] = None,
         update: Annotated[bool, Option("--update", help="从 OpenRouter 更新定价表")] = False,
         json_output: Annotated[bool, Option("--json", help="输出 JSON 格式")] = False,
     ):
@@ -869,17 +889,22 @@ models:
         if model:
             # 模糊匹配
             matches = {
-                name: price for name, price in MODEL_PRICING.items()
+                name: price
+                for name, price in MODEL_PRICING.items()
                 if model.lower() in name.lower()
             }
 
             if not matches:
                 print(f"未找到匹配 '{model}' 的模型", file=sys.stderr)
-                print(f"\n可用模型: {', '.join(sorted(MODEL_PRICING.keys())[:10])}...", file=sys.stderr)
+                print(
+                    f"\n可用模型: {', '.join(sorted(MODEL_PRICING.keys())[:10])}...",
+                    file=sys.stderr,
+                )
                 raise typer.Exit(1)
 
             if json_output:
                 import json as json_module
+
                 output = {
                     name: {
                         "input_per_1m": round(p["input"] * 1e6, 4),
@@ -902,6 +927,7 @@ models:
             # 列出所有模型
             if json_output:
                 import json as json_module
+
                 output = {
                     name: {
                         "input_per_1m": round(p["input"] * 1e6, 4),
@@ -943,7 +969,18 @@ models:
                 print(f"{'模型':<30} {'输入 ($/1M)':<15} {'输出 ($/1M)':<15}")
                 print("=" * 60)
 
-                for group_name in ["OpenAI", "Anthropic", "Google", "DeepSeek", "Alibaba", "Mistral", "Meta", "xAI", "Amazon", "Other"]:
+                for group_name in [
+                    "OpenAI",
+                    "Anthropic",
+                    "Google",
+                    "DeepSeek",
+                    "Alibaba",
+                    "Mistral",
+                    "Meta",
+                    "xAI",
+                    "Amazon",
+                    "Other",
+                ]:
                     if group_name not in groups:
                         continue
                     models = groups[group_name]
@@ -989,7 +1026,9 @@ def _single_chat(message, model, base_url, api_key, system_prompt, temperature, 
                 print(chunk, end="", flush=True)
             print()
         else:
-            result = await client.chat_completions(messages, temperature=temperature, max_tokens=max_tokens)
+            result = await client.chat_completions(
+                messages, temperature=temperature, max_tokens=max_tokens
+            )
             print(f"Assistant: {result}")
 
     try:
@@ -1012,10 +1051,10 @@ def _interactive_chat(model, base_url, api_key, system_prompt, temperature, max_
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
 
-        print(f"\n多轮对话模式")
+        print("\n多轮对话模式")
         print(f"模型: {model}")
         print(f"服务器: {base_url}")
-        print(f"输入 'quit' 或 Ctrl+C 退出")
+        print("输入 'quit' 或 Ctrl+C 退出")
         print("-" * 50)
 
         while True:

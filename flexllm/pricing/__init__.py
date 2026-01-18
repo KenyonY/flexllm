@@ -13,10 +13,10 @@ from typing import Dict, Optional
 PRICING_FILE = Path(__file__).parent / "data.json"
 
 # 缓存的定价数据
-_pricing_cache: Optional[Dict[str, Dict[str, float]]] = None
+_pricing_cache: dict[str, dict[str, float]] | None = None
 
 
-def _load_pricing() -> Dict[str, Dict[str, float]]:
+def _load_pricing() -> dict[str, dict[str, float]]:
     """
     从 data.json 加载定价数据
 
@@ -27,7 +27,7 @@ def _load_pricing() -> Dict[str, Dict[str, float]]:
         return {}
 
     try:
-        with open(PRICING_FILE, "r", encoding="utf-8") as f:
+        with open(PRICING_FILE, encoding="utf-8") as f:
             data = json.load(f)
 
         models = data.get("models", {})
@@ -40,7 +40,7 @@ def _load_pricing() -> Dict[str, Dict[str, float]]:
         return {}
 
 
-def get_pricing() -> Dict[str, Dict[str, float]]:
+def get_pricing() -> dict[str, dict[str, float]]:
     """获取定价数据（带缓存）"""
     global _pricing_cache
     if _pricing_cache is None:
@@ -54,7 +54,7 @@ def reload_pricing():
     _pricing_cache = _load_pricing()
 
 
-def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
+def get_model_pricing(model: str) -> dict[str, float] | None:
     """
     获取指定模型的定价
 
@@ -79,11 +79,7 @@ def get_model_pricing(model: str) -> Optional[Dict[str, float]]:
     return None
 
 
-def estimate_cost(
-    input_tokens: int,
-    output_tokens: int = 0,
-    model: str = "gpt-4o"
-) -> float:
+def estimate_cost(input_tokens: int, output_tokens: int = 0, model: str = "gpt-4o") -> float:
     """
     估算 API 调用成本
 

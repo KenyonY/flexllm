@@ -1,7 +1,8 @@
 """Test LLMClient core functionality"""
 
 import pytest
-from flexllm import LLMClient, ResponseCacheConfig
+
+from flexllm import LLMClient
 
 
 class TestLLMClientSync:

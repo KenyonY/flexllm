@@ -1,20 +1,18 @@
-import numpy as np
 import base64
-import os
 import hashlib
 import json
+import os
 import time
-from copy import deepcopy
+from dataclasses import dataclass
 from io import BytesIO
 from mimetypes import guess_type
 from pathlib import Path
-from dataclasses import dataclass, field
-from typing import Optional, Tuple, Union
 
 import aiohttp
+import numpy as np
 import requests
-from loguru import logger
 from PIL import Image
+
 from ..utils.core import async_retry
 
 # 兼容不同版本的PIL
@@ -32,7 +30,7 @@ def safe_repr_source(source: str, max_length: int = 100) -> str:
     """安全地表示图像源，避免输出大量base64字符串"""
     if not source:
         return "空源"
-    
+
     # 检查是否是base64数据URI
     if source.startswith("data:image/") and ";base64," in source:
         parts = source.split(";base64,", 1)
@@ -40,11 +38,13 @@ def safe_repr_source(source: str, max_length: int = 100) -> str:
             mime_type = parts[0].replace("data:", "")
             base64_data = parts[1]
             return f"[{mime_type} base64数据 长度:{len(base64_data)}]"
-    
+
     # 检查是否是纯base64字符串（很长且只包含base64字符）
-    if len(source) > 100 and all(c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in source):
+    if len(source) > 100 and all(
+        c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=" for c in source
+    ):
         return f"[base64数据 长度:{len(source)}]"
-    
+
     # 普通字符串，截断显示
     if len(source) <= max_length:
         return source
@@ -56,12 +56,14 @@ def safe_repr_error(error_msg: str, max_length: int = 200) -> str:
     """安全地表示错误信息，避免输出大量base64字符串"""
     if not error_msg:
         return error_msg
-    
+
     # 检查错误信息中是否包含data:image的base64数据
     if "data:image/" in error_msg and ";base64," in error_msg:
         import re
+
         # 使用正则表达式替换base64数据URI
-        pattern = r'data:image/[^;]+;base64,[A-Za-z0-9+/]+=*'
+        pattern = r"data:image/[^;]+;base64,[A-Za-z0-9+/]+=*"
+
         def replace_base64(match):
             full_uri = match.group(0)
             parts = full_uri.split(";base64,", 1)
@@ -70,8 +72,9 @@ def safe_repr_error(error_msg: str, max_length: int = 200) -> str:
                 base64_data = parts[1]
                 return f"[{mime_type} base64数据 长度:{len(base64_data)}]"
             return full_uri
+
         error_msg = re.sub(pattern, replace_base64, error_msg)
-    
+
     # 截断过长的错误信息
     if len(error_msg) <= max_length:
         return error_msg
@@ -153,9 +156,7 @@ def encode_base64_from_local_path(file_path, return_with_mime=True):
         return base64_data
 
 
-async def encode_base64_from_url(
-    url, session: aiohttp.ClientSession, return_with_mime=True
-):
+async def encode_base64_from_url(url, session: aiohttp.ClientSession, return_with_mime=True):
     """Fetch a file from a URL and encode it to a Base64 string, with optional MIME type prefix."""
     async with session.get(url) as response:
         response.raise_for_status()
@@ -185,8 +186,8 @@ async def encode_to_base64(
     session: aiohttp.ClientSession,
     return_with_mime: bool = True,
     return_pil: bool = False,
-    cache_config: Optional[ImageCacheConfig] = None,
-) -> Union[str, Tuple[str, Image.Image], Image.Image]:
+    cache_config: ImageCacheConfig | None = None,
+) -> str | tuple[str, Image.Image] | Image.Image:
     """A unified function to encode files to Base64 strings or return PIL Image objects.
 
     Args:
@@ -230,9 +231,7 @@ async def encode_to_base64(
             # 对于URL，使用get_pil_image来获取图像，以利用缓存功能
             if return_pil or mime_type and mime_type.startswith("image"):
                 # 获取PIL图像并利用缓存
-                pil_image = await get_pil_image(
-                    file_source, session, cache_config=cache_config
-                )
+                pil_image = await get_pil_image(file_source, session, cache_config=cache_config)
                 if return_pil and not return_with_mime:
                     return pil_image
 
@@ -247,9 +246,7 @@ async def encode_to_base64(
                 async with session.get(file_source) as response:
                     response.raise_for_status()
                     content = await response.read()
-                    mime_type = response.headers.get(
-                        "Content-Type", "application/octet-stream"
-                    )
+                    mime_type = response.headers.get("Content-Type", "application/octet-stream")
         else:
             raise ValueError("Unsupported file source type.")
 
@@ -268,9 +265,7 @@ async def encode_to_base64(
         raise ValueError("Unsupported file source type.")
 
     base64_data = base64.b64encode(content).decode("utf-8")
-    result = (
-        f"data:{mime_type};base64,{base64_data}" if return_with_mime else base64_data
-    )
+    result = f"data:{mime_type};base64,{base64_data}" if return_with_mime else base64_data
 
     if return_pil and pil_image:
         return result, pil_image
@@ -280,11 +275,11 @@ async def encode_to_base64(
 async def encode_image_to_base64(
     image_source,
     session: aiohttp.ClientSession,
-    max_width: Optional[int] = None,
-    max_height: Optional[int] = None,
-    max_pixels: Optional[int] = None,
+    max_width: int | None = None,
+    max_height: int | None = None,
+    max_pixels: int | None = None,
     return_with_mime: bool = True,
-    cache_config: Optional[ImageCacheConfig] = None,
+    cache_config: ImageCacheConfig | None = None,
 ) -> str:
     """Encode an image to base64 string with optional size constraints.
 
@@ -303,9 +298,7 @@ async def encode_image_to_base64(
     try:
         import cv2
     except ImportError:
-        raise ImportError(
-            "图像处理功能需要安装 opencv-python。请运行: pip install flexllm[image]"
-        )
+        raise ImportError("图像处理功能需要安装 opencv-python。请运行: pip install flexllm[image]")
 
     if isinstance(image_source, Image.Image):
         image = image_source
@@ -322,9 +315,7 @@ async def encode_image_to_base64(
     original_format = image.format or "PNG"
 
     # Resize image based on provided constraints
-    target_width, target_height = get_target_size(
-        image, max_width, max_height, max_pixels
-    )
+    target_width, target_height = get_target_size(image, max_width, max_height, max_pixels)
     if target_width < image.width or target_height < image.height:
         image.thumbnail((target_width, target_height), LANCZOS)
 
@@ -399,7 +390,7 @@ async def _get_image_from_http(session, image_source):
 async def get_pil_image(
     image_source,
     session: aiohttp.ClientSession = None,
-    cache_config: Optional[ImageCacheConfig] = None,
+    cache_config: ImageCacheConfig | None = None,
     return_cache_path: bool = False,
 ):
     """从图像链接或本地路径获取PIL格式的图像。
@@ -448,6 +439,7 @@ async def get_pil_image(
                 if ";base64," in image_source:
                     header, data = image_source.split(";base64,", 1)
                     import base64
+
                     image_data = base64.b64decode(data)
                     image = Image.open(BytesIO(image_data))
                     return (image, None) if return_cache_path else image
@@ -464,9 +456,7 @@ async def get_pil_image(
 
             if cache_config.enabled:
                 cache_path = get_cache_path(image_source, cache_config.cache_dir)
-                error_cache_path = get_error_cache_path(
-                    image_source, cache_config.cache_dir
-                )
+                error_cache_path = get_error_cache_path(image_source, cache_config.cache_dir)
 
                 # 检查普通缓存
                 if not cache_config.force_refresh and cache_path.exists():
@@ -480,7 +470,7 @@ async def get_pil_image(
                     and error_cache_path.exists()
                 ):
                     try:
-                        with open(error_cache_path, "r") as f:
+                        with open(error_cache_path) as f:
                             error_data = json.load(f)
                         # 重新构造相同的错误
                         raise ValueError(f"缓存的错误: {error_data['message']}")
@@ -503,7 +493,7 @@ async def get_pil_image(
                         # 如果请求成功，删除可能存在的错误缓存
                         if error_cache_path and error_cache_path.exists():
                             error_cache_path.unlink()
-                    except Exception as e:
+                    except Exception:
                         pass  # 静默忽略缓存保存失败
 
                 return (image, cache_path) if return_cache_path else image
@@ -519,7 +509,7 @@ async def get_pil_image(
                                 "type": type(e).__name__,
                             }
                             json.dump(error_data, f)
-                    except Exception as cache_err:
+                    except Exception:
                         pass  # 静默忽略缓存错误信息失败
                 # 重新抛出原始异常
                 raise
@@ -535,7 +525,7 @@ async def get_pil_image(
 
 def get_pil_image_sync(
     image_source,
-    cache_config: Optional[ImageCacheConfig] = None,
+    cache_config: ImageCacheConfig | None = None,
     return_cache_path: bool = False,
 ):
     """从图像链接或本地路径获取PIL格式的图像（同步版本）。
@@ -583,6 +573,7 @@ def get_pil_image_sync(
                 if ";base64," in image_source:
                     header, data = image_source.split(";base64,", 1)
                     import base64
+
                     image_data = base64.b64decode(data)
                     image = Image.open(BytesIO(image_data))
                     return (image, None) if return_cache_path else image
@@ -599,9 +590,7 @@ def get_pil_image_sync(
 
             if cache_config.enabled:
                 cache_path = get_cache_path(image_source, cache_config.cache_dir)
-                error_cache_path = get_error_cache_path(
-                    image_source, cache_config.cache_dir
-                )
+                error_cache_path = get_error_cache_path(image_source, cache_config.cache_dir)
 
                 # 检查普通缓存
                 if not cache_config.force_refresh and cache_path.exists():
@@ -615,7 +604,7 @@ def get_pil_image_sync(
                     and error_cache_path.exists()
                 ):
                     try:
-                        with open(error_cache_path, "r") as f:
+                        with open(error_cache_path) as f:
                             error_data = json.load(f)
                         # 重新构造相同的错误
                         raise ValueError(f"缓存的错误: {error_data['message']}")
@@ -635,7 +624,7 @@ def get_pil_image_sync(
                         # 如果请求成功，删除可能存在的错误缓存
                         if error_cache_path and error_cache_path.exists():
                             error_cache_path.unlink()
-                    except Exception as e:
+                    except Exception:
                         pass  # 静默忽略缓存保存失败
 
                 return (image, cache_path) if return_cache_path else image
@@ -651,7 +640,7 @@ def get_pil_image_sync(
                                 "type": type(e).__name__,
                             }
                             json.dump(error_data, f)
-                    except Exception as cache_err:
+                    except Exception:
                         pass  # 静默忽略缓存错误信息失败
                 # 重新抛出原始异常
                 raise
@@ -700,7 +689,7 @@ def save_image_with_format(image: Image.Image, path: Path):
             image.save(path, format=target_format, quality=95)
         else:
             image.save(path, format=target_format)
-    except Exception as e:
+    except Exception:
         pass  # 静默忽略图片保存格式问题
         # 如果保存失败，尝试转换为 RGB 后保存
         if image.mode != "RGB":

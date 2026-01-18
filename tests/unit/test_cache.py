@@ -1,7 +1,9 @@
 """Test response caching functionality"""
 
-import pytest
 import time
+
+import pytest
+
 from flexllm import LLMClient, ResponseCacheConfig
 
 
@@ -12,6 +14,7 @@ class TestResponseCache:
     async def test_cache_hit(self, siliconflow_config):
         """Test that cache returns same result for same input"""
         import uuid
+
         # Use unique message to avoid cache from previous runs
         unique_msg = [{"role": "user", "content": f"What is 1+1? ID:{uuid.uuid4()}"}]
 

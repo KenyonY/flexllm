@@ -1,5 +1,4 @@
 #! /usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 LLM 响应缓存模块
@@ -11,8 +10,8 @@ LLM 响应缓存模块
 """
 
 import os
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List, TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
@@ -36,6 +35,7 @@ class ResponseCacheConfig:
         ttl: 缓存过期时间(秒)，0 表示永不过期
         use_ipc: 是否使用 IPC 模式（默认 True，多进程共享缓存）
     """
+
     enabled: bool = False
     cache_dir: str = DEFAULT_CACHE_DIR
     ttl: int = 86400  # 24小时
@@ -53,10 +53,7 @@ class ResponseCacheConfig:
 
     @classmethod
     def with_ttl(
-        cls,
-        ttl: int = 3600,
-        cache_dir: str = None,
-        use_ipc: bool = True
+        cls, ttl: int = 3600, cache_dir: str = None, use_ipc: bool = True
     ) -> "ResponseCacheConfig":
         """
         启用缓存，自定义 TTL（默认 IPC 模式）
@@ -75,9 +72,7 @@ class ResponseCacheConfig:
 
     @classmethod
     def persistent(
-        cls,
-        cache_dir: str = DEFAULT_CACHE_DIR,
-        use_ipc: bool = True
+        cls, cache_dir: str = DEFAULT_CACHE_DIR, use_ipc: bool = True
     ) -> "ResponseCacheConfig":
         """持久缓存：永不过期（默认 IPC 模式）"""
         return cls(enabled=True, cache_dir=cache_dir, ttl=0, use_ipc=use_ipc)
@@ -132,18 +127,16 @@ class ResponseCache:
     - 本地模式：直接读写 LevelDB，适合单进程
     """
 
-    def __init__(self, config: Optional[ResponseCacheConfig] = None):
+    def __init__(self, config: ResponseCacheConfig | None = None):
         self.config = config or ResponseCacheConfig.disabled()
         self._stats = {"hits": 0, "misses": 0}
-        self._db: Optional["FlaxKV"] = None
+        self._db: FlaxKV | None = None
 
         if self.config.enabled:
             try:
                 from flaxkv2 import FlaxKV
             except ImportError:
-                raise ImportError(
-                    "缓存功能需要安装 flaxkv2。请运行: pip install flexllm[cache]"
-                )
+                raise ImportError("缓存功能需要安装 flaxkv2。请运行: pip install flexllm[cache]")
 
             ttl = self.config.ttl if self.config.ttl > 0 else None
 
@@ -168,16 +161,11 @@ class ResponseCache:
                     async_flush=True,
                 )
 
-    def _make_key(self, messages: List[Dict], model: str, **kwargs) -> str:
+    def _make_key(self, messages: list[dict], model: str, **kwargs) -> str:
         """生成缓存键"""
         return messages_hash(messages, model, **kwargs)
 
-    def get(
-        self,
-        messages: List[Dict],
-        model: str = "",
-        **kwargs
-    ) -> Optional[Any]:
+    def get(self, messages: list[dict], model: str = "", **kwargs) -> Any | None:
         """
         获取缓存的响应
 
@@ -202,13 +190,7 @@ class ResponseCache:
 
         return result
 
-    def set(
-        self,
-        messages: List[Dict],
-        response: Any,
-        model: str = "",
-        **kwargs
-    ) -> None:
+    def set(self, messages: list[dict], response: Any, model: str = "", **kwargs) -> None:
         """
         存储响应到缓存
 
@@ -225,11 +207,8 @@ class ResponseCache:
         self._db[cache_key] = response
 
     def get_batch(
-        self,
-        messages_list: List[List[Dict]],
-        model: str = "",
-        **kwargs
-    ) -> tuple[List[Optional[Any]], List[int]]:
+        self, messages_list: list[list[dict]], model: str = "", **kwargs
+    ) -> tuple[list[Any | None], list[int]]:
         """
         批量获取缓存
 
@@ -248,11 +227,7 @@ class ResponseCache:
         return cached, uncached_indices
 
     def set_batch(
-        self,
-        messages_list: List[List[Dict]],
-        responses: List[Any],
-        model: str = "",
-        **kwargs
+        self, messages_list: list[list[dict]], responses: list[Any], model: str = "", **kwargs
     ) -> None:
         """批量存储缓存"""
         for messages, response in zip(messages_list, responses):
@@ -282,7 +257,7 @@ class ResponseCache:
         self.close()
 
     @property
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         """返回缓存统计"""
         total = self._stats["hits"] + self._stats["misses"]
         hit_rate = self._stats["hits"] / total if total > 0 else 0

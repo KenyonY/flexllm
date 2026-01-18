@@ -1,23 +1,25 @@
 import asyncio
-from asyncio import Queue
 import itertools
-
 import time
-from typing import Any, Dict, Iterable, List, Optional, Callable, AsyncIterator, AsyncGenerator, Tuple, Union
-from aiohttp import ClientSession, TCPConnector, ClientTimeout
+from asyncio import Queue
+from collections.abc import AsyncGenerator, Callable, Iterable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from typing import (
+    Any,
+)
+
+from aiohttp import ClientSession, ClientTimeout, TCPConnector
 
 from ..utils.core import async_retry
 from .interface import RequestResult
-from .progress import ProgressTracker, ProgressBarConfig
-
-from dataclasses import dataclass
+from .progress import ProgressBarConfig, ProgressTracker
 
 
 @dataclass
 class StreamingResult:
-    completed_requests: List[RequestResult]
-    progress: Optional[ProgressTracker]
+    completed_requests: list[RequestResult]
+    progress: ProgressTracker | None
     is_final: bool
 
 
@@ -31,13 +33,14 @@ class RateLimiter:
                     False 时使用简单的锁+sleep 实现
     """
 
-    def __init__(self, max_qps: Optional[float] = None, use_bucket: bool = True):
+    def __init__(self, max_qps: float | None = None, use_bucket: bool = True):
         self.max_qps = max_qps
         self._use_bucket = use_bucket
 
         if max_qps:
             if use_bucket:
                 from aiolimiter import AsyncLimiter
+
                 self._limiter = AsyncLimiter(max_qps, 1)
             else:
                 self._lock = asyncio.Lock()
@@ -90,16 +93,16 @@ class ConcurrentRequester:
     """
 
     def __init__(
-            self,
-            concurrency_limit: int,
-            max_qps: Optional[float] = None,
-            timeout: Optional[float] = None,
-            retry_times: int = 3,
-            retry_delay: float = 0.3
+        self,
+        concurrency_limit: int,
+        max_qps: float | None = None,
+        timeout: float | None = None,
+        retry_times: int = 3,
+        retry_delay: float = 0.3,
     ):
         self._concurrency_limit = concurrency_limit
         if timeout:
-            self._timeout = ClientTimeout(total=timeout, connect=min(10., timeout))
+            self._timeout = ClientTimeout(total=timeout, connect=min(10.0, timeout))
         else:
             self._timeout = None
         self._rate_limiter = RateLimiter(max_qps)
@@ -109,28 +112,34 @@ class ConcurrentRequester:
 
     @asynccontextmanager
     async def _get_session(self):
-        connector = TCPConnector(limit=self._concurrency_limit+10, limit_per_host=0, force_close=False)
-        async with ClientSession(timeout=self._timeout, connector=connector, trust_env=True) as session:
+        connector = TCPConnector(
+            limit=self._concurrency_limit + 10, limit_per_host=0, force_close=False
+        )
+        async with ClientSession(
+            timeout=self._timeout, connector=connector, trust_env=True
+        ) as session:
             yield session
 
     @staticmethod
-    async def _make_requests( session: ClientSession,method: str, url: str,  **kwargs):
+    async def _make_requests(session: ClientSession, method: str, url: str, **kwargs):
         async with session.request(method, url, **kwargs) as response:
             response.raise_for_status()
             data = await response.json()
             return response, data
 
-    async def make_requests(self, session: ClientSession,method: str, url: str,  **kwargs):
-        return await async_retry(self.retry_times, self.retry_delay)(self._make_requests)(session,method, url, **kwargs)
+    async def make_requests(self, session: ClientSession, method: str, url: str, **kwargs):
+        return await async_retry(self.retry_times, self.retry_delay)(self._make_requests)(
+            session, method, url, **kwargs
+        )
 
     async def _send_single_request(
-            self,
-            session: ClientSession,
-            request_id: int,
-            url: str,
-            method: str = 'POST',
-            meta: dict = None,
-            **kwargs
+        self,
+        session: ClientSession,
+        request_id: int,
+        url: str,
+        method: str = "POST",
+        meta: dict = None,
+        **kwargs,
     ) -> RequestResult:
         """发送单个请求"""
         async with self._semaphore:
@@ -144,50 +153,46 @@ class ConcurrentRequester:
 
                 if response.status != 200:
                     error_info = {
-                        'status_code': response.status,
-                        'response_data': data,
-                        'error': f"HTTP {response.status}"
+                        "status_code": response.status,
+                        "response_data": data,
+                        "error": f"HTTP {response.status}",
                     }
                     return RequestResult(
                         request_id=request_id,
                         data=error_info,
-                        status='error',
+                        status="error",
                         meta=meta,
-                        latency=latency
+                        latency=latency,
                     )
 
                 return RequestResult(
-                    request_id=request_id,
-                    data=data,
-                    status="success",
-                    meta=meta,
-                    latency=latency
+                    request_id=request_id, data=data, status="success", meta=meta, latency=latency
                 )
 
             except asyncio.TimeoutError as e:
                 return RequestResult(
                     request_id=request_id,
-                    data={'error': 'Timeout error', 'detail': str(e)},
-                    status='error',
+                    data={"error": "Timeout error", "detail": str(e)},
+                    status="error",
                     meta=meta,
-                    latency=time.time() - start_time
+                    latency=time.time() - start_time,
                 )
             except Exception as e:
                 return RequestResult(
                     request_id=request_id,
-                    data={'error': e.__class__.__name__, 'detail': str(e)},
-                    status='error',
+                    data={"error": e.__class__.__name__, "detail": str(e)},
+                    status="error",
                     meta=meta,
-                    latency=time.time() - start_time
+                    latency=time.time() - start_time,
                 )
 
     async def process_with_concurrency_window(
-            self,
-            items: Iterable,
-            process_func: Callable,
-            concurrency_limit: int,
-            progress: Optional[ProgressTracker] = None,
-            batch_size: int = 1,
+        self,
+        items: Iterable,
+        process_func: Callable,
+        concurrency_limit: int,
+        progress: ProgressTracker | None = None,
+        batch_size: int = 1,
     ) -> AsyncGenerator[StreamingResult, Any]:
         """
         使用滑动窗口方式处理并发任务，支持流式返回结果
@@ -217,7 +222,7 @@ class ConcurrentRequester:
                 yield StreamingResult(
                     completed_requests=sorted(batch, key=lambda x: x.request_id),
                     progress=progress,
-                    is_final=is_final
+                    is_final=is_final,
                 )
                 batch.clear()
 
@@ -229,8 +234,7 @@ class ConcurrentRequester:
         for item in items:
             if len(active_tasks) >= concurrency_limit:
                 done, active_tasks = await asyncio.wait(
-                    active_tasks,
-                    return_when=asyncio.FIRST_COMPLETED
+                    active_tasks, return_when=asyncio.FIRST_COMPLETED
                 )
                 async for result in handle_completed_tasks(done, completed_batch):
                     yield result
@@ -245,15 +249,15 @@ class ConcurrentRequester:
                 yield result
 
     async def _stream_requests(
-            self,
-            queue: Queue,
-            request_params: Iterable[Dict[str, Any]],
-            url: str,
-            method: str = 'POST',
-            total_requests: Optional[int] = None,
-            show_progress: bool = True,
-            batch_size: Optional[int] = None
-    ) :
+        self,
+        queue: Queue,
+        request_params: Iterable[dict[str, Any]],
+        url: str,
+        method: str = "POST",
+        total_requests: int | None = None,
+        show_progress: bool = True,
+        batch_size: int | None = None,
+    ):
         """
         流式处理批量请求，实时返回已完成的结果
 
@@ -274,46 +278,49 @@ class ConcurrentRequester:
 
         if show_progress and total_requests is not None:
             progress = ProgressTracker(
-                total_requests,
-                concurrency=self._concurrency_limit,
-                config=ProgressBarConfig()
+                total_requests, concurrency=self._concurrency_limit, config=ProgressBarConfig()
             )
 
         async with self._get_session() as session:
             async for result in self.process_with_concurrency_window(
-                    items=request_params,
-                    process_func=lambda params, request_id: self._send_single_request(
-                        session=session,
-                        request_id=request_id,
-                        url=url,
-                        method=method,
-                        meta=params.pop('meta', None),
-                        **params
-                    ),
-                    concurrency_limit=self._concurrency_limit,
-                    progress=progress,
-                    batch_size=batch_size,
+                items=request_params,
+                process_func=lambda params, request_id: self._send_single_request(
+                    session=session,
+                    request_id=request_id,
+                    url=url,
+                    method=method,
+                    meta=params.pop("meta", None),
+                    **params,
+                ),
+                concurrency_limit=self._concurrency_limit,
+                progress=progress,
+                batch_size=batch_size,
             ):
                 await queue.put(result)
 
         await queue.put(None)
 
-    async def aiter_stream_requests(self,
-                                  request_params: Iterable[Dict[str, Any]],
-                                  url: str,
-                                  method: str = 'POST',
-                                  total_requests: Optional[int] = None,
-                                  show_progress: bool = True,
-                                  batch_size: Optional[int] = None
-                                  ):
+    async def aiter_stream_requests(
+        self,
+        request_params: Iterable[dict[str, Any]],
+        url: str,
+        method: str = "POST",
+        total_requests: int | None = None,
+        show_progress: bool = True,
+        batch_size: int | None = None,
+    ):
         queue = Queue()
-        task = asyncio.create_task(self._stream_requests(queue,
-                                                         request_params=request_params,
-                                                         url=url,
-                                                         method=method,
-                                                         total_requests=total_requests,
-                                                         show_progress=show_progress,
-                                                         batch_size=batch_size))
+        task = asyncio.create_task(
+            self._stream_requests(
+                queue,
+                request_params=request_params,
+                url=url,
+                method=method,
+                total_requests=total_requests,
+                show_progress=show_progress,
+                batch_size=batch_size,
+            )
+        )
         try:
             while True:
                 result = await queue.get()
@@ -324,15 +331,14 @@ class ConcurrentRequester:
             if not task.done():
                 task.cancel()
 
-
     async def process_requests(
-            self,
-            request_params: Iterable[Dict[str, Any]],
-            url: str,
-            method: str = 'POST',
-            total_requests: Optional[int] = None,
-            show_progress: bool = True
-    ) -> Tuple[List[RequestResult], Optional[ProgressTracker]]:
+        self,
+        request_params: Iterable[dict[str, Any]],
+        url: str,
+        method: str = "POST",
+        total_requests: int | None = None,
+        show_progress: bool = True,
+    ) -> tuple[list[RequestResult], ProgressTracker | None]:
         """
         处理批量请求
 
@@ -347,9 +353,7 @@ class ConcurrentRequester:
 
         if show_progress and total_requests is not None:
             progress = ProgressTracker(
-                total_requests,
-                concurrency=self._concurrency_limit,
-                config=ProgressBarConfig()
+                total_requests, concurrency=self._concurrency_limit, config=ProgressBarConfig()
             )
 
         results = []
@@ -361,8 +365,8 @@ class ConcurrentRequester:
                     request_id=request_id,
                     url=url,
                     method=method,
-                    meta=params.pop('meta', None),
-                    **params
+                    meta=params.pop("meta", None),
+                    **params,
                 ),
                 concurrency_limit=self._concurrency_limit,
                 progress=progress,

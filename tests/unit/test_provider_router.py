@@ -1,10 +1,11 @@
 """ProviderRouter 单元测试"""
 
 import time
-import pytest
 from collections import Counter
 
-from flexllm import ProviderRouter, ProviderConfig, create_router_from_urls
+import pytest
+
+from flexllm import ProviderConfig, ProviderRouter, create_router_from_urls
 
 
 class TestProviderConfig:

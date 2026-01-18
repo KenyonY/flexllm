@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 模型定价自动更新脚本
@@ -23,7 +22,6 @@ import re
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 
 # OpenRouter API 端点
 OPENROUTER_API = "https://openrouter.ai/api/v1/models"
@@ -33,17 +31,16 @@ PRICING_FILE = Path(__file__).parent / "data.json"
 
 # 排除的模型模式
 EXCLUDE_PATTERNS = [
-    r":free$",       # 免费模型
-    r":floor$",      # floor 模型
-    r":extended$",   # extended 模型
+    r":free$",  # 免费模型
+    r":floor$",  # floor 模型
+    r":extended$",  # extended 模型
 ]
 
 
-def fetch_models() -> List[Dict]:
+def fetch_models() -> list[dict]:
     """从 OpenRouter API 获取模型列表"""
     req = urllib.request.Request(
-        OPENROUTER_API,
-        headers={"User-Agent": "flexllm-pricing-updater/1.0"}
+        OPENROUTER_API, headers={"User-Agent": "flexllm-pricing-updater/1.0"}
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
@@ -58,7 +55,7 @@ def should_exclude(model_id: str) -> bool:
     return False
 
 
-def normalize_model_id(model_id: str) -> Optional[str]:
+def normalize_model_id(model_id: str) -> str | None:
     """
     将 OpenRouter 模型 ID 规范化
 
@@ -79,7 +76,7 @@ def normalize_model_id(model_id: str) -> Optional[str]:
     return clean_id
 
 
-def parse_pricing(model: Dict) -> Optional[Tuple[float, float]]:
+def parse_pricing(model: dict) -> tuple[float, float] | None:
     """
     解析模型定价信息
 
@@ -107,7 +104,7 @@ def parse_pricing(model: Dict) -> Optional[Tuple[float, float]]:
         return None
 
 
-def collect_pricing() -> Dict[str, Dict[str, float]]:
+def collect_pricing() -> dict[str, dict[str, float]]:
     """
     收集所有模型的定价信息
 
@@ -144,7 +141,7 @@ def collect_pricing() -> Dict[str, Dict[str, float]]:
     return pricing_map
 
 
-def update_pricing_file(pricing_map: Dict[str, Dict[str, float]]) -> bool:
+def update_pricing_file(pricing_map: dict[str, dict[str, float]]) -> bool:
     """
     更新 data.json 文件
 
@@ -176,9 +173,7 @@ def update_pricing_file(pricing_map: Dict[str, Dict[str, float]]) -> bool:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="从 OpenRouter API 更新模型定价表"
-    )
+    parser = argparse.ArgumentParser(description="从 OpenRouter API 更新模型定价表")
     parser.add_argument(
         "--apply",
         action="store_true",

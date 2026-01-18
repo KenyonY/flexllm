@@ -1,7 +1,9 @@
 """Test configuration and fixtures"""
 
-import pytest
 import os
+
+import pytest
+
 
 # Skip tests if API keys not configured
 def get_api_key(env_var: str) -> str:

@@ -6,7 +6,6 @@ Anthropic Claude API Client
 
 import json
 import re
-from typing import List, Optional, Union
 
 import aiohttp
 from loguru import logger
@@ -60,7 +59,7 @@ class ClaudeClient(LLMClientBase):
         retry_delay: float = 1.0,
         cache_image: bool = False,
         cache_dir: str = "image_cache",
-        cache: Optional[ResponseCacheConfig] = None,
+        cache: ResponseCacheConfig | None = None,
         **kwargs,
     ):
         self._api_version = api_version or self.DEFAULT_API_VERSION
@@ -94,14 +93,14 @@ class ClaudeClient(LLMClientBase):
 
     def _build_request_body(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str,
         stream: bool = False,
         max_tokens: int = 4096,  # Claude 必需参数
         temperature: float = None,
         top_p: float = None,
         top_k: int = None,
-        thinking: Union[bool, int, None] = None,
+        thinking: bool | int | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -126,9 +125,7 @@ class ClaudeClient(LLMClientBase):
                     content = " ".join(
                         p.get("text", "") for p in content if p.get("type") == "text"
                     )
-                system_content = (
-                    (system_content + "\n" + content) if system_content else content
-                )
+                system_content = (system_content + "\n" + content) if system_content else content
             else:
                 user_messages.append(self._convert_message(msg))
 
@@ -178,9 +175,7 @@ class ClaudeClient(LLMClientBase):
                 elif isinstance(item, dict):
                     item_type = item.get("type", "text")
                     if item_type == "text":
-                        claude_content.append(
-                            {"type": "text", "text": item.get("text", "")}
-                        )
+                        claude_content.append({"type": "text", "text": item.get("text", "")})
                     elif item_type == "image_url":
                         # 转换 OpenAI 图片格式到 Claude 格式
                         url = item.get("image_url", {}).get("url", "")
@@ -213,7 +208,7 @@ class ClaudeClient(LLMClientBase):
 
         return {"role": claude_role, "content": content}
 
-    def _extract_content(self, response_data: dict) -> Optional[str]:
+    def _extract_content(self, response_data: dict) -> str | None:
         """提取 Claude 响应中的文本内容"""
         try:
             content_blocks = response_data.get("content", [])
@@ -226,7 +221,7 @@ class ClaudeClient(LLMClientBase):
             logger.warning(f"Failed to extract content: {e}")
             return None
 
-    def _extract_usage(self, response_data: dict) -> Optional[dict]:
+    def _extract_usage(self, response_data: dict) -> dict | None:
         """提取 Claude usage 信息并转换为统一格式"""
         if not response_data:
             return None
@@ -239,7 +234,7 @@ class ClaudeClient(LLMClientBase):
             "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
         }
 
-    def _extract_tool_calls(self, response_data: dict) -> Optional[List[ToolCall]]:
+    def _extract_tool_calls(self, response_data: dict) -> list[ToolCall] | None:
         """提取 Claude tool_use 信息"""
         try:
             content_blocks = response_data.get("content", [])
@@ -262,7 +257,7 @@ class ClaudeClient(LLMClientBase):
 
     # ========== 流式响应 ==========
 
-    def _extract_stream_content(self, data: dict) -> Optional[str]:
+    def _extract_stream_content(self, data: dict) -> str | None:
         """从 Claude 流式响应中提取内容"""
         # Claude 流式格式：event: content_block_delta, data: {"delta": {"text": "..."}}
         if data.get("type") == "content_block_delta":
@@ -273,7 +268,7 @@ class ClaudeClient(LLMClientBase):
 
     async def chat_completions_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_usage: bool = False,
         preprocess_msg: bool = False,
@@ -285,9 +280,7 @@ class ClaudeClient(LLMClientBase):
         effective_model = self._get_effective_model(model)
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
-        body = self._build_request_body(
-            messages, effective_model, stream=True, **kwargs
-        )
+        body = self._build_request_body(messages, effective_model, stream=True, **kwargs)
         effective_url = url or self._get_url(effective_model, stream=True)
         headers = self._get_headers()
 
@@ -326,9 +319,7 @@ class ClaudeClient(LLMClientBase):
                                 if usage:
                                     usage_data = {
                                         "prompt_tokens": usage.get("input_tokens", 0),
-                                        "completion_tokens": usage.get(
-                                            "output_tokens", 0
-                                        ),
+                                        "completion_tokens": usage.get("output_tokens", 0),
                                         "total_tokens": usage.get("input_tokens", 0)
                                         + usage.get("output_tokens", 0),
                                     }
@@ -338,9 +329,7 @@ class ClaudeClient(LLMClientBase):
                                 msg_usage = data.get("message", {}).get("usage", {})
                                 if msg_usage:
                                     usage_data = {
-                                        "prompt_tokens": msg_usage.get(
-                                            "input_tokens", 0
-                                        ),
+                                        "prompt_tokens": msg_usage.get("input_tokens", 0),
                                         "completion_tokens": 0,
                                         "total_tokens": msg_usage.get("input_tokens", 0),
                                     }
@@ -390,7 +379,7 @@ class ClaudeClient(LLMClientBase):
 
     # ========== Claude 特有方法 ==========
 
-    def model_list(self) -> List[str]:
+    def model_list(self) -> list[str]:
         """返回 Claude 模型列表（静态）"""
         return [
             "claude-sonnet-4-20250514",

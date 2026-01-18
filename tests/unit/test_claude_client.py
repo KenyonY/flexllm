@@ -1,6 +1,7 @@
 """Test ClaudeClient"""
 
 import pytest
+
 from flexllm import ClaudeClient, LLMClient
 
 
@@ -20,9 +21,7 @@ class TestClaudeClientInit:
 
     def test_init_custom_base_url(self):
         """Test custom base URL"""
-        client = ClaudeClient(
-            api_key="test-key", base_url="https://custom.anthropic.com/v1"
-        )
+        client = ClaudeClient(api_key="test-key", base_url="https://custom.anthropic.com/v1")
         assert client._base_url == "https://custom.anthropic.com/v1"
 
     def test_init_default_api_version(self):
@@ -107,31 +106,23 @@ class TestClaudeClientRequestBody:
         messages = [{"role": "user", "content": "Hello"}]
 
         # thinking=True
-        body = client._build_request_body(
-            messages, "claude-3-5-sonnet-20241022", thinking=True
-        )
+        body = client._build_request_body(messages, "claude-3-5-sonnet-20241022", thinking=True)
         assert body["thinking"]["type"] == "enabled"
         assert body["thinking"]["budget_tokens"] == 10000
 
         # thinking=False
-        body = client._build_request_body(
-            messages, "claude-3-5-sonnet-20241022", thinking=False
-        )
+        body = client._build_request_body(messages, "claude-3-5-sonnet-20241022", thinking=False)
         assert body["thinking"]["type"] == "disabled"
 
         # thinking as int
-        body = client._build_request_body(
-            messages, "claude-3-5-sonnet-20241022", thinking=5000
-        )
+        body = client._build_request_body(messages, "claude-3-5-sonnet-20241022", thinking=5000)
         assert body["thinking"]["budget_tokens"] == 5000
 
     def test_build_request_body_stream(self):
         """Test stream parameter"""
         client = ClaudeClient(api_key="test-key")
         messages = [{"role": "user", "content": "Hello"}]
-        body = client._build_request_body(
-            messages, "claude-3-5-sonnet-20241022", stream=True
-        )
+        body = client._build_request_body(messages, "claude-3-5-sonnet-20241022", stream=True)
 
         assert body["stream"] is True
 

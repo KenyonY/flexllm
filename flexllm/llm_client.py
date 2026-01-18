@@ -4,13 +4,13 @@ LLMClient - 统一的 LLM 客户端封装
 自动根据配置选择 OpenAIClient、GeminiClient 或 ClaudeClient，提供统一接口。
 """
 
-from typing import TYPE_CHECKING, List, Union, Optional, Literal
+from typing import TYPE_CHECKING, Literal, Union
 
-from .base_client import LLMClientBase, ChatCompletionResult
-from .openaiclient import OpenAIClient
-from .geminiclient import GeminiClient
-from .claudeclient import ClaudeClient
+from .base_client import ChatCompletionResult, LLMClientBase
 from .cache import ResponseCacheConfig
+from .claudeclient import ClaudeClient
+from .geminiclient import GeminiClient
+from .openaiclient import OpenAIClient
 
 if TYPE_CHECKING:
     from .async_api.interface import RequestResult
@@ -98,7 +98,7 @@ class LLMClient:
         location: str = "us-central1",
         credentials=None,
         # 响应缓存配置
-        cache: Optional[ResponseCacheConfig] = None,
+        cache: ResponseCacheConfig | None = None,
         **kwargs,
     ):
         """
@@ -220,7 +220,7 @@ class LLMClient:
 
     async def chat_completions(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
@@ -260,7 +260,7 @@ class LLMClient:
 
     def chat_completions_sync(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
@@ -286,18 +286,18 @@ class LLMClient:
 
     async def chat_completions_batch(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
         preprocess_msg: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
-        metadata_list: Optional[List[dict]] = None,
+        metadata_list: list[dict] | None = None,
         **kwargs,
-    ) -> Union[List[str], List[ChatCompletionResult], tuple]:
+    ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
         批量聊天完成（支持断点续传）
 
@@ -337,17 +337,17 @@ class LLMClient:
 
     def chat_completions_batch_sync(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
-        metadata_list: Optional[List[dict]] = None,
+        metadata_list: list[dict] | None = None,
         **kwargs,
-    ) -> Union[List[str], List[ChatCompletionResult], tuple]:
+    ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
         return self._client.chat_completions_batch_sync(
             messages_list=messages_list,
@@ -364,15 +364,15 @@ class LLMClient:
 
     async def iter_chat_completions_batch(
         self,
-        messages_list: List[List[dict]],
+        messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
         preprocess_msg: bool = False,
-        output_jsonl: Optional[str] = None,
+        output_jsonl: str | None = None,
         flush_interval: float = 1.0,
-        metadata_list: Optional[List[dict]] = None,
+        metadata_list: list[dict] | None = None,
         batch_size: int = None,
         **kwargs,
     ):
@@ -432,7 +432,7 @@ class LLMClient:
 
     async def chat_completions_stream(
         self,
-        messages: List[dict],
+        messages: list[dict],
         model: str = None,
         return_usage: bool = False,
         preprocess_msg: bool = False,
@@ -467,7 +467,7 @@ class LLMClient:
         ):
             yield chunk
 
-    def model_list(self) -> List[str]:
+    def model_list(self) -> list[str]:
         """获取可用模型列表"""
         return self._client.model_list()
 

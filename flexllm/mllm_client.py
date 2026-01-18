@@ -1,25 +1,22 @@
 #! /usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 MLLM client
 """
 
 import asyncio
-from typing import List, Callable, Optional, Any
-from rich import print
-from .openaiclient import OpenAIClient
-from .cache import ResponseCacheConfig
-
-from .msg_processors.unified_processor import (
-    batch_process_messages,
-    UnifiedProcessorConfig,
-    UnifiedImageProcessor,
-)
-
-
-from .msg_processors.image_processor import ImageCacheConfig
 from abc import ABC, abstractmethod
+from collections.abc import Callable
+from typing import Any
+
+from rich import print
+
+from .cache import ResponseCacheConfig
+from .msg_processors.unified_processor import (
+    UnifiedImageProcessor,
+    UnifiedProcessorConfig,
+)
+from .openaiclient import OpenAIClient
 
 
 class MllmClientBase(ABC):
@@ -76,8 +73,8 @@ class MllmClient(MllmClientBase):
         timeout=60,
         retry_times=3,
         retry_delay=0.55,
-        processor_config: Optional[UnifiedProcessorConfig] = None,
-        cache: Optional[ResponseCacheConfig] = None,
+        processor_config: UnifiedProcessorConfig | None = None,
+        cache: ResponseCacheConfig | None = None,
         **kwargs,
     ):
         """
@@ -112,9 +109,7 @@ class MllmClient(MllmClientBase):
         self.preprocess_concurrency = preprocess_concurrency
 
         # 创建处理器配置和实例（关键改进）
-        self.processor_config = (
-            processor_config or UnifiedProcessorConfig.high_performance()
-        )
+        self.processor_config = processor_config or UnifiedProcessorConfig.high_performance()
         # 创建并持有处理器实例，保持缓存效果
         self.processor_instance = UnifiedImageProcessor(self.processor_config)
 
@@ -130,11 +125,10 @@ class MllmClient(MllmClientBase):
         if self._table is None:
             try:
                 from .batch_tools import MllmTableProcessor
+
                 self._table = MllmTableProcessor(self)
             except ImportError:
-                raise ImportError(
-                    "表格处理功能需要安装 pandas。请运行: pip install pandas"
-                )
+                raise ImportError("表格处理功能需要安装 pandas。请运行: pip install pandas")
         return self._table
 
     def call_llm_sync(
@@ -151,9 +145,7 @@ class MllmClient(MllmClientBase):
         **kwargs,
     ):
         return asyncio.run(
-            self.call_llm(
-                messages_list, model, temperature, max_tokens, top_p, safety, **kwargs
-            )
+            self.call_llm(messages_list, model, temperature, max_tokens, top_p, safety, **kwargs)
         )
 
     async def call_llm(
@@ -264,11 +256,13 @@ class MllmClient(MllmClientBase):
         使用持有的处理器实例进行消息预处理
         这样可以保持缓存效果，避免重复初始化开销
         """
-        from .msg_processors.unified_processor import process_content_recursive
-        import aiohttp
-        from copy import deepcopy
-        from tqdm.asyncio import tqdm
         import asyncio
+        from copy import deepcopy
+
+        import aiohttp
+        from tqdm.asyncio import tqdm
+
+        from .msg_processors.unified_processor import process_content_recursive
 
         # 创建消息副本，避免修改原始数据
         messages_list = deepcopy(messages_list)
@@ -306,9 +300,7 @@ class MllmClient(MllmClientBase):
                         return messages
 
                 # 并发处理所有消息组
-                tasks = [
-                    process_single_messages(messages) for messages in messages_list
-                ]
+                tasks = [process_single_messages(messages) for messages in messages_list]
                 processed_messages_list = await asyncio.gather(*tasks)
 
             return processed_messages_list
@@ -321,7 +313,7 @@ class MllmClient(MllmClientBase):
         self,
         messages_list,
         n_predictions: int = 3,
-        selector_fn: Optional[Callable[[List[Any]], Any]] = None,
+        selector_fn: Callable[[list[Any]], Any] | None = None,
         model=None,
         temperature=0.1,
         max_tokens=2000,
@@ -448,9 +440,7 @@ class MllmClient(MllmClientBase):
         response_list_list = []
         start_idx = 0
         for length in lengths:
-            response_list_list.append(
-                flattened_response_list[start_idx : start_idx + length]
-            )
+            response_list_list.append(flattened_response_list[start_idx : start_idx + length])
             start_idx += length
 
         return response_list_list
@@ -459,7 +449,7 @@ class MllmClient(MllmClientBase):
         self,
         messages_list_list,
         n_predictions: int = 3,
-        selector_fn: Optional[Callable[[List[Any]], Any]] = None,
+        selector_fn: Callable[[list[Any]], Any] | None = None,
         model=None,
         temperature=0.1,
         max_tokens=2000,
@@ -512,9 +502,7 @@ class MllmClient(MllmClientBase):
         response_list_list = []
         start_idx = 0
         for length in lengths:
-            response_list_list.append(
-                flattened_response_list[start_idx : start_idx + length]
-            )
+            response_list_list.append(flattened_response_list[start_idx : start_idx + length])
             start_idx += length
 
         return response_list_list

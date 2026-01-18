@@ -1,11 +1,11 @@
-from enum import Enum
-from rich.console import Console
-from rich.markdown import Markdown
-from typing import Dict, List, Optional, TYPE_CHECKING
-import time
-from dataclasses import dataclass
 import statistics
+import time
 from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum
+from typing import TYPE_CHECKING
+
+from rich.console import Console
 
 if TYPE_CHECKING:
     from .interface import RequestResult
@@ -38,15 +38,15 @@ class ProgressTracker:
         self,
         total_requests: int,
         concurrency=1,
-        config: Optional[ProgressBarConfig] = None,
+        config: ProgressBarConfig | None = None,
     ):
         self.console = Console()
 
         # 统计信息
         self.success_count = 0
         self.error_count = 0
-        self.latencies: List[float] = []
-        self.errors: Dict[str, int] = defaultdict(int)  # 统计不同类型的错误
+        self.latencies: list[float] = []
+        self.errors: dict[str, int] = defaultdict(int)  # 统计不同类型的错误
 
         self.total_requests = total_requests
         self.concurrency = concurrency
@@ -134,17 +134,13 @@ class ProgressTracker:
         avg_latency = statistics.mean(self.latencies) if self.latencies else 0
         remaining_requests = self.total_requests - self.completed_requests
         estimated_remaining_time = (
-            avg_latency * remaining_requests / self.concurrency
-            if avg_latency > 0
-            else 0
+            avg_latency * remaining_requests / self.concurrency if avg_latency > 0 else 0
         )
 
         # 创建进度条
         style = self.config.style.value
         filled_length = int(self.config.bar_length * progress)
-        bar = style[0] * filled_length + style[1] * (
-            self.config.bar_length - filled_length
-        )
+        bar = style[0] * filled_length + style[1] * (self.config.bar_length - filled_length)
 
         # 构建输出组件
         components = []
@@ -152,9 +148,7 @@ class ProgressTracker:
         # 进度条和百分比
         progress_text = f"[{self._get_colored_text(bar, 'blue')}]"
         if self.config.show_percentage:
-            progress_text += (
-                f" {self._get_colored_text(f'{progress * 100:.1f}%', 'green')}"
-            )
+            progress_text += f" {self._get_colored_text(f'{progress * 100:.1f}%', 'green')}"
         components.append(progress_text)
 
         # 请求计数
@@ -185,12 +179,8 @@ class ProgressTracker:
             for comp in components:
                 # 替换有问题的Unicode字符
                 safe_comp = comp.replace("⚡", "*").replace("█", "#").replace("─", "-")
-                safe_comp = (
-                    safe_comp.replace("▉", "|").replace("▰", "=").replace("▱", "-")
-                )
-                safe_comp = (
-                    safe_comp.replace("▣", "[").replace("▢", "]").replace("━", "=")
-                )
+                safe_comp = safe_comp.replace("▉", "|").replace("▰", "=").replace("▱", "-")
+                safe_comp = safe_comp.replace("▣", "[").replace("▢", "]").replace("━", "=")
                 safe_comp = (
                     safe_comp.replace("┃", "|")
                     .replace("┆", ":")
@@ -224,29 +214,33 @@ class ProgressTracker:
         p99_or_p999_str = p999_str if show_p999 else p99_str
 
         summary = f"""
-                                   请求统计                                    
+                                   请求统计
 
-| 总体情况                                                                   
-|  - 总请求数: {self.total_requests}                                                             
-|  - 成功请求数: {self.success_count}                                                           
-|  - 失败请求数: {self.error_count}                                                           
-|  - 成功率: {(self.success_count / self.total_requests * 100):.2f}%                                                         
+| 总体情况
+|  - 总请求数: {self.total_requests}
+|  - 成功请求数: {self.success_count}
+|  - 失败请求数: {self.error_count}
+|  - 成功率: {(self.success_count / self.total_requests * 100):.2f}%
 
-| 性能指标                                                                   
-|  - 平均延迟: {avg_latency:.2f} 秒                                                       
-|  - P50 延迟: {p50:.2f} 秒                                                       
-|  - P95 延迟: {p95:.2f} 秒                                                       
-|  - P99 延迟: {p99:.2f} 秒                                                       
-|  - 吞吐量: {throughput:.2f} 请求/秒                                                
-|  - 总运行时间: {total_time:.2f} 秒                                               
+| 性能指标
+|  - 平均延迟: {avg_latency:.2f} 秒
+|  - P50 延迟: {p50:.2f} 秒
+|  - P95 延迟: {p95:.2f} 秒
+|  - P99 延迟: {p99:.2f} 秒
+|  - 吞吐量: {throughput:.2f} 请求/秒
+|  - 总运行时间: {total_time:.2f} 秒
 
 """
         # 如果有错误，添加错误统计
         if self.errors:
-            summary += "| 错误分布                                                                   \n"
+            summary += (
+                "| 错误分布                                                                   \n"
+            )
             for error_type, count in self.errors.items():
                 percentage = count / self.error_count * 100
-                summary += f"|  - {error_type}: {count} ({percentage:.1f}%)                            \n"
+                summary += (
+                    f"|  - {error_type}: {count} ({percentage:.1f}%)                            \n"
+                )
 
         summary += "-" * 76
         if print_to_console:

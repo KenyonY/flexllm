@@ -1,7 +1,5 @@
 """Tests for processors module."""
 
-import pytest
-from unittest.mock import patch, MagicMock
 import base64
 
 
@@ -12,7 +10,7 @@ class TestImageProcessor:
         """Test base64 encoding produces valid format."""
         # Simple test data
         test_data = b"test image data"
-        encoded = base64.b64encode(test_data).decode('utf-8')
+        encoded = base64.b64encode(test_data).decode("utf-8")
 
         assert isinstance(encoded, str)
         # Should be valid base64
@@ -21,7 +19,7 @@ class TestImageProcessor:
 
     def test_image_extensions(self):
         """Test supported image extensions."""
-        supported = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif'}
+        supported = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
 
         for ext in supported:
             path = f"image{ext}"
@@ -30,16 +28,16 @@ class TestImageProcessor:
     def test_mime_type_mapping(self):
         """Test MIME type mapping for image extensions."""
         mime_map = {
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.png': 'image/png',
-            '.gif': 'image/gif',
-            '.webp': 'image/webp',
-            '.bmp': 'image/bmp',
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".png": "image/png",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".bmp": "image/bmp",
         }
 
         for ext, mime in mime_map.items():
-            assert mime.startswith('image/')
+            assert mime.startswith("image/")
 
 
 class TestMessagesProcessor:
@@ -47,9 +45,7 @@ class TestMessagesProcessor:
 
     def test_simple_message_passthrough(self):
         """Test that simple text messages pass through unchanged."""
-        messages = [
-            {"role": "user", "content": "Hello"}
-        ]
+        messages = [{"role": "user", "content": "Hello"}]
 
         # Text-only messages should not be modified
         assert messages[0]["role"] == "user"
@@ -62,8 +58,8 @@ class TestMessagesProcessor:
                 "role": "user",
                 "content": [
                     {"type": "text", "text": "Describe this"},
-                    {"type": "image_url", "image_url": {"url": "http://example.com/img.jpg"}}
-                ]
+                    {"type": "image_url", "image_url": {"url": "http://example.com/img.jpg"}},
+                ],
             }
         ]
 
@@ -77,7 +73,7 @@ class TestMessagesProcessor:
         """Test system message handling."""
         messages = [
             {"role": "system", "content": "You are helpful"},
-            {"role": "user", "content": "Hello"}
+            {"role": "user", "content": "Hello"},
         ]
 
         assert messages[0]["role"] == "system"
@@ -106,10 +102,15 @@ class TestUnifiedProcessor:
         """Test batch with mixed content types."""
         messages_list = [
             [{"role": "user", "content": "Text only"}],
-            [{"role": "user", "content": [
-                {"type": "text", "text": "With image"},
-                {"type": "image_url", "image_url": {"url": "http://example.com/img.jpg"}}
-            ]}],
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "With image"},
+                        {"type": "image_url", "image_url": {"url": "http://example.com/img.jpg"}},
+                    ],
+                }
+            ],
         ]
 
         # First message is text-only

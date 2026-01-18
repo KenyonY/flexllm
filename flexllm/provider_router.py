@@ -1,5 +1,4 @@
 #! /usr/bin/env python3
-# -*- coding: utf-8 -*-
 
 """
 多 Provider 负载均衡和故障转移
@@ -7,12 +6,11 @@
 支持多个 API endpoint 的轮询、加权分配和自动 fallback。
 """
 
-import time
 import random
-from dataclasses import dataclass, field
-from typing import List, Optional, Literal
+import time
+from dataclasses import dataclass
 from threading import Lock
-
+from typing import Literal
 
 Strategy = Literal["round_robin", "weighted", "random", "fallback"]
 
@@ -29,16 +27,18 @@ class ProviderConfig:
         model: 可选的模型覆盖
         enabled: 是否启用
     """
+
     base_url: str
     api_key: str = "EMPTY"
     weight: float = 1.0
-    model: Optional[str] = None
+    model: str | None = None
     enabled: bool = True
 
 
 @dataclass
 class ProviderStatus:
     """Provider 运行时状态"""
+
     config: ProviderConfig
     failures: int = 0
     last_failure: float = 0
@@ -58,7 +58,7 @@ class ProviderRouter:
 
     def __init__(
         self,
-        providers: List[ProviderConfig],
+        providers: list[ProviderConfig],
         strategy: Strategy = "round_robin",
         failure_threshold: int = 3,
         recovery_time: float = 60.0,
@@ -79,16 +79,14 @@ class ProviderRouter:
         self.failure_threshold = failure_threshold
         self.recovery_time = recovery_time
 
-        self._providers = [
-            ProviderStatus(config=p) for p in providers if p.enabled
-        ]
+        self._providers = [ProviderStatus(config=p) for p in providers if p.enabled]
         self._index = 0
         self._lock = Lock()
 
         if not self._providers:
             raise ValueError("没有可用的 provider")
 
-    def _get_healthy_providers(self) -> List[ProviderStatus]:
+    def _get_healthy_providers(self) -> list[ProviderStatus]:
         """获取健康的 provider 列表"""
         now = time.time()
         healthy = []
@@ -169,7 +167,7 @@ class ProviderRouter:
                     p.is_healthy = True
                     break
 
-    def get_all_healthy(self) -> List[ProviderConfig]:
+    def get_all_healthy(self) -> list[ProviderConfig]:
         """获取所有健康的 provider"""
         with self._lock:
             return [p.config for p in self._get_healthy_providers()]
@@ -194,7 +192,7 @@ class ProviderRouter:
 
 
 def create_router_from_urls(
-    urls: List[str],
+    urls: list[str],
     api_key: str = "EMPTY",
     strategy: Strategy = "round_robin",
 ) -> ProviderRouter:

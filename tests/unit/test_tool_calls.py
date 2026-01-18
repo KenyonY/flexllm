@@ -1,8 +1,8 @@
 """Test Function Calling / Tool Use support"""
 
 import json
-import pytest
-from flexllm import OpenAIClient, GeminiClient, ClaudeClient, ToolCall
+
+from flexllm import ClaudeClient, GeminiClient, OpenAIClient, ToolCall
 
 
 class TestToolCallDataClass:
@@ -96,9 +96,7 @@ class TestOpenAIToolCallExtraction:
 
     def test_extract_tool_calls_none_when_missing(self):
         """Test returns None when no tool_calls"""
-        response_data = {
-            "choices": [{"message": {"content": "Hello", "tool_calls": None}}]
-        }
+        response_data = {"choices": [{"message": {"content": "Hello", "tool_calls": None}}]}
         client = OpenAIClient(base_url="http://localhost", model="test")
         tool_calls = client._extract_tool_calls(response_data)
         assert tool_calls is None
@@ -152,9 +150,7 @@ class TestGeminiToolCallExtraction:
 
     def test_extract_function_call_none_when_missing(self):
         """Test returns None when no functionCall"""
-        response_data = {
-            "candidates": [{"content": {"parts": [{"text": "Hello"}]}}]
-        }
+        response_data = {"candidates": [{"content": {"parts": [{"text": "Hello"}]}}]}
         client = GeminiClient(api_key="test", model="test")
         tool_calls = client._extract_tool_calls(response_data)
         assert tool_calls is None

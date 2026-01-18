@@ -1,6 +1,7 @@
 """Test GeminiClient functionality"""
 
 import pytest
+
 from flexllm import LLMClient
 
 

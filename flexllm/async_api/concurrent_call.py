@@ -1,9 +1,11 @@
 import asyncio
 import time
-from typing import Callable, Any, List, Union, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from .progress import ProgressTracker, ProgressBarConfig
+from typing import Any
+
 from .interface import RequestResult
+from .progress import ProgressBarConfig, ProgressTracker
 
 
 @dataclass
@@ -17,11 +19,11 @@ class FunctionArgs:
 
 
 async def concurrent_executor(
-        async_func: Callable,
-        func_args: Sequence[Union[tuple, dict, FunctionArgs]],
-        concurrency_limit: int,
-        show_progress: bool = True
-) -> List[Any]:
+    async_func: Callable,
+    func_args: Sequence[tuple | dict | FunctionArgs],
+    concurrency_limit: int,
+    show_progress: bool = True,
+) -> list[Any]:
     """
     并发执行异步函数的控制器
 
@@ -54,19 +56,21 @@ async def concurrent_executor(
             try:
                 start_time = time.time()
                 result = await async_func(*func_arg.args, **func_arg.kwargs)
-                status = 'success'
+                status = "success"
             except Exception as e:
                 result = e
-                status = 'error'
+                status = "error"
 
             if progress:
-                progress.update(RequestResult(
-                    request_id=task_id,
-                    data=result,
-                    status=status,
-                    # meta=None,
-                    latency=time.time() - start_time
-                ))
+                progress.update(
+                    RequestResult(
+                        request_id=task_id,
+                        data=result,
+                        status=status,
+                        # meta=None,
+                        latency=time.time() - start_time,
+                    )
+                )
             return task_id, result
 
     # 标准化所有参数
@@ -76,16 +80,11 @@ async def concurrent_executor(
     progress = None
     if show_progress:
         progress = ProgressTracker(
-            total_tasks,
-            concurrency=concurrency_limit,
-            config=ProgressBarConfig()
+            total_tasks, concurrency=concurrency_limit, config=ProgressBarConfig()
         )
 
     # 创建任务列表
-    tasks = [
-        asyncio.create_task(wrapped_func(arg, i))
-        for i, arg in enumerate(normalized_args)
-    ]
+    tasks = [asyncio.create_task(wrapped_func(arg, i)) for i, arg in enumerate(normalized_args)]
 
     # 等待所有任务完成
     completed_results = await asyncio.gather(*tasks)

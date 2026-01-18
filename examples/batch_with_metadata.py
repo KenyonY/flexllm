@@ -7,7 +7,6 @@
 
 import asyncio
 import json
-from pathlib import Path
 
 from flexllm import LLMClient
 
@@ -42,7 +41,6 @@ async def main():
         output_file=output_file,
         show_progress=True,
     )
-    
 
     print(f"\n完成 {len(results)} 条请求")
     print(f"结果已保存到: {output_file}")
@@ -50,7 +48,7 @@ async def main():
     # 读取并展示输出文件内容
     print("\n输出文件内容示例:")
     print("-" * 50)
-    with open(output_file, "r", encoding="utf-8") as f:
+    with open(output_file, encoding="utf-8") as f:
         for i, line in enumerate(f):
             if i >= 2:  # 只展示前2条
                 print("...")
@@ -58,7 +56,7 @@ async def main():
             record = json.loads(line)
             print(f"ID: {record['metadata']['id']}")
             print(f"Category: {record['metadata']['category']}")
-            output = record['output'][:100] if record['output'] else "(error)"
+            output = record["output"][:100] if record["output"] else "(error)"
             print(f"Output: {output}...")
             print("-" * 50)
 
