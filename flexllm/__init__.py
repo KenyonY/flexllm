@@ -151,7 +151,7 @@ Example:
     cache = ResponseCacheConfig(enabled=True, ttl=3600)   # 自定义 TTL（秒）
 """
 
-__version__ = "0.3.3"
+__version__ = "0.3.4"
 
 # LLM基础功能
 from .base_client import BatchResultItem, ChatCompletionResult, LLMClientBase, ToolCall
