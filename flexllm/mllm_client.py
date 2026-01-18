@@ -9,16 +9,16 @@ import asyncio
 from typing import List, Callable, Optional, Any
 from rich import print
 from .openaiclient import OpenAIClient
-from .response_cache import ResponseCacheConfig
+from .cache import ResponseCacheConfig
 
-from .processors.unified_processor import (
+from .msg_processors.unified_processor import (
     batch_process_messages,
     UnifiedProcessorConfig,
     UnifiedImageProcessor,
 )
 
 
-from .processors.image_processor import ImageCacheConfig
+from .msg_processors.image_processor import ImageCacheConfig
 from abc import ABC, abstractmethod
 
 
@@ -119,7 +119,7 @@ class MllmClient(MllmClientBase):
         self.processor_instance = UnifiedImageProcessor(self.processor_config)
 
         # 延迟导入避免循环引用
-        from .folder_processor import MllmFolderProcessor
+        from .batch_tools import MllmFolderProcessor
 
         self._table = None  # 延迟初始化
         self.folder = MllmFolderProcessor(self)
@@ -129,7 +129,7 @@ class MllmClient(MllmClientBase):
         """表格处理器（需要 pandas，延迟加载）"""
         if self._table is None:
             try:
-                from .table_processor import MllmTableProcessor
+                from .batch_tools import MllmTableProcessor
                 self._table = MllmTableProcessor(self)
             except ImportError:
                 raise ImportError(
@@ -264,7 +264,7 @@ class MllmClient(MllmClientBase):
         使用持有的处理器实例进行消息预处理
         这样可以保持缓存效果，避免重复初始化开销
         """
-        from .processors.unified_processor import process_content_recursive
+        from .msg_processors.unified_processor import process_content_recursive
         import aiohttp
         from copy import deepcopy
         from tqdm.asyncio import tqdm

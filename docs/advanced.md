@@ -42,7 +42,7 @@ results = await client.call_llm(messages_list)
 ### 图像处理器
 
 ```python
-from flexllm.processors import (
+from flexllm.msg_processors import (
     encode_image_to_base64,
     ImageCacheConfig,
     unified_batch_process_messages,

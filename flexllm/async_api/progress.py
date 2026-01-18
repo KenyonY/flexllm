@@ -261,7 +261,7 @@ class ProgressTracker:
 
 
 if __name__ == "__main__":
-    from flexllm.async_api.interface import RequestResult
+    from .interface import RequestResult
 
     config = ProgressBarConfig()
     tracker = ProgressTracker(100, 1, config)

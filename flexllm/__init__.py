@@ -151,17 +151,11 @@ Example:
     cache = ResponseCacheConfig(enabled=True, ttl=3600)   # 自定义 TTL（秒）
 """
 
-__version__ = "0.3.2"
+__version__ = "0.3.3"
 
 # 多模态模型功能
 from .mllm_client import MllmClient
-from .folder_processor import MllmFolderProcessor
-
-# 表格处理器需要 pandas（可选依赖）
-try:
-    from .table_processor import MllmTableProcessor
-except ImportError:
-    MllmTableProcessor = None
+from .batch_tools import MllmFolderProcessor, MllmTableProcessor
 
 # LLM基础功能
 from .base_client import LLMClientBase, ChatCompletionResult, BatchResultItem, ToolCall
@@ -182,7 +176,7 @@ from .token_counter import (
 )
 
 # 响应缓存
-from .response_cache import ResponseCache, ResponseCacheConfig
+from .cache import ResponseCache, ResponseCacheConfig
 
 # Provider 路由
 from .provider_router import ProviderRouter, ProviderConfig, create_router_from_urls

@@ -9,10 +9,10 @@ from typing import TYPE_CHECKING, List, Optional, Union
 from loguru import logger
 
 from .base_client import LLMClientBase
-from .response_cache import ResponseCacheConfig
+from .cache import ResponseCacheConfig
 
 if TYPE_CHECKING:
-    from flexllm.async_api.interface import RequestResult
+    from .async_api.interface import RequestResult
 
 
 class OpenAIClient(LLMClientBase):

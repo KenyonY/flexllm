@@ -2,8 +2,8 @@ import asyncio
 import time
 from typing import Callable, Any, List, Union, Sequence
 from dataclasses import dataclass
-from flexllm.async_api.progress import ProgressTracker, ProgressBarConfig
-from flexllm.async_api.interface import RequestResult
+from .progress import ProgressTracker, ProgressBarConfig
+from .interface import RequestResult
 
 
 @dataclass

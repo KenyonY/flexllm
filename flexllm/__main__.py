@@ -451,7 +451,7 @@ if HAS_TYPER:
 
             async def _run_batch():
                 from flexllm import LLMClient
-                from flexllm.response_cache import ResponseCacheConfig
+                from .cache import ResponseCacheConfig
 
                 # 构建缓存配置
                 cache_config = None
@@ -841,7 +841,7 @@ models:
             flexllm pricing claude           # 模糊匹配 claude 相关模型
             flexllm pricing --update         # 从 OpenRouter 更新定价表
         """
-        from flexllm.pricing import get_pricing, reload_pricing
+        from .pricing import get_pricing, reload_pricing
 
         MODEL_PRICING = get_pricing()
 
@@ -849,7 +849,7 @@ models:
             # 调用更新脚本
             print("正在从 OpenRouter API 获取最新定价...")
             try:
-                from flexllm.pricing.updater import collect_pricing, update_pricing_file
+                from .pricing.updater import collect_pricing, update_pricing_file
 
                 pricing_map = collect_pricing()
                 print(f"获取到 {len(pricing_map)} 个模型定价")

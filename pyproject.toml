@@ -49,7 +49,7 @@ vertex = [
     "google-auth>=2.0.0",
 ]
 cache = [
-    "flaxkv2",
+    "flaxkv2>=0.1.5",
 ]
 image = [
     "opencv-python",
@@ -75,7 +75,7 @@ test = [
     "pytest-asyncio>=0.20.0",
     "pandas>=1.3.0",
     "opencv-python",
-    "flaxkv2",
+    "flaxkv2>=0.1.5",
 ]
 
 [project.urls]

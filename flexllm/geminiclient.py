@@ -10,7 +10,7 @@ from typing import List, Optional, Any, Union
 from loguru import logger
 
 from .base_client import LLMClientBase
-from .response_cache import ResponseCacheConfig
+from .cache import ResponseCacheConfig
 
 
 class GeminiClient(LLMClientBase):

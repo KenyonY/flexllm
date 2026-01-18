@@ -14,14 +14,14 @@ from typing import TYPE_CHECKING, List, Union, Optional, Any
 
 from loguru import logger
 
-from flexllm.async_api import ConcurrentRequester
-from .processors.image_processor import ImageCacheConfig
-from .processors.messages_processor import messages_preprocess
-from .processors.unified_processor import batch_process_messages as optimized_batch_preprocess
-from .response_cache import ResponseCache, ResponseCacheConfig
+from .async_api import ConcurrentRequester
+from .msg_processors.image_processor import ImageCacheConfig
+from .msg_processors.messages_processor import messages_preprocess
+from .msg_processors.unified_processor import batch_process_messages as optimized_batch_preprocess
+from .cache import ResponseCache, ResponseCacheConfig
 
 if TYPE_CHECKING:
-    from flexllm.async_api.interface import RequestResult
+    from .async_api.interface import RequestResult
 
 
 @dataclass

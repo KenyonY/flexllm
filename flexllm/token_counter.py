@@ -20,7 +20,7 @@ except ImportError:
     TIKTOKEN_AVAILABLE = False
 
 # 从 pricing 模块导入定价功能
-from flexllm.pricing import get_pricing, reload_pricing, estimate_cost as _estimate_cost
+from .pricing import get_pricing, reload_pricing, estimate_cost as _estimate_cost
 
 # 兼容旧 API：MODEL_PRICING 现在是动态获取的
 def _get_model_pricing():

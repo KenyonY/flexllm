@@ -8,7 +8,7 @@ from typing import List, Callable, Optional, Any, Union, TYPE_CHECKING
 
 # 使用TYPE_CHECKING避免运行时循环引用
 if TYPE_CHECKING:
-    from .mllm_client import MllmClient
+    from ..mllm_client import MllmClient
 
 
 class MllmTableProcessor:

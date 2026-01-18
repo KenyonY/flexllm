@@ -155,7 +155,7 @@ def print_performance_guide():
     print("📝 批量消息处理示例:")
     print("```python")
     print(
-        "from flexllm.processors import unified_batch_process_messages, UnifiedProcessorConfig"
+        "from flexllm.msg_processors import unified_batch_process_messages, UnifiedProcessorConfig"
     )
     print("")
     print("# 自适应配置（推荐）")

@@ -16,7 +16,7 @@ from typing import Optional, Dict, Any, List, TYPE_CHECKING
 
 from loguru import logger
 
-from .token_counter import messages_hash
+from ..token_counter import messages_hash
 
 if TYPE_CHECKING:
     from flaxkv2 import FlaxKV

@@ -10,10 +10,10 @@ from .base_client import LLMClientBase, ChatCompletionResult
 from .openaiclient import OpenAIClient
 from .geminiclient import GeminiClient
 from .claudeclient import ClaudeClient
-from .response_cache import ResponseCacheConfig
+from .cache import ResponseCacheConfig
 
 if TYPE_CHECKING:
-    from flexllm.async_api.interface import RequestResult
+    from .async_api.interface import RequestResult
 
 
 class LLMClient:

@@ -15,7 +15,7 @@ import aiohttp
 import requests
 from loguru import logger
 from PIL import Image
-from flexllm.utils.core import async_retry
+from ..utils.core import async_retry
 
 # 兼容不同版本的PIL
 try:
