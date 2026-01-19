@@ -19,18 +19,62 @@ try:
 except ImportError:
     TIKTOKEN_AVAILABLE = False
 
-# 从 pricing 模块导入定价功能
-from .pricing import estimate_cost as _estimate_cost
-from .pricing import get_pricing
+# 延迟导入 pricing 模块功能，避免循环引用
+_pricing_module = None
+
+
+def _get_pricing_module():
+    global _pricing_module
+    if _pricing_module is None:
+        from . import estimate_cost as ec
+        from . import get_pricing as gp
+
+        _pricing_module = {"get_pricing": gp, "estimate_cost": ec}
+    return _pricing_module
 
 
 # 兼容旧 API：MODEL_PRICING 现在是动态获取的
 def _get_model_pricing():
-    return get_pricing()
+    return _get_pricing_module()["get_pricing"]()
 
 
-# 为了向后兼容，保留 MODEL_PRICING 变量
-MODEL_PRICING = _get_model_pricing()
+# 使用类属性实现延迟加载
+class _LazyModelPricing:
+    _cache = None
+
+    def __getitem__(self, key):
+        if self._cache is None:
+            self._cache = _get_model_pricing()
+        return self._cache.get(key)
+
+    def __iter__(self):
+        if self._cache is None:
+            self._cache = _get_model_pricing()
+        return iter(self._cache)
+
+    def get(self, key, default=None):
+        if self._cache is None:
+            self._cache = _get_model_pricing()
+        return self._cache.get(key, default)
+
+    def items(self):
+        if self._cache is None:
+            self._cache = _get_model_pricing()
+        return self._cache.items()
+
+    def keys(self):
+        if self._cache is None:
+            self._cache = _get_model_pricing()
+        return self._cache.keys()
+
+    def __contains__(self, key):
+        if self._cache is None:
+            self._cache = _get_model_pricing()
+        return key in self._cache
+
+
+# 为了向后兼容，保留 MODEL_PRICING 变量（延迟加载）
+MODEL_PRICING = _LazyModelPricing()
 
 # 模型到 tiktoken 编码器的映射
 MODEL_TO_ENCODING = {
@@ -155,7 +199,7 @@ def estimate_cost(input_tokens: int, output_tokens: int = 0, model: str = "gpt-4
     Returns:
         估算成本 (美元)
     """
-    return _estimate_cost(input_tokens, output_tokens, model)
+    return _get_pricing_module()["estimate_cost"](input_tokens, output_tokens, model)
 
 
 def estimate_batch_cost(

@@ -151,41 +151,49 @@ Example:
     cache = ResponseCacheConfig(enabled=True, ttl=3600)   # 自定义 TTL（秒）
 """
 
-__version__ = "0.3.4"
+__version__ = "0.4.0"
 
-# LLM基础功能
-from .base_client import BatchResultItem, ChatCompletionResult, LLMClientBase, ToolCall
+# 客户端（从 clients/ 模块导入）
+# 批量处理工具
 from .batch_tools import MllmFolderProcessor, MllmTableProcessor
 
 # 响应缓存
 from .cache import ResponseCache, ResponseCacheConfig
+from .clients import (
+    BatchResultItem,
+    ChainOfThoughtClient,
+    ChatCompletionResult,
+    ClaudeClient,
+    EndpointConfig,
+    GeminiClient,
+    LLMClient,
+    LLMClientBase,
+    LLMClientPool,
+    MllmClient,
+    OpenAIClient,
+    ProviderConfig,
+    ProviderRouter,
+    Step,
+    ToolCall,
+    create_router_from_urls,
+)
 
-# Chain of Thought
-from .chain_of_thought_client import ChainOfThoughtClient, Step
-from .claudeclient import ClaudeClient
-
-# 客户端池
-from .client_pool import EndpointConfig, LLMClientPool
-from .geminiclient import GeminiClient
-from .llm_client import LLMClient
-from .llm_parser import *
-
-# 多模态模型功能
-from .mllm_client import MllmClient
-from .openaiclient import OpenAIClient
-
-# Provider 路由
-from .provider_router import ProviderConfig, ProviderRouter, create_router_from_urls
-
-# Token 计数和成本估算
-from .token_counter import (
+# 定价和成本追踪（从 pricing/ 模块导入）
+from .pricing import (
     MODEL_PRICING,
+    BudgetExceededError,
+    CostReport,
+    CostTracker,
+    CostTrackerConfig,
     count_messages_tokens,
     count_tokens,
     estimate_batch_cost,
     estimate_cost,
     messages_hash,
 )
+
+# 工具函数（从 utils/ 模块导入）
+from .utils import extract_code_snippets, parse_to_code, parse_to_obj
 
 __all__ = [
     # 客户端
@@ -211,6 +219,11 @@ __all__ = [
     # 缓存
     "ResponseCache",
     "ResponseCacheConfig",
+    # 成本追踪
+    "CostTracker",
+    "CostTrackerConfig",
+    "CostReport",
+    "BudgetExceededError",
     # Provider 路由
     "ProviderRouter",
     "ProviderConfig",

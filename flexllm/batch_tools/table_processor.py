@@ -10,7 +10,7 @@ import pandas as pd
 
 # 使用TYPE_CHECKING避免运行时循环引用
 if TYPE_CHECKING:
-    from ..mllm_client import MllmClient
+    from ..clients.mllm import MllmClient
 
 
 class MllmTableProcessor:

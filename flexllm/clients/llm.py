@@ -6,14 +6,14 @@ LLMClient - 统一的 LLM 客户端封装
 
 from typing import TYPE_CHECKING, Literal, Union
 
-from .base_client import ChatCompletionResult, LLMClientBase
-from .cache import ResponseCacheConfig
-from .claudeclient import ClaudeClient
-from .geminiclient import GeminiClient
-from .openaiclient import OpenAIClient
+from ..cache import ResponseCacheConfig
+from .base import ChatCompletionResult, LLMClientBase
+from .claude import ClaudeClient
+from .gemini import GeminiClient
+from .openai import OpenAIClient
 
 if TYPE_CHECKING:
-    from .async_api.interface import RequestResult
+    from ..async_api.interface import RequestResult
 
 
 class LLMClient:

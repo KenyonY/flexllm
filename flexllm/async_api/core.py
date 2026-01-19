@@ -257,6 +257,7 @@ class ConcurrentRequester:
         total_requests: int | None = None,
         show_progress: bool = True,
         batch_size: int | None = None,
+        progress_config: ProgressBarConfig | None = None,
     ):
         """
         流式处理批量请求，实时返回已完成的结果
@@ -268,6 +269,7 @@ class ConcurrentRequester:
             total_requests: 总请求数量
             show_progress: 是否显示进度
             batch_size: 每次yield返回的最小完成请求数量
+            progress_config: 进度条配置
         """
         progress = None
         if batch_size is None:
@@ -277,8 +279,9 @@ class ConcurrentRequester:
             total_requests = sum(1 for _ in params_for_counting)
 
         if show_progress and total_requests is not None:
+            config = progress_config or ProgressBarConfig()
             progress = ProgressTracker(
-                total_requests, concurrency=self._concurrency_limit, config=ProgressBarConfig()
+                total_requests, concurrency=self._concurrency_limit, config=config
             )
 
         async with self._get_session() as session:
@@ -308,6 +311,7 @@ class ConcurrentRequester:
         total_requests: int | None = None,
         show_progress: bool = True,
         batch_size: int | None = None,
+        progress_config: ProgressBarConfig | None = None,
     ):
         queue = Queue()
         task = asyncio.create_task(
@@ -319,6 +323,7 @@ class ConcurrentRequester:
                 total_requests=total_requests,
                 show_progress=show_progress,
                 batch_size=batch_size,
+                progress_config=progress_config,
             )
         )
         try:
@@ -338,6 +343,7 @@ class ConcurrentRequester:
         method: str = "POST",
         total_requests: int | None = None,
         show_progress: bool = True,
+        progress_config: ProgressBarConfig | None = None,
     ) -> tuple[list[RequestResult], ProgressTracker | None]:
         """
         处理批量请求
@@ -352,8 +358,9 @@ class ConcurrentRequester:
             total_requests = sum(1 for _ in params_for_counting)
 
         if show_progress and total_requests is not None:
+            config = progress_config or ProgressBarConfig()
             progress = ProgressTracker(
-                total_requests, concurrency=self._concurrency_limit, config=ProgressBarConfig()
+                total_requests, concurrency=self._concurrency_limit, config=config
             )
 
         results = []

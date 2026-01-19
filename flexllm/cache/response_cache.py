@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from loguru import logger
 
-from ..token_counter import messages_hash
+from ..pricing.token_counter import messages_hash
 
 if TYPE_CHECKING:
     from flaxkv2 import FlaxKV

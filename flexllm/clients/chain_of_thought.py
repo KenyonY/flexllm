@@ -19,8 +19,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.text import Text
 
-from .async_api.progress import ProgressBarConfig, ProgressTracker
-from .openaiclient import OpenAIClient
+from ..async_api.progress import ProgressBarConfig, ProgressTracker
+from .openai import OpenAIClient
 
 # Rich库安全导入和使用
 

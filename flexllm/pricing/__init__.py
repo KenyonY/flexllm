@@ -1,13 +1,25 @@
 """
 模型定价模块
 
-提供模型定价数据加载和成本估算功能。
+提供模型定价数据加载、成本估算和成本追踪功能。
 定价数据存储在 data.json 中，可通过 `flexllm pricing --update` 更新。
 """
 
 import json
 from pathlib import Path
 from typing import Dict, Optional
+
+# 导出 cost_tracker 模块
+from .cost_tracker import BudgetExceededError, CostReport, CostTracker, CostTrackerConfig
+
+# 导出 token_counter 模块
+from .token_counter import (
+    MODEL_PRICING,
+    count_messages_tokens,
+    count_tokens,
+    estimate_batch_cost,
+    messages_hash,
+)
 
 # 定价文件路径
 PRICING_FILE = Path(__file__).parent / "data.json"
@@ -98,3 +110,23 @@ def estimate_cost(input_tokens: int, output_tokens: int = 0, model: str = "gpt-4
         pricing = get_model_pricing("gpt-4o-mini") or {"input": 0.15e-6, "output": 0.6e-6}
 
     return input_tokens * pricing["input"] + output_tokens * pricing["output"]
+
+
+__all__ = [
+    # 成本追踪
+    "CostTracker",
+    "CostTrackerConfig",
+    "CostReport",
+    "BudgetExceededError",
+    # Token 计数
+    "count_tokens",
+    "count_messages_tokens",
+    "estimate_cost",
+    "estimate_batch_cost",
+    "messages_hash",
+    "MODEL_PRICING",
+    # 定价数据
+    "get_pricing",
+    "reload_pricing",
+    "get_model_pricing",
+]

@@ -370,3 +370,112 @@ try:
 finally:
     await client.close()
 ```
+
+---
+
+## 成本追踪
+
+### 基本用法
+
+批量处理时追踪成本：
+
+```python
+from flexllm import LLMClient
+
+client = LLMClient(...)
+
+# 方式1：获取成本报告
+results, cost_report = await client.chat_completions_batch(
+    messages_list,
+    return_cost_report=True,
+)
+print(f"总成本: ${cost_report.total_cost:.4f}")
+print(f"总 tokens: {cost_report.total_tokens:,}")
+print(f"平均成本/请求: ${cost_report.avg_cost_per_request:.6f}")
+
+# 方式2：进度条实时显示成本
+results = await client.chat_completions_batch(
+    messages_list,
+    track_cost=True,  # 进度条显示 💰 $0.0012
+)
+```
+
+### CostReport 属性
+
+| 属性 | 说明 |
+|------|------|
+| `total_cost` | 总成本（美元） |
+| `total_input_tokens` | 总输入 tokens |
+| `total_output_tokens` | 总输出 tokens |
+| `total_tokens` | 总 tokens |
+| `request_count` | 请求数 |
+| `avg_cost_per_request` | 平均成本/请求 |
+| `avg_input_tokens` | 平均输入 tokens |
+| `avg_output_tokens` | 平均输出 tokens |
+
+### 预算控制
+
+使用 `CostTrackerConfig` 设置预算限制：
+
+```python
+from flexllm import LLMClient, CostTrackerConfig
+
+# 带预算控制的客户端
+client = LLMClient(
+    ...,
+    cost_tracker=CostTrackerConfig.with_budget(
+        limit=5.0,        # 硬限制：超过 $5 自动停止
+        warning=4.0,      # 软限制：超过 $4 触发警告
+        on_warning=lambda current, total: print(f"⚠️ 预算警告: ${current:.2f}/{total:.2f}")
+    )
+)
+
+try:
+    results = await client.chat_completions_batch(messages_list)
+except BudgetExceededError as e:
+    print(f"预算超限: {e}")
+```
+
+### 配置方式
+
+```python
+from flexllm import CostTrackerConfig
+
+# 方式1：仅追踪（不限制预算）
+config = CostTrackerConfig.tracking_only()
+
+# 方式2：带预算控制
+config = CostTrackerConfig.with_budget(
+    limit=10.0,
+    warning=8.0,
+    on_warning=my_warning_handler,
+)
+
+# 方式3：禁用
+config = CostTrackerConfig.disabled()
+
+# 应用到客户端
+client = LLMClient(..., cost_tracker=config)
+```
+
+### CLI 用法
+
+```bash
+# 进度条实时显示成本
+flexllm batch input.jsonl -o output.jsonl --track-cost
+
+# 输出示例：
+# [▉▉▉▉▉▉▉▉▉▉          ] 50.0% (50/100) ⚡ 2.5 req/s avg: 0.8s 💰 $0.0012
+```
+
+### 成本估算
+
+成本基于 `flexllm/pricing.py` 中的模型定价表估算。支持的模型包括：
+
+- OpenAI: gpt-4o, gpt-4o-mini, gpt-4-turbo, gpt-3.5-turbo 等
+- Anthropic: claude-3.5-sonnet, claude-3-opus 等
+- Google: gemini-2.0-flash, gemini-1.5-pro 等
+- DeepSeek: deepseek-chat, deepseek-reasoner 等
+- 其他: qwen, yi, llama 等主流模型
+
+未在定价表中的模型会使用默认估算价格。

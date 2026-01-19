@@ -10,8 +10,8 @@ import re
 import aiohttp
 from loguru import logger
 
-from .base_client import LLMClientBase, ToolCall
-from .cache import ResponseCacheConfig
+from ..cache import ResponseCacheConfig
+from .base import LLMClientBase, ToolCall
 
 
 class ClaudeClient(LLMClientBase):

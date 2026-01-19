@@ -393,6 +393,7 @@ if HAS_TYPER:
         ] = None,
         return_usage: Annotated[bool, Option("--return-usage", help="输出 token 统计")] = False,
         preprocess_msg: Annotated[bool, Option("--preprocess-msg", help="预处理图片消息")] = False,
+        track_cost: Annotated[bool, Option("--track-cost", help="在进度条中显示实时成本")] = False,
     ):
         """批量处理 JSONL 文件（支持断点续传）
 
@@ -503,6 +504,7 @@ if HAS_TYPER:
                     show_progress=True,
                     return_summary=True,
                     return_usage=effective_return_usage,
+                    track_cost=track_cost,
                     preprocess_msg=effective_preprocess_msg,
                     flush_interval=batch_config["flush_interval"],
                     metadata_list=metadata_list,

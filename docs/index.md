@@ -73,7 +73,28 @@ cache = ResponseCacheConfig(enabled=True, ttl=0)
 
 缓存基于消息内容的 hash，相同请求自动命中缓存。
 
-### 4. 断点续传
+### 4. 成本追踪
+
+支持实时成本追踪和预算控制：
+
+```python
+# 简单启用成本追踪
+results, cost_report = await client.chat_completions_batch(
+    messages_list,
+    return_cost_report=True,
+)
+print(f"总成本: ${cost_report.total_cost:.4f}")
+
+# 进度条实时显示成本
+results = await client.chat_completions_batch(
+    messages_list,
+    track_cost=True,  # 进度条中显示 💰 $0.0012
+)
+```
+
+详见 [高级用法 - 成本追踪](advanced.md#成本追踪)。
+
+### 5. 断点续传
 
 批量处理支持自动断点续传：
 
@@ -203,6 +224,9 @@ flexllm batch input.jsonl -o output.jsonl --system "你是翻译专家"
 
 # 断点续传（默认行为，中断后重新运行即可继续）
 flexllm batch input.jsonl -o output.jsonl
+
+# 实时显示成本
+flexllm batch input.jsonl -o output.jsonl --track-cost
 ```
 
 **输出格式：**

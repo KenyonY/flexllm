@@ -29,6 +29,7 @@ class ProgressBarConfig:
     show_speed: bool = True
     show_counts: bool = True
     show_time_stats: bool = True
+    show_cost: bool = False  # 是否显示成本
     style: ProgressBarStyle = ProgressBarStyle.BLANK
     use_colors: bool = True
 
@@ -60,6 +61,11 @@ class ProgressTracker:
         self.last_speed_update = time.time()
         self.recent_latencies = []  # 用于计算实时速度
 
+        # 成本追踪
+        self.total_cost = 0.0
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
+
         # ANSI颜色代码
         self.colors = {
             "green": "\033[92m",
@@ -86,6 +92,25 @@ class ProgressTracker:
         return f"{speed:.1f} req/s"
         # return f'{speed*1000:.0f} req/ms'
 
+    @staticmethod
+    def _format_cost(cost: float) -> str:
+        """格式化成本显示"""
+        if cost >= 1:
+            return f"${cost:.2f}"
+        elif cost >= 0.01:
+            return f"${cost:.3f}"
+        else:
+            return f"${cost:.4f}"
+
+    def update_cost(self, input_tokens: int, output_tokens: int, cost: float) -> None:
+        """更新成本信息并刷新进度条显示"""
+        self.total_input_tokens += input_tokens
+        self.total_output_tokens += output_tokens
+        self.total_cost += cost
+        # 刷新进度条以显示成本
+        if self.config.show_cost:
+            self._refresh_progress_bar()
+
     def _get_colored_text(self, text: str, color: str) -> str:
         """添加颜色到文本"""
         if self.config.use_colors:
@@ -99,34 +124,9 @@ class ProgressTracker:
             return 0
         return self.completed_requests / elapsed
 
-    def update(self, result: "RequestResult") -> None:
-        """
-        更新进度和统计信息
-
-        Args:
-            result: 请求结果
-        """
-        self.completed_requests += 1
-        self.latencies.append(result.latency)
-        self.recent_latencies.append(result.latency)
-
-        # 只保留最近的30个请求用于计算速度
-        if len(self.recent_latencies) > 30:
-            self.recent_latencies.pop(0)
-
-        if result.status == "success":
-            self.success_count += 1
-        else:
-            self.error_count += 1
-            # 安全地获取错误类型，处理 result.data 为 None 的情况
-            if result.data and isinstance(result.data, dict):
-                error_type = result.data.get("error", "unknown")
-            else:
-                error_type = "unknown"
-            self.errors[error_type] = self.errors.get(error_type, 0) + 1
-
-        current_time = time.time()
-        total_time = current_time - self.start_time
+    def _refresh_progress_bar(self) -> None:
+        """刷新进度条显示"""
+        total_time = time.time() - self.start_time
         progress = self.completed_requests / self.total_requests
 
         # 计算统计信息
@@ -170,6 +170,11 @@ class ProgressTracker:
             )
             components.append(self._get_colored_text(time_stats, "purple"))
 
+        # 成本显示
+        if self.config.show_cost and self.total_cost > 0:
+            cost_text = f"💰 {self._format_cost(self.total_cost)}"
+            components.append(self._get_colored_text(cost_text, "green"))
+
         # 打印进度 - 修复Windows编码问题
         try:
             print("\r" + " ".join(components), end="", flush=True)
@@ -187,9 +192,37 @@ class ProgressTracker:
                     .replace("★", "*")
                     .replace("☆", "+")
                 )
-                safe_comp = safe_comp.replace("⣿", "#").replace("⣀", ".")
+                safe_comp = safe_comp.replace("⣿", "#").replace("⣀", ".").replace("💰", "$")
                 safe_components.append(safe_comp)
             print("\r" + " ".join(safe_components), end="", flush=True)
+
+    def update(self, result: "RequestResult") -> None:
+        """
+        更新进度和统计信息
+
+        Args:
+            result: 请求结果
+        """
+        self.completed_requests += 1
+        self.latencies.append(result.latency)
+        self.recent_latencies.append(result.latency)
+
+        # 只保留最近的30个请求用于计算速度
+        if len(self.recent_latencies) > 30:
+            self.recent_latencies.pop(0)
+
+        if result.status == "success":
+            self.success_count += 1
+        else:
+            self.error_count += 1
+            # 安全地获取错误类型，处理 result.data 为 None 的情况
+            if result.data and isinstance(result.data, dict):
+                error_type = result.data.get("error", "unknown")
+            else:
+                error_type = "unknown"
+            self.errors[error_type] = self.errors.get(error_type, 0) + 1
+
+        self._refresh_progress_bar()
 
     def summary(self, show_p999=False, print_to_console=True) -> str:
         """打印请求汇总信息"""
@@ -229,6 +262,16 @@ class ProgressTracker:
 |  - P99 延迟: {p99:.2f} 秒
 |  - 吞吐量: {throughput:.2f} 请求/秒
 |  - 总运行时间: {total_time:.2f} 秒
+
+"""
+        # 如果有成本信息，添加成本统计
+        if self.total_cost > 0:
+            avg_cost = self.total_cost / self.success_count if self.success_count > 0 else 0
+            summary += f"""| 成本统计
+|  - 总成本: ${self.total_cost:.4f}
+|  - 平均成本/请求: ${avg_cost:.6f}
+|  - 总输入 tokens: {self.total_input_tokens:,}
+|  - 总输出 tokens: {self.total_output_tokens:,}
 
 """
         # 如果有错误，添加错误统计

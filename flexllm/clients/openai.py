@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 
 from loguru import logger
 
-from .base_client import LLMClientBase
-from .cache import ResponseCacheConfig
+from ..cache import ResponseCacheConfig
+from .base import LLMClientBase
 
 if TYPE_CHECKING:
     pass
@@ -159,7 +159,7 @@ class OpenAIClient(LLMClientBase):
 
     def _extract_tool_calls(self, response_data: dict):
         """提取 OpenAI 格式的 tool_calls"""
-        from .base_client import ToolCall
+        from .base import ToolCall
 
         if not response_data:
             return None

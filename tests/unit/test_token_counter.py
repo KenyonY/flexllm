@@ -159,9 +159,13 @@ class TestModelPricing:
     """Test model pricing data."""
 
     def test_model_pricing_exists(self):
-        """Test that MODEL_PRICING is defined."""
-        assert isinstance(MODEL_PRICING, dict)
-        assert len(MODEL_PRICING) > 0
+        """Test that MODEL_PRICING is defined and works like a dict."""
+        # MODEL_PRICING 使用延迟加载，不是真正的 dict，但行为类似
+        assert hasattr(MODEL_PRICING, "get")
+        assert hasattr(MODEL_PRICING, "items")
+        # 验证能获取数据
+        items = list(MODEL_PRICING.items())
+        assert len(items) > 0
 
     def test_model_pricing_structure(self):
         """Test MODEL_PRICING structure."""

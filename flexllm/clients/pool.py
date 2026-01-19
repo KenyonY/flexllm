@@ -32,9 +32,9 @@ from typing import Any, Literal
 
 from loguru import logger
 
-from .base_client import ChatCompletionResult
-from .llm_client import LLMClient
-from .provider_router import ProviderConfig, ProviderRouter, Strategy
+from .base import ChatCompletionResult
+from .llm import LLMClient
+from .router import ProviderConfig, ProviderRouter, Strategy
 
 
 @dataclass

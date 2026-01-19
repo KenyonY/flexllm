@@ -11,12 +11,12 @@ from typing import Any
 
 from rich import print
 
-from .cache import ResponseCacheConfig
-from .msg_processors.unified_processor import (
+from ..cache import ResponseCacheConfig
+from ..msg_processors.unified_processor import (
     UnifiedImageProcessor,
     UnifiedProcessorConfig,
 )
-from .openaiclient import OpenAIClient
+from .openai import OpenAIClient
 
 
 class MllmClientBase(ABC):
@@ -114,7 +114,7 @@ class MllmClient(MllmClientBase):
         self.processor_instance = UnifiedImageProcessor(self.processor_config)
 
         # 延迟导入避免循环引用
-        from .batch_tools import MllmFolderProcessor
+        from ..batch_tools import MllmFolderProcessor
 
         self._table = None  # 延迟初始化
         self.folder = MllmFolderProcessor(self)
@@ -124,7 +124,7 @@ class MllmClient(MllmClientBase):
         """表格处理器（需要 pandas，延迟加载）"""
         if self._table is None:
             try:
-                from .batch_tools import MllmTableProcessor
+                from ..batch_tools import MllmTableProcessor
 
                 self._table = MllmTableProcessor(self)
             except ImportError:
@@ -262,7 +262,7 @@ class MllmClient(MllmClientBase):
         import aiohttp
         from tqdm.asyncio import tqdm
 
-        from .msg_processors.unified_processor import process_content_recursive
+        from ..msg_processors.unified_processor import process_content_recursive
 
         # 创建消息副本，避免修改原始数据
         messages_list = deepcopy(messages_list)

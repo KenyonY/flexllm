@@ -14,14 +14,17 @@ from typing import TYPE_CHECKING, Any, Union
 
 from loguru import logger
 
-from .async_api import ConcurrentRequester
-from .cache import ResponseCache, ResponseCacheConfig
-from .msg_processors.image_processor import ImageCacheConfig
-from .msg_processors.messages_processor import messages_preprocess
-from .msg_processors.unified_processor import batch_process_messages as optimized_batch_preprocess
+from ..async_api import ConcurrentRequester
+from ..async_api.progress import ProgressBarConfig
+from ..cache import ResponseCache, ResponseCacheConfig
+from ..msg_processors.image_processor import ImageCacheConfig
+from ..msg_processors.messages_processor import messages_preprocess
+from ..msg_processors.unified_processor import batch_process_messages as optimized_batch_preprocess
+from ..pricing import estimate_cost
+from ..pricing.cost_tracker import BudgetExceededError, CostReport, CostTracker, CostTrackerConfig
 
 if TYPE_CHECKING:
-    from .async_api.interface import RequestResult
+    from ..async_api.interface import RequestResult
 
 
 @dataclass
@@ -83,6 +86,7 @@ class LLMClientBase(ABC):
         cache_image: bool = False,
         cache_dir: str = "image_cache",
         cache: bool | ResponseCacheConfig | None = None,
+        cost_tracker: bool | CostTrackerConfig | None = None,
         **kwargs,
     ):
         """
@@ -101,6 +105,10 @@ class LLMClientBase(ABC):
                    - True: 启用缓存（默认 IPC 模式，24小时 TTL）
                    - False/None: 禁用缓存（默认）
                    - ResponseCacheConfig: 自定义配置
+            cost_tracker: 成本追踪配置
+                   - True: 启用成本追踪（仅追踪，不限预算）
+                   - False/None: 禁用成本追踪（默认）
+                   - CostTrackerConfig: 自定义配置（含预算控制）
         """
         self._base_url = base_url.rstrip("/") if base_url else None
         self._api_key = api_key
@@ -129,6 +137,13 @@ class LLMClientBase(ABC):
         elif cache is None or cache is False:
             cache = ResponseCacheConfig.disabled()
         self._response_cache = ResponseCache(cache) if cache.enabled else None
+
+        # 成本追踪
+        if cost_tracker is True:
+            cost_tracker = CostTrackerConfig.tracking_only()
+        elif cost_tracker is None or cost_tracker is False:
+            cost_tracker = CostTrackerConfig.disabled()
+        self._cost_tracker = CostTracker(cost_tracker) if cost_tracker.enabled else None
 
     # ========== 核心抽象方法（子类必须实现）==========
 
@@ -260,6 +275,9 @@ class LLMClientBase(ABC):
             if return_usage:
                 usage = self._extract_usage(data.data)
                 tool_calls = self._extract_tool_calls(data.data)
+                # 记录成本
+                if self._cost_tracker:
+                    self._cost_tracker.record(usage, effective_model)
                 return ChatCompletionResult(content=content, usage=usage, tool_calls=tool_calls)
             return content
         return data
@@ -291,6 +309,8 @@ class LLMClientBase(ABC):
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        return_cost_report: bool = False,
+        track_cost: bool = False,
         preprocess_msg: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
@@ -308,6 +328,8 @@ class LLMClientBase(ABC):
             return_usage: 是否返回包含 usage 的结果（ChatCompletionResult 列表）
             show_progress: 是否显示进度条
             return_summary: 是否返回执行摘要
+            return_cost_report: 是否返回成本报告（需要启用 cost_tracker）
+            track_cost: 是否在进度条中显示实时成本（自动启用 return_usage）
             preprocess_msg: 是否预处理消息
             output_jsonl: 输出文件路径（JSONL 格式），用于持久化保存结果
             flush_interval: 文件刷新间隔（秒），默认 1 秒
@@ -316,11 +338,18 @@ class LLMClientBase(ABC):
 
         Returns:
             - return_usage=True: List[ChatCompletionResult] 或 (List[ChatCompletionResult], summary)
+            - return_cost_report=True: 返回元组 (results, cost_report)
             - 默认: List[str] 或 (List[str], summary)
 
         Note:
             缓存由初始化时的 cache 参数控制，return_usage=True 时自动跳过缓存
+
+        Raises:
+            BudgetExceededError: 当超过预算硬限制时（由 cost_tracker 配置）
         """
+        # track_cost 需要 usage 信息
+        if track_cost:
+            return_usage = True
         effective_model = self._get_effective_model(model)
         effective_url = url or self._get_url(effective_model, stream=False)
         headers = self._get_headers()
@@ -348,6 +377,9 @@ class LLMClientBase(ABC):
             usage = self._extract_usage(result.data)
             tool_calls = self._extract_tool_calls(result.data)
             return ChatCompletionResult(content=content, usage=usage, tool_calls=tool_calls)
+
+        # 进度条配置（支持成本显示）
+        progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None
 
         # 文件输出相关状态
         file_writer = None
@@ -477,6 +509,7 @@ class LLMClientBase(ABC):
                         method="POST",
                         show_progress=show_progress,
                         total_requests=len(uncached_messages),
+                        progress_config=progress_config,
                     ):
                         for result in batch.completed_requests:
                             original_idx = actual_uncached[result.request_id]
@@ -507,8 +540,25 @@ class LLMClientBase(ABC):
                                     on_file_result(
                                         original_idx, extracted.content, usage=extracted.usage
                                     )
+                                    # 记录成本
+                                    if self._cost_tracker:
+                                        self._cost_tracker.record(extracted.usage, effective_model)
+                                    # 更新进度条的成本显示
+                                    if track_cost and batch.progress and extracted.usage:
+                                        input_tokens = extracted.usage.get("prompt_tokens", 0)
+                                        output_tokens = extracted.usage.get("completion_tokens", 0)
+                                        cost = estimate_cost(
+                                            input_tokens, output_tokens, effective_model
+                                        )
+                                        batch.progress.update_cost(
+                                            input_tokens, output_tokens, cost
+                                        )
                                 else:
                                     on_file_result(original_idx, extracted)
+                            except BudgetExceededError:
+                                # 预算超限，优雅停止
+                                logger.warning("预算超限，停止批量处理")
+                                raise
                             except Exception as e:
                                 logger.warning(f"提取结果失败: {e}")
                                 cached_responses[original_idx] = None
@@ -544,6 +594,7 @@ class LLMClientBase(ABC):
                         method="POST",
                         show_progress=show_progress,
                         total_requests=len(messages_to_run),
+                        progress_config=progress_config,
                     ):
                         for result in batch.completed_requests:
                             original_idx = indices_to_run[result.request_id]
@@ -566,14 +617,35 @@ class LLMClientBase(ABC):
                                     on_file_result(
                                         original_idx, extracted.content, usage=extracted.usage
                                     )
+                                    # 记录成本
+                                    if self._cost_tracker:
+                                        self._cost_tracker.record(extracted.usage, effective_model)
+                                    # 更新进度条的成本显示
+                                    if track_cost and batch.progress and extracted.usage:
+                                        input_tokens = extracted.usage.get("prompt_tokens", 0)
+                                        output_tokens = extracted.usage.get("completion_tokens", 0)
+                                        cost = estimate_cost(
+                                            input_tokens, output_tokens, effective_model
+                                        )
+                                        batch.progress.update_cost(
+                                            input_tokens, output_tokens, cost
+                                        )
                                 else:
                                     on_file_result(original_idx, extracted)
+                            except BudgetExceededError:
+                                # 预算超限，优雅停止
+                                logger.warning("预算超限，停止批量处理")
+                                raise
                             except Exception as e:
                                 logger.warning(f"Error: {e}, set content to None")
                                 responses[original_idx] = None
                                 on_file_result(original_idx, None, "error", str(e))
                         if batch.is_final:
                             progress = batch.progress
+
+        except BudgetExceededError:
+            # 预算超限时也要正常结束处理
+            pass
 
         finally:
             # 确保最后的数据写入
@@ -584,7 +656,18 @@ class LLMClientBase(ABC):
                 self._compact_output_file(output_jsonl)
 
         summary = progress.summary(print_to_console=False) if progress else None
-        return (responses, summary) if return_summary else responses
+
+        # 构建返回值
+        result = responses
+        if return_summary:
+            result = (responses, summary)
+        if return_cost_report and self._cost_tracker:
+            cost_report = self._cost_tracker.get_report()
+            if return_summary:
+                result = (responses, summary, cost_report)
+            else:
+                result = (responses, cost_report)
+        return result
 
     def _compact_output_file(self, file_path: str):
         """去重输出文件，保留每个 index 的最新成功记录"""
@@ -626,6 +709,8 @@ class LLMClientBase(ABC):
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        return_cost_report: bool = False,
+        track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
@@ -640,6 +725,8 @@ class LLMClientBase(ABC):
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                return_cost_report=return_cost_report,
+                track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,

@@ -9,8 +9,8 @@ from typing import Any
 
 from loguru import logger
 
-from .base_client import LLMClientBase
-from .cache import ResponseCacheConfig
+from ..cache import ResponseCacheConfig
+from .base import LLMClientBase
 
 
 class GeminiClient(LLMClientBase):
@@ -264,7 +264,7 @@ class GeminiClient(LLMClientBase):
         """
         import json
 
-        from .base_client import ToolCall
+        from .base import ToolCall
 
         try:
             candidates = response_data.get("candidates", [])
