@@ -142,12 +142,10 @@ class ConcurrentRequester:
         **kwargs,
     ) -> RequestResult:
         """发送单个请求"""
+        start_time = time.time()  # 在 semaphore 外计时，包含等待时间
         async with self._semaphore:
             try:
-                # todo: 速率限制也许需要优化
                 await self._rate_limiter.acquire()
-
-                start_time = time.time()
                 response, data = await self.make_requests(session, method, url, **kwargs)
                 latency = time.time() - start_time
 
@@ -207,46 +205,57 @@ class ConcurrentRequester:
         Yields:
              生成 StreamingResult 对象序列
         """
+        completed_batch = []
+        items_iter = iter(items)
+        item_id = 0
+        active_tasks: dict[asyncio.Task, int] = {}  # task -> item_id
 
-        async def handle_completed_tasks(done_tasks, batch, is_final=False):
-            """内部函数处理已完成的任务"""
-            for task in done_tasks:
+        def create_task(item, idx):
+            """创建并返回新任务"""
+            task = asyncio.create_task(process_func(item, idx))
+            active_tasks[task] = idx
+            return task
+
+        # 填满初始窗口
+        for item in items_iter:
+            create_task(item, item_id)
+            item_id += 1
+            if len(active_tasks) >= concurrency_limit:
+                break
+
+        # 滑动窗口处理
+        while active_tasks:
+            # 等待任意一个任务完成
+            done, _ = await asyncio.wait(active_tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
+
+            # 处理所有完成的任务，并立即填补空位
+            for task in done:
                 result = await task
+                del active_tasks[task]
+
                 if progress:
                     progress.update(result)
-                batch.append(result)
+                completed_batch.append(result)
 
-            if len(batch) >= batch_size or (is_final and batch):
+                # 立即创建新任务填补空位（真正的滑动窗口）
+                try:
+                    next_item = next(items_iter)
+                    create_task(next_item, item_id)
+                    item_id += 1
+                except StopIteration:
+                    pass  # 没有更多 items 了
+
+            # 检查是否需要 yield 结果
+            is_final = len(active_tasks) == 0
+            if len(completed_batch) >= batch_size or (is_final and completed_batch):
                 if is_final and progress:
                     progress.summary()
                 yield StreamingResult(
-                    completed_requests=sorted(batch, key=lambda x: x.request_id),
+                    completed_requests=sorted(completed_batch, key=lambda x: x.request_id),
                     progress=progress,
                     is_final=is_final,
                 )
-                batch.clear()
-
-        item_id = 0
-        active_tasks = set()
-        completed_batch = []
-
-        # 处理输入项目
-        for item in items:
-            if len(active_tasks) >= concurrency_limit:
-                done, active_tasks = await asyncio.wait(
-                    active_tasks, return_when=asyncio.FIRST_COMPLETED
-                )
-                async for result in handle_completed_tasks(done, completed_batch):
-                    yield result
-
-            active_tasks.add(asyncio.create_task(process_func(item, item_id)))
-            item_id += 1
-
-        # 处理剩余任务
-        if active_tasks:
-            done, _ = await asyncio.wait(active_tasks)
-            async for result in handle_completed_tasks(done, completed_batch, is_final=True):
-                yield result
+                completed_batch = []
 
     async def _stream_requests(
         self,
