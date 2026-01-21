@@ -73,12 +73,13 @@ class FlexLLMConfig:
         return default_config
 
     def _config_from_env(self) -> dict | None:
-        """从环境变量构建配置"""
+        """从环境变量构建配置（优先级最高）"""
         base_url = os.environ.get("FLEXLLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
-        api_key = os.environ.get("FLEXLLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
+        api_key = os.environ.get("FLEXLLM_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
         model = os.environ.get("FLEXLLM_MODEL") or os.environ.get("OPENAI_MODEL")
 
-        if base_url and api_key and model:
+        # 只需要 base_url 和 model，api_key 可选（本地服务通常不需要）
+        if base_url and model:
             return {
                 "id": model,
                 "name": model,
@@ -89,13 +90,16 @@ class FlexLLMConfig:
         return None
 
     def get_model_config(self, name_or_id: str = None) -> dict | None:
-        """获取模型配置"""
+        """获取模型配置，环境变量优先级最高"""
         models = self.config.get("models", [])
 
-        if not models:
+        # 环境变量优先级最高：当设置了 FLEXLLM_BASE_URL + FLEXLLM_MODEL 时直接使用
+        if name_or_id is None:
             env_config = self._config_from_env()
             if env_config:
                 return env_config
+
+        if not models:
             return None
 
         if name_or_id is None:

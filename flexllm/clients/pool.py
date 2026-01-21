@@ -87,7 +87,7 @@ class LLMClientPool:
         concurrency_limit: int = 10,
         max_qps: int = 1000,
         timeout: int = 120,
-        retry_times: int = 3,
+        retry_times: int = None,
         **kwargs,
     ):
         """
@@ -108,7 +108,9 @@ class LLMClientPool:
             concurrency_limit: 每个 client 的并发限制
             max_qps: 每个 client 的 QPS 限制
             timeout: 请求超时时间
-            retry_times: 重试次数
+            retry_times: 重试次数。fallback=True 时表示总重试次数（会在多个 endpoint 间分配，
+                内部 retry = retry_times // num_endpoints），默认为 0；
+                fallback=False 时为单 client 重试次数，默认为 3
             **kwargs: 其他传递给 LLMClient 的参数
         """
         if not endpoints and not clients:
@@ -135,6 +137,18 @@ class LLMClientPool:
             self._endpoints = []
             self._clients = []
 
+            num_endpoints = len(endpoints)
+
+            # 确定有效的 client retry_times
+            # fallback 模式下，用户指定的 retry_times 是"总重试次数"，会在多个 endpoint 间分配
+            # effective_client_retry_times = retry_times // num_endpoints
+            if fallback:
+                user_retry_times = retry_times if retry_times is not None else 0
+                effective_retry_times = user_retry_times // num_endpoints
+            else:
+                # 非 fallback 模式
+                effective_retry_times = retry_times if retry_times is not None else 3
+
             for ep in endpoints:
                 if isinstance(ep, dict):
                     ep = EndpointConfig(**ep)
@@ -149,7 +163,7 @@ class LLMClientPool:
                     "concurrency_limit": concurrency_limit,
                     "max_qps": max_qps,
                     "timeout": timeout,
-                    "retry_times": retry_times,
+                    "retry_times": effective_retry_times,
                     **kwargs,
                     **(ep.extra or {}),
                 }
@@ -408,6 +422,10 @@ class LLMClientPool:
 
         每个 client 启动 concurrency_limit 个 worker，所有 worker 从同一个队列
         竞争取任务。快的 client 会自动处理更多任务，实现动态负载均衡。
+
+        支持：
+        - Fallback 重试：任务失败时自动尝试其他 endpoint
+        - 响应缓存：复用 LLMClient 的缓存能力
         """
         import json
         from pathlib import Path
@@ -415,7 +433,22 @@ class LLMClientPool:
         n = len(messages_list)
         results = [None] * n
         cached_count = 0
+        file_restored_count = 0
         start_time = time.time()
+
+        # 获取所有 endpoint 的 base_url 集合（用于 fallback 判断）
+        all_endpoints = {ep.base_url for ep in self._endpoints}
+        num_endpoints = len(all_endpoints)
+
+        # 获取响应缓存（如果有的话，使用第一个 client 的缓存）
+        # return_usage 时跳过缓存（缓存不包含 usage 信息）
+        response_cache = None
+        if not return_usage:
+            for client in self._clients:
+                cache = getattr(client._client, "_response_cache", None)
+                if cache is not None:
+                    response_cache = cache
+                    break
 
         # 断点续传：读取已完成的记录
         completed_indices = set()
@@ -450,18 +483,33 @@ class LLMClientPool:
                         results[idx] = record["output"]
                     if completed_indices:
                         logger.info(f"从文件恢复: 已完成 {len(completed_indices)}/{n}")
-                        cached_count = len(completed_indices)
+                        file_restored_count = len(completed_indices)
                 else:
                     raise ValueError(
                         f"文件校验失败: {output_jsonl} 中的 input 与当前 messages_list 不匹配。"
                         f"请删除或重命名该文件后重试。"
                     )
 
+        # 检查缓存命中（如果启用了缓存）
+        effective_model = model or self._endpoints[0].model
+        if response_cache is not None:
+            for idx, msg in enumerate(messages_list):
+                if idx in completed_indices:
+                    continue
+                cached_result = response_cache.get(msg, model=effective_model, **kwargs)
+                if cached_result is not None:
+                    results[idx] = cached_result
+                    completed_indices.add(idx)
+                    cached_count += 1
+            if cached_count > 0:
+                logger.info(f"缓存命中: {cached_count}/{n}")
+
         # 共享任务队列（跳过已完成的）
+        # 队列元素: (idx, msg, tried_endpoints: set)
         queue = asyncio.Queue()
         for idx, msg in enumerate(messages_list):
             if idx not in completed_indices:
-                queue.put_nowait((idx, msg))
+                queue.put_nowait((idx, msg, set()))
 
         pending_count = queue.qsize()
         if pending_count == 0:
@@ -471,7 +519,7 @@ class LLMClientPool:
                     "total": n,
                     "success": n,
                     "failed": 0,
-                    "cached": cached_count,
+                    "cached": cached_count + file_restored_count,
                     "elapsed": 0,
                 }
             return results
@@ -516,6 +564,9 @@ class LLMClientPool:
 
         # 用于统计和线程安全更新
         lock = asyncio.Lock()
+        # 活跃任务计数（用于判断 worker 是否应该退出）
+        active_tasks = 0
+        all_done = asyncio.Event()
 
         def flush_to_file():
             """刷新缓冲区到文件"""
@@ -528,24 +579,69 @@ class LLMClientPool:
                 last_flush_time = time.time()
 
         async def worker(client_idx: int):
-            """单个 worker：循环从队列取任务并执行"""
-            nonlocal last_flush_time
+            """单个 worker：循环从队列取任务并执行，支持 fallback 重试"""
+            nonlocal last_flush_time, active_tasks
 
             client = self._clients[client_idx]
             provider = self._router._providers[client_idx].config
-            effective_model = model or provider.model
+            my_endpoint = provider.base_url
+            worker_model = model or provider.model
 
-            while True:
+            while not all_done.is_set():
                 try:
-                    idx, msg = queue.get_nowait()
+                    idx, msg, tried_endpoints = queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    break
+                    # 队列为空，检查是否还有活跃任务
+                    async with lock:
+                        if active_tasks == 0 and queue.empty():
+                            all_done.set()
+                            break
+                    # 等待一小段时间后重试（可能有任务被放回队列）
+                    await asyncio.sleep(0.05)
+                    continue
+
+                # 增加活跃任务计数
+                async with lock:
+                    active_tasks += 1
+
+                # 如果已尝试过当前 endpoint，放回队列让其他 worker 处理
+                if my_endpoint in tried_endpoints:
+                    # 检查是否所有 endpoint 都已尝试
+                    if len(tried_endpoints) >= num_endpoints:
+                        # 所有 endpoint 都失败了，标记最终失败
+                        async with lock:
+                            active_tasks -= 1
+                            if tracker:
+                                req_result = RequestResult(
+                                    request_id=idx,
+                                    data={"error": "All endpoints failed"},
+                                    status="error",
+                                    latency=0,
+                                )
+                                tracker.update(req_result)
+                            if file_writer:
+                                file_buffer.append(
+                                    {
+                                        "index": idx,
+                                        "output": None,
+                                        "status": "error",
+                                        "error": f"All {num_endpoints} endpoints failed",
+                                        "input": msg,
+                                    }
+                                )
+                        continue
+                    # 放回队列，让其他 endpoint 的 worker 处理
+                    await queue.put((idx, msg, tried_endpoints))
+                    async with lock:
+                        active_tasks -= 1
+                    await asyncio.sleep(0.01)  # 短暂让出，避免死循环
+                    continue
 
                 task_start = time.time()
                 try:
                     result = await client.chat_completions(
                         messages=msg,
-                        model=effective_model,
+                        model=worker_model,
                         return_raw=return_raw,
                         return_usage=return_usage,
                         **kwargs,
@@ -559,7 +655,14 @@ class LLMClientPool:
                     results[idx] = result
                     self._router.mark_success(provider)
 
+                    # 写入缓存
+                    if response_cache is not None:
+                        # 缓存内容（不包含 usage）
+                        cache_content = result.content if hasattr(result, "content") else result
+                        response_cache.set(msg, cache_content, model=worker_model, **kwargs)
+
                     async with lock:
+                        active_tasks -= 1
                         # 更新进度条
                         if tracker:
                             req_result = RequestResult(
@@ -607,34 +710,51 @@ class LLMClientPool:
 
                 except Exception as e:
                     latency = time.time() - task_start
-                    logger.warning(f"Task {idx} failed on {provider.base_url}: {e}")
-                    results[idx] = None
                     self._router.mark_failed(provider)
 
-                    async with lock:
-                        # 更新进度条
-                        if tracker:
-                            req_result = RequestResult(
-                                request_id=idx,
-                                data={"error": str(e)},
-                                status="error",
-                                latency=latency,
-                            )
-                            tracker.update(req_result)
+                    # 记录已尝试的 endpoint
+                    tried_endpoints = tried_endpoints | {my_endpoint}
 
-                        # 写入失败记录
-                        if file_writer:
-                            file_buffer.append(
-                                {
-                                    "index": idx,
-                                    "output": None,
-                                    "status": "error",
-                                    "error": str(e),
-                                    "input": msg,
-                                }
-                            )
-                            if time.time() - last_flush_time >= flush_interval:
-                                flush_to_file()
+                    # 检查是否还有其他 endpoint 可以重试
+                    if self._fallback and len(tried_endpoints) < num_endpoints:
+                        logger.debug(
+                            f"Task {idx} failed on {my_endpoint}: {e}, "
+                            f"retrying on other endpoints ({len(tried_endpoints)}/{num_endpoints})"
+                        )
+                        # 放回队列，让其他 endpoint 重试
+                        await queue.put((idx, msg, tried_endpoints))
+                        async with lock:
+                            active_tasks -= 1
+                    else:
+                        # 所有 endpoint 都失败了，或者未启用 fallback
+                        logger.warning(f"Task {idx} failed on {my_endpoint}: {e} (final failure)")
+                        results[idx] = None
+
+                        async with lock:
+                            active_tasks -= 1
+                            # 更新进度条
+                            if tracker:
+                                req_result = RequestResult(
+                                    request_id=idx,
+                                    data={"error": str(e)},
+                                    status="error",
+                                    latency=latency,
+                                )
+                                tracker.update(req_result)
+
+                            # 写入失败记录
+                            if file_writer:
+                                file_buffer.append(
+                                    {
+                                        "index": idx,
+                                        "output": None,
+                                        "status": "error",
+                                        "error": str(e),
+                                        "input": msg,
+                                    }
+                                )
+                                if time.time() - last_flush_time >= flush_interval:
+                                    flush_to_file()
 
         try:
             # 启动所有 worker
@@ -662,11 +782,12 @@ class LLMClientPool:
                 tracker.summary(print_to_console=True)
 
         if return_summary:
+            total_cached = cached_count + file_restored_count
             summary = {
                 "total": n,
-                "success": tracker.success_count + cached_count if tracker else n,
+                "success": (tracker.success_count if tracker else 0) + total_cached,
                 "failed": tracker.error_count if tracker else 0,
-                "cached": cached_count,
+                "cached": total_cached,
                 "elapsed": time.time() - start_time,
             }
             return results, summary

@@ -185,6 +185,24 @@ pool = LLMClientPool(
 | `random` | 完全随机 |
 | `fallback` | 主备模式，优先使用第一个，失败后切换 |
 
+### Fallback 重试机制
+
+当启用 `fallback=True` 时，重试次数会在多个 endpoint 间分配，避免单个 endpoint 超时导致的长时间等待：
+
+```python
+pool = LLMClientPool(
+    endpoints=[...],  # 假设 3 个 endpoint
+    fallback=True,
+    retry_times=6,    # 总重试次数
+)
+# 每个 endpoint 实际重试 6 // 3 = 2 次
+# 单个请求最多尝试 3 个 endpoint × 2 次 = 6 次
+
+# 不指定 retry_times 时，fallback 模式默认为 0（快速切换）
+pool = LLMClientPool(endpoints=[...], fallback=True)
+# 每个 endpoint 尝试 1 次即切换到下一个
+```
+
 ### 分布式批量请求
 
 ```python

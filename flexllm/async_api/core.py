@@ -110,15 +110,50 @@ class ConcurrentRequester:
         self.retry_times = retry_times
         self.retry_delay = retry_delay
 
-    @asynccontextmanager
-    async def _get_session(self):
-        connector = TCPConnector(
+        # Session 复用：避免每次请求都创建新的 session
+        self._connector: TCPConnector | None = None
+        self._session: ClientSession | None = None
+
+    def _create_session(self) -> ClientSession:
+        """创建新的 session（内部使用）"""
+        self._connector = TCPConnector(
             limit=self._concurrency_limit + 10, limit_per_host=0, force_close=False
         )
-        async with ClientSession(
-            timeout=self._timeout, connector=connector, trust_env=True
-        ) as session:
-            yield session
+        self._session = ClientSession(
+            timeout=self._timeout, connector=self._connector, trust_env=True
+        )
+        return self._session
+
+    @asynccontextmanager
+    async def _get_session(self):
+        """获取或创建 session（复用模式）"""
+        # 如果 session 不存在或已关闭，创建新的
+        if self._session is None or self._session.closed:
+            self._create_session()
+        yield self._session
+
+    def close(self):
+        """关闭 session 和 connector"""
+        session = self._session
+        connector = self._connector
+        self._session = None
+        self._connector = None
+
+        if session and not session.closed:
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._async_close(session, connector))
+            except RuntimeError:
+                # 没有运行中的事件循环，直接让 GC 处理
+                pass
+
+    @staticmethod
+    async def _async_close(session: ClientSession, connector: TCPConnector):
+        """异步关闭 session 和 connector"""
+        if session and not session.closed:
+            await session.close()
+        if connector and not connector.closed:
+            await connector.close()
 
     @staticmethod
     async def _make_requests(session: ClientSession, method: str, url: str, **kwargs):

@@ -1137,10 +1137,12 @@ class LLMClientBase(ABC):
     # ========== 资源管理 ==========
 
     def close(self):
-        """关闭客户端，释放资源（如缓存连接）"""
+        """关闭客户端，释放资源（如缓存连接、HTTP session）"""
         if self._response_cache is not None:
             self._response_cache.close()
             self._response_cache = None
+        if self._client is not None:
+            self._client.close()
 
     def __enter__(self):
         return self
