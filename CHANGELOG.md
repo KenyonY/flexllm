@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.4.2] - 2026-01-21
+
+### Bug Fixes
+
+- 双行进度条在无定价时也能显示模型名和token统计
+- 改进模型定价匹配逻辑，支持 provider/model 格式
+
+### Features
+
+- **pool**: 统一 LLMClientPool 进度条显示，修复 output_jsonl 功能
+- 进度条支持双行显示成本信息
+
+### Miscellaneous
+
+- Bump version to 0.4.2
+
 ## [0.4.1] - 2026-01-20
 
 ### Bug Fixes
