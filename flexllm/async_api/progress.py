@@ -121,9 +121,8 @@ class ProgressTracker:
         self.model_name = model_name
         self.input_price_per_1m = input_price_per_1m
         self.output_price_per_1m = output_price_per_1m
-        # 有定价信息时启用双行显示
-        if input_price_per_1m is not None and output_price_per_1m is not None:
-            self._use_two_lines = True
+        # 启用双行显示（即使没有定价信息也显示模型名和 token 统计）
+        self._use_two_lines = True
 
     def update_cost(self, input_tokens: int, output_tokens: int, cost: float) -> None:
         """更新成本信息并刷新进度条显示"""
@@ -164,8 +163,11 @@ class ProgressTracker:
         parts.append(f"💰 {self._format_cost(self.total_cost)}")
 
         # 模型名称和定价
-        if self.model_name and self.input_price_per_1m is not None:
-            price_info = f"{self.model_name}: ${self.input_price_per_1m:.2f}/${self.output_price_per_1m:.2f} per 1M"
+        if self.model_name:
+            if self.input_price_per_1m is not None:
+                price_info = f"{self.model_name}: ${self.input_price_per_1m:.2f}/${self.output_price_per_1m:.2f} per 1M"
+            else:
+                price_info = f"{self.model_name}"
             parts.append(price_info)
 
         # Token 统计

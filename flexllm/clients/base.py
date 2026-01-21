@@ -515,12 +515,11 @@ class LLMClientBase(ABC):
                         # 设置模型定价信息（仅在首次且开启成本追踪时）
                         if not _pricing_set and track_cost and batch.progress:
                             pricing = get_model_pricing(effective_model)
-                            if pricing:
-                                batch.progress.set_model_pricing(
-                                    effective_model,
-                                    pricing["input"] * 1e6,  # 转换回 $/1M
-                                    pricing["output"] * 1e6,
-                                )
+                            batch.progress.set_model_pricing(
+                                effective_model,
+                                pricing["input"] * 1e6 if pricing else None,
+                                pricing["output"] * 1e6 if pricing else None,
+                            )
                             _pricing_set = True
                         for result in batch.completed_requests:
                             original_idx = actual_uncached[result.request_id]
@@ -611,12 +610,11 @@ class LLMClientBase(ABC):
                         # 设置模型定价信息（仅在首次且开启成本追踪时）
                         if not _pricing_set and track_cost and batch.progress:
                             pricing = get_model_pricing(effective_model)
-                            if pricing:
-                                batch.progress.set_model_pricing(
-                                    effective_model,
-                                    pricing["input"] * 1e6,  # 转换回 $/1M
-                                    pricing["output"] * 1e6,
-                                )
+                            batch.progress.set_model_pricing(
+                                effective_model,
+                                pricing["input"] * 1e6 if pricing else None,
+                                pricing["output"] * 1e6 if pricing else None,
+                            )
                             _pricing_set = True
                         for result in batch.completed_requests:
                             original_idx = indices_to_run[result.request_id]
