@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.3] - 2026-01-21
+
+### Features
+
+- **pool**: 优化 fallback 重试机制和连接复用
+
 ## [0.4.2] - 2026-01-21
 
 ### Bug Fixes
