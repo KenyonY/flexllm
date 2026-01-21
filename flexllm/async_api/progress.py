@@ -66,6 +66,15 @@ class ProgressTracker:
         self.total_input_tokens = 0
         self.total_output_tokens = 0
 
+        # 模型定价信息（用于双行显示）
+        self.model_name: str | None = None
+        self.input_price_per_1m: float | None = None  # $/1M tokens
+        self.output_price_per_1m: float | None = None  # $/1M tokens
+
+        # 双行显示控制
+        self._first_render = True
+        self._use_two_lines = False  # 是否使用双行显示
+
         # ANSI颜色代码
         self.colors = {
             "green": "\033[92m",
@@ -102,6 +111,20 @@ class ProgressTracker:
         else:
             return f"${cost:.4f}"
 
+    def set_model_pricing(
+        self,
+        model_name: str,
+        input_price_per_1m: float | None,
+        output_price_per_1m: float | None,
+    ) -> None:
+        """设置模型定价信息（用于双行显示）"""
+        self.model_name = model_name
+        self.input_price_per_1m = input_price_per_1m
+        self.output_price_per_1m = output_price_per_1m
+        # 有定价信息时启用双行显示
+        if input_price_per_1m is not None and output_price_per_1m is not None:
+            self._use_two_lines = True
+
     def update_cost(self, input_tokens: int, output_tokens: int, cost: float) -> None:
         """更新成本信息并刷新进度条显示"""
         self.total_input_tokens += input_tokens
@@ -123,6 +146,34 @@ class ProgressTracker:
         if elapsed <= 0:
             return 0
         return self.completed_requests / elapsed
+
+    @staticmethod
+    def _format_tokens(tokens: int) -> str:
+        """格式化 token 数量显示"""
+        if tokens >= 1_000_000:
+            return f"{tokens / 1_000_000:.1f}M"
+        elif tokens >= 1_000:
+            return f"{tokens / 1_000:.1f}K"
+        return str(tokens)
+
+    def _build_cost_line(self) -> str:
+        """构建成本信息行（双行显示的第一行）"""
+        parts = []
+
+        # 总成本
+        parts.append(f"💰 {self._format_cost(self.total_cost)}")
+
+        # 模型名称和定价
+        if self.model_name and self.input_price_per_1m is not None:
+            price_info = f"{self.model_name}: ${self.input_price_per_1m:.2f}/${self.output_price_per_1m:.2f} per 1M"
+            parts.append(price_info)
+
+        # Token 统计
+        if self.total_input_tokens > 0 or self.total_output_tokens > 0:
+            token_info = f"{self._format_tokens(self.total_input_tokens)} in / {self._format_tokens(self.total_output_tokens)} out"
+            parts.append(token_info)
+
+        return " | ".join(parts)
 
     def _refresh_progress_bar(self) -> None:
         """刷新进度条显示"""
@@ -170,14 +221,29 @@ class ProgressTracker:
             )
             components.append(self._get_colored_text(time_stats, "purple"))
 
-        # 成本显示
-        if self.config.show_cost and self.total_cost > 0:
+        # 单行模式下的成本显示（向后兼容）
+        if self.config.show_cost and self.total_cost > 0 and not self._use_two_lines:
             cost_text = f"💰 {self._format_cost(self.total_cost)}"
             components.append(self._get_colored_text(cost_text, "green"))
 
+        progress_line = " ".join(components)
+
         # 打印进度 - 修复Windows编码问题
         try:
-            print("\r" + " ".join(components), end="", flush=True)
+            if self._use_two_lines and self.config.show_cost:
+                cost_line = self._build_cost_line()
+                if self._first_render:
+                    # 首次渲染：打印两行
+                    print(self._get_colored_text(cost_line, "green"))
+                    print(progress_line, end="", flush=True)
+                    self._first_render = False
+                else:
+                    # 后续刷新：上移光标，更新两行
+                    # \033[A 上移一行, \033[K 清除到行尾
+                    print(f"\r\033[A\033[K{self._get_colored_text(cost_line, 'green')}")
+                    print(f"\033[K{progress_line}", end="", flush=True)
+            else:
+                print("\r" + progress_line, end="", flush=True)
         except UnicodeEncodeError:
             # Windows GBK编码兼容处理
             safe_components = []
