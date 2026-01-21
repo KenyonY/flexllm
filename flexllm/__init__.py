@@ -151,7 +151,7 @@ Example:
     cache = ResponseCacheConfig(enabled=True, ttl=3600)   # 自定义 TTL（秒）
 """
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 # 客户端（从 clients/ 模块导入）
 # 批量处理工具

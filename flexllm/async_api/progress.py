@@ -40,6 +40,9 @@ class ProgressTracker:
         total_requests: int,
         concurrency=1,
         config: ProgressBarConfig | None = None,
+        model_name: str | None = None,
+        input_price_per_1m: float | None = None,
+        output_price_per_1m: float | None = None,
     ):
         self.console = Console()
 
@@ -74,6 +77,10 @@ class ProgressTracker:
         # 双行显示控制
         self._first_render = True
         self._use_two_lines = False  # 是否使用双行显示
+
+        # 如果提供了模型信息，直接启用双行显示
+        if model_name is not None:
+            self.set_model_pricing(model_name, input_price_per_1m, output_price_per_1m)
 
         # ANSI颜色代码
         self.colors = {

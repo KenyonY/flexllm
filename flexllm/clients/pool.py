@@ -27,11 +27,15 @@ Example:
 """
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from loguru import logger
 
+from ..async_api.interface import RequestResult
+from ..async_api.progress import ProgressBarConfig, ProgressTracker
+from ..pricing import get_model_pricing
 from .base import ChatCompletionResult
 from .llm import LLMClient
 from .router import ProviderConfig, ProviderRouter, Strategy
@@ -270,6 +274,7 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         distribute: bool = True,
@@ -285,6 +290,7 @@ class LLMClientPool:
             return_usage: 是否返回包含 usage 的结果
             show_progress: 是否显示进度条
             return_summary: 是否返回统计摘要
+            track_cost: 是否在进度条中显示实时成本
             output_jsonl: 输出文件路径（JSONL）
             flush_interval: 文件刷新间隔（秒）
             distribute: 是否将请求分散到多个 endpoint（True）
@@ -294,6 +300,10 @@ class LLMClientPool:
         Returns:
             与 LLMClient.chat_completions_batch 返回值一致
         """
+        # track_cost 需要 usage 信息
+        if track_cost:
+            return_usage = True
+
         # output_jsonl 扩展名校验
         if output_jsonl and not output_jsonl.endswith(".jsonl"):
             raise ValueError(f"output_jsonl 必须使用 .jsonl 扩展名，当前: {output_jsonl}")
@@ -307,6 +317,7 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 **kwargs,
@@ -320,6 +331,7 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 **kwargs,
@@ -333,6 +345,7 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         **kwargs,
@@ -359,6 +372,7 @@ class LLMClientPool:
                     return_usage=return_usage,
                     show_progress=show_progress,
                     return_summary=return_summary,
+                    track_cost=track_cost,
                     output_jsonl=output_jsonl,
                     flush_interval=flush_interval,
                     **kwargs,
@@ -384,6 +398,7 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         **kwargs,
@@ -395,15 +410,10 @@ class LLMClientPool:
         竞争取任务。快的 client 会自动处理更多任务，实现动态负载均衡。
         """
         import json
-        import time
         from pathlib import Path
-
-        from tqdm import tqdm
 
         n = len(messages_list)
         results = [None] * n
-        success_count = 0
-        failed_count = 0
         cached_count = 0
         start_time = time.time()
 
@@ -468,8 +478,33 @@ class LLMClientPool:
 
         logger.info(f"待执行: {pending_count}/{n}")
 
-        # 进度条
-        pbar = tqdm(total=pending_count, desc="Processing", disable=not show_progress)
+        # 计算总并发数
+        total_concurrency = sum(
+            getattr(client._client, "_concurrency_limit", 10) for client in self._clients
+        )
+
+        # 进度条配置（支持成本显示）
+        progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None
+
+        # 获取第一个 endpoint 的模型用于显示
+        first_model = model or self._endpoints[0].model
+        pricing = get_model_pricing(first_model) if track_cost else None
+        input_price = pricing["input"] * 1e6 if pricing else None
+        output_price = pricing["output"] * 1e6 if pricing else None
+
+        # 创建进度追踪器
+        tracker = (
+            ProgressTracker(
+                total_requests=pending_count,
+                concurrency=total_concurrency,
+                config=progress_config,
+                model_name=first_model if track_cost else None,
+                input_price_per_1m=input_price,
+                output_price_per_1m=output_price,
+            )
+            if show_progress
+            else None
+        )
 
         # 文件写入相关
         file_writer = None
@@ -494,7 +529,7 @@ class LLMClientPool:
 
         async def worker(client_idx: int):
             """单个 worker：循环从队列取任务并执行"""
-            nonlocal success_count, failed_count, last_flush_time
+            nonlocal last_flush_time
 
             client = self._clients[client_idx]
             provider = self._router._providers[client_idx].config
@@ -506,6 +541,7 @@ class LLMClientPool:
                 except asyncio.QueueEmpty:
                     break
 
+                task_start = time.time()
                 try:
                     result = await client.chat_completions(
                         messages=msg,
@@ -519,34 +555,72 @@ class LLMClientPool:
                     if hasattr(result, "status") and result.status != "success":
                         raise RuntimeError(f"请求失败: {getattr(result, 'error', result)}")
 
+                    latency = time.time() - task_start
                     results[idx] = result
                     self._router.mark_success(provider)
 
                     async with lock:
-                        success_count += 1
-                        pbar.update(1)
+                        # 更新进度条
+                        if tracker:
+                            req_result = RequestResult(
+                                request_id=idx,
+                                data=result,
+                                status="success",
+                                latency=latency,
+                            )
+                            tracker.update(req_result)
+
+                            # 更新成本信息
+                            if track_cost and hasattr(result, "usage") and result.usage:
+                                usage = result.usage
+                                input_tokens = usage.get("prompt_tokens", 0)
+                                output_tokens = usage.get("completion_tokens", 0)
+                                cost = 0.0
+                                if pricing:
+                                    cost = (
+                                        input_tokens * pricing["input"]
+                                        + output_tokens * pricing["output"]
+                                    )
+                                tracker.update_cost(input_tokens, output_tokens, cost)
 
                         # 写入文件
                         if file_writer:
-                            file_buffer.append(
-                                {
-                                    "index": idx,
-                                    "output": result,
-                                    "status": "success",
-                                    "input": msg,
-                                }
-                            )
+                            # 处理 ChatCompletionResult 对象的序列化
+                            if hasattr(result, "content"):
+                                output_content = result.content
+                                output_usage = getattr(result, "usage", None)
+                            else:
+                                output_content = result
+                                output_usage = None
+
+                            record = {
+                                "index": idx,
+                                "output": output_content,
+                                "status": "success",
+                                "input": msg,
+                            }
+                            if output_usage:
+                                record["usage"] = output_usage
+                            file_buffer.append(record)
                             if time.time() - last_flush_time >= flush_interval:
                                 flush_to_file()
 
                 except Exception as e:
+                    latency = time.time() - task_start
                     logger.warning(f"Task {idx} failed on {provider.base_url}: {e}")
                     results[idx] = None
                     self._router.mark_failed(provider)
 
                     async with lock:
-                        failed_count += 1
-                        pbar.update(1)
+                        # 更新进度条
+                        if tracker:
+                            req_result = RequestResult(
+                                request_id=idx,
+                                data={"error": str(e)},
+                                status="error",
+                                latency=latency,
+                            )
+                            tracker.update(req_result)
 
                         # 写入失败记录
                         if file_writer:
@@ -580,13 +654,18 @@ class LLMClientPool:
             flush_to_file()
             if file_writer:
                 file_writer.close()
-            pbar.close()
+                # 自动 compact：去重并按 index 排序
+                if output_jsonl:
+                    self._clients[0]._client._compact_output_file(output_jsonl)
+            # 打印最终统计
+            if tracker:
+                tracker.summary(print_to_console=True)
 
         if return_summary:
             summary = {
                 "total": n,
-                "success": success_count + cached_count,
-                "failed": failed_count,
+                "success": tracker.success_count + cached_count if tracker else n,
+                "failed": tracker.error_count if tracker else 0,
                 "cached": cached_count,
                 "elapsed": time.time() - start_time,
             }
@@ -602,6 +681,7 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         distribute: bool = True,
@@ -616,6 +696,7 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 distribute=distribute,

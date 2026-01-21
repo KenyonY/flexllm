@@ -381,6 +381,11 @@ class LLMClientBase(ABC):
         # 进度条配置（支持成本显示）
         progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None
 
+        # 提前获取定价信息（用于双行进度条显示）
+        pricing = get_model_pricing(effective_model) if track_cost else None
+        input_price = pricing["input"] * 1e6 if pricing else None
+        output_price = pricing["output"] * 1e6 if pricing else None
+
         # 文件输出相关状态
         file_writer = None
         file_buffer = []
@@ -503,7 +508,6 @@ class LLMClientBase(ABC):
                     # 选择提取器
                     extract_fn = extractor_with_usage if return_usage else extractor
 
-                    _pricing_set = False
                     async for batch in self._client.aiter_stream_requests(
                         request_params=request_params,
                         url=effective_url,
@@ -511,16 +515,10 @@ class LLMClientBase(ABC):
                         show_progress=show_progress,
                         total_requests=len(uncached_messages),
                         progress_config=progress_config,
+                        model_name=effective_model if track_cost else None,
+                        input_price_per_1m=input_price,
+                        output_price_per_1m=output_price,
                     ):
-                        # 设置模型定价信息（仅在首次且开启成本追踪时）
-                        if not _pricing_set and track_cost and batch.progress:
-                            pricing = get_model_pricing(effective_model)
-                            batch.progress.set_model_pricing(
-                                effective_model,
-                                pricing["input"] * 1e6 if pricing else None,
-                                pricing["output"] * 1e6 if pricing else None,
-                            )
-                            _pricing_set = True
                         for result in batch.completed_requests:
                             original_idx = actual_uncached[result.request_id]
                             # 检查请求状态
@@ -598,7 +596,6 @@ class LLMClientBase(ABC):
                         for m in messages_to_run
                     ]
                     # 使用流式处理，每完成一个请求就写入文件
-                    _pricing_set = False
                     async for batch in self._client.aiter_stream_requests(
                         request_params=request_params,
                         url=effective_url,
@@ -606,16 +603,10 @@ class LLMClientBase(ABC):
                         show_progress=show_progress,
                         total_requests=len(messages_to_run),
                         progress_config=progress_config,
+                        model_name=effective_model if track_cost else None,
+                        input_price_per_1m=input_price,
+                        output_price_per_1m=output_price,
                     ):
-                        # 设置模型定价信息（仅在首次且开启成本追踪时）
-                        if not _pricing_set and track_cost and batch.progress:
-                            pricing = get_model_pricing(effective_model)
-                            batch.progress.set_model_pricing(
-                                effective_model,
-                                pricing["input"] * 1e6 if pricing else None,
-                                pricing["output"] * 1e6 if pricing else None,
-                            )
-                            _pricing_set = True
                         for result in batch.completed_requests:
                             original_idx = indices_to_run[result.request_id]
                             # 检查请求状态

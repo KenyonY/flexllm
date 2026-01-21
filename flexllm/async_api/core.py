@@ -267,6 +267,9 @@ class ConcurrentRequester:
         show_progress: bool = True,
         batch_size: int | None = None,
         progress_config: ProgressBarConfig | None = None,
+        model_name: str | None = None,
+        input_price_per_1m: float | None = None,
+        output_price_per_1m: float | None = None,
     ):
         """
         流式处理批量请求，实时返回已完成的结果
@@ -279,6 +282,9 @@ class ConcurrentRequester:
             show_progress: 是否显示进度
             batch_size: 每次yield返回的最小完成请求数量
             progress_config: 进度条配置
+            model_name: 模型名称（用于双行进度条显示）
+            input_price_per_1m: 输入价格（$/1M tokens）
+            output_price_per_1m: 输出价格（$/1M tokens）
         """
         progress = None
         if batch_size is None:
@@ -290,7 +296,12 @@ class ConcurrentRequester:
         if show_progress and total_requests is not None:
             config = progress_config or ProgressBarConfig()
             progress = ProgressTracker(
-                total_requests, concurrency=self._concurrency_limit, config=config
+                total_requests,
+                concurrency=self._concurrency_limit,
+                config=config,
+                model_name=model_name,
+                input_price_per_1m=input_price_per_1m,
+                output_price_per_1m=output_price_per_1m,
             )
 
         async with self._get_session() as session:
@@ -321,6 +332,9 @@ class ConcurrentRequester:
         show_progress: bool = True,
         batch_size: int | None = None,
         progress_config: ProgressBarConfig | None = None,
+        model_name: str | None = None,
+        input_price_per_1m: float | None = None,
+        output_price_per_1m: float | None = None,
     ):
         queue = Queue()
         task = asyncio.create_task(
@@ -333,6 +347,9 @@ class ConcurrentRequester:
                 show_progress=show_progress,
                 batch_size=batch_size,
                 progress_config=progress_config,
+                model_name=model_name,
+                input_price_per_1m=input_price_per_1m,
+                output_price_per_1m=output_price_per_1m,
             )
         )
         try:
