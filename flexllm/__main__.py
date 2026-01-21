@@ -283,6 +283,9 @@ if HAS_TYPER:
             flexllm ask "什么是Python"
             flexllm ask "解释代码" -s "你是代码专家"
             echo "长文本" | flexllm ask "总结一下"
+
+        临时使用未配置的服务:
+            FLEXLLM_BASE_URL="http://localhost:8000/v1" FLEXLLM_MODEL="qwen" flexllm ask "你好"
         """
         stdin_content = None
         if not sys.stdin.isatty():

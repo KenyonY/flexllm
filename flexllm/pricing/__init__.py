@@ -66,26 +66,48 @@ def reload_pricing():
     _pricing_cache = _load_pricing()
 
 
+def _normalize_model_name(model: str) -> str:
+    """
+    规范化模型名称（取斜杠后部分）
+
+    例如: qwen/qwen3-32b -> qwen3-32b
+          Qwen/Qwen3-32B -> qwen3-32b
+    """
+    # 去除首尾斜杠
+    model = model.strip("/")
+
+    # 取斜杠后部分
+    if "/" in model:
+        model = model.split("/", 1)[1]
+
+    return model.lower()
+
+
 def get_model_pricing(model: str) -> dict[str, float] | None:
     """
     获取指定模型的定价
 
     Args:
-        model: 模型名称（支持模糊匹配）
+        model: 模型名称（支持规范化匹配）
 
     Returns:
         {"input": price_per_token, "output": price_per_token} 或 None
     """
     pricing = get_pricing()
 
-    # 精确匹配
-    if model in pricing:
-        return pricing[model]
+    # 去除首尾斜杠
+    model = model.strip("/")
 
-    # 模糊匹配：检查模型名是否包含在 key 中
+    # Step 1: 精确匹配（大小写不敏感）
     model_lower = model.lower()
     for key in pricing:
-        if model_lower in key.lower():
+        if model_lower == key.lower():
+            return pricing[key]
+
+    # Step 2: 规范化后匹配（取斜杠后部分）
+    normalized = _normalize_model_name(model)
+    for key in pricing:
+        if normalized == key.lower():
             return pricing[key]
 
     return None
