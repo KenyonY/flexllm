@@ -292,6 +292,7 @@ class LLMClientPool:
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         distribute: bool = True,
+        metadata_list: list[dict] | None = None,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -309,6 +310,7 @@ class LLMClientPool:
             flush_interval: 文件刷新间隔（秒）
             distribute: 是否将请求分散到多个 endpoint（True）
                         False 时使用单个 endpoint + fallback
+            metadata_list: 元数据列表，与 messages_list 等长，每个元素保存到对应输出记录
             **kwargs: 其他参数
 
         Returns:
@@ -317,6 +319,12 @@ class LLMClientPool:
         # track_cost 需要 usage 信息
         if track_cost:
             return_usage = True
+
+        # metadata_list 长度校验
+        if metadata_list is not None and len(metadata_list) != len(messages_list):
+            raise ValueError(
+                f"metadata_list 长度 ({len(metadata_list)}) 必须与 messages_list 长度 ({len(messages_list)}) 一致"
+            )
 
         # output_jsonl 扩展名校验
         if output_jsonl and not output_jsonl.endswith(".jsonl"):
@@ -334,6 +342,7 @@ class LLMClientPool:
                 track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
+                metadata_list=metadata_list,
                 **kwargs,
             )
         else:
@@ -348,6 +357,7 @@ class LLMClientPool:
                 track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
+                metadata_list=metadata_list,
                 **kwargs,
             )
 
@@ -362,6 +372,7 @@ class LLMClientPool:
         track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
+        metadata_list: list[dict] | None = None,
         **kwargs,
     ):
         """使用单个 endpoint + fallback 的批量调用"""
@@ -389,6 +400,7 @@ class LLMClientPool:
                     track_cost=track_cost,
                     output_jsonl=output_jsonl,
                     flush_interval=flush_interval,
+                    metadata_list=metadata_list,
                     **kwargs,
                 )
                 self._router.mark_success(provider)
@@ -415,6 +427,7 @@ class LLMClientPool:
         track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
+        metadata_list: list[dict] | None = None,
         **kwargs,
     ):
         """
@@ -620,15 +633,16 @@ class LLMClientPool:
                                 )
                                 tracker.update(req_result)
                             if file_writer:
-                                file_buffer.append(
-                                    {
-                                        "index": idx,
-                                        "output": None,
-                                        "status": "error",
-                                        "error": f"All {num_endpoints} endpoints failed",
-                                        "input": msg,
-                                    }
-                                )
+                                record = {
+                                    "index": idx,
+                                    "output": None,
+                                    "status": "error",
+                                    "error": f"All {num_endpoints} endpoints failed",
+                                    "input": msg,
+                                }
+                                if metadata_list is not None:
+                                    record["metadata"] = metadata_list[idx]
+                                file_buffer.append(record)
                         continue
                     # 放回队列，让其他 endpoint 的 worker 处理
                     await queue.put((idx, msg, tried_endpoints))
@@ -702,6 +716,8 @@ class LLMClientPool:
                                 "status": "success",
                                 "input": msg,
                             }
+                            if metadata_list is not None:
+                                record["metadata"] = metadata_list[idx]
                             if output_usage:
                                 record["usage"] = output_usage
                             file_buffer.append(record)
@@ -744,15 +760,16 @@ class LLMClientPool:
 
                             # 写入失败记录
                             if file_writer:
-                                file_buffer.append(
-                                    {
-                                        "index": idx,
-                                        "output": None,
-                                        "status": "error",
-                                        "error": str(e),
-                                        "input": msg,
-                                    }
-                                )
+                                record = {
+                                    "index": idx,
+                                    "output": None,
+                                    "status": "error",
+                                    "error": str(e),
+                                    "input": msg,
+                                }
+                                if metadata_list is not None:
+                                    record["metadata"] = metadata_list[idx]
+                                file_buffer.append(record)
                                 if time.time() - last_flush_time >= flush_interval:
                                     flush_to_file()
 
@@ -806,6 +823,7 @@ class LLMClientPool:
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         distribute: bool = True,
+        metadata_list: list[dict] | None = None,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
@@ -821,6 +839,7 @@ class LLMClientPool:
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 distribute=distribute,
+                metadata_list=metadata_list,
                 **kwargs,
             )
         )
