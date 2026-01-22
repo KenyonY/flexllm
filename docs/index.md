@@ -140,6 +140,8 @@ flexllm --install-completion
 | `list` | 列出本地配置的模型 |
 | `set-model` | 设置默认模型 |
 | `models` | 列出远程服务器的可用模型 |
+| `credits` | 查询 API Key 余额 |
+| `pricing` | 查询模型定价信息 |
 | `test` | 测试 LLM 服务连接 |
 | `init` | 初始化配置文件 |
 | `version` | 显示版本信息 |
@@ -163,11 +165,50 @@ flexllm set-model gpt-4           # 设置默认模型
 # 批量处理（支持断点续传）
 flexllm batch input.jsonl -o output.jsonl
 
+# 查询 API Key 余额
+flexllm credits                   # 查询默认模型的 key 余额
+flexllm credits -m grok-4         # 查询指定模型的 key 余额
+
+# 查询模型定价
+flexllm pricing gpt-4o            # 查询指定模型定价
+
 # 测试连接
 flexllm test
 
 # 初始化配置
 flexllm init
+```
+
+### credits 命令
+
+查询 API Key 余额，自动根据 base_url 识别 provider。
+
+**支持的 Provider：**
+
+| Provider | 识别方式 |
+|----------|---------|
+| OpenRouter | `openrouter.ai` in base_url |
+| SiliconFlow | `siliconflow.cn` in base_url |
+| DeepSeek | `deepseek.com` in base_url |
+| AI/ML API | `aimlapi.com` in base_url |
+| OpenAI | `api.openai.com` in base_url（非官方 API） |
+
+**不支持的 Provider：**
+- Anthropic: 需要 Admin API key
+- xAI: 需要单独的 Management API key
+- Together AI/Groq/Mistral: 无公开余额查询 API
+
+```bash
+$ flexllm credits
+OpenRouter 账户余额
+模型配置: grok-4.1-fast
+API Key: sk-or-v1-cef5a7...8559
+----------------------------------------
+  剩余额度: $96.63
+  总额度上限: $150.00
+  已使用: $53.37
+  今日消费: $3.3637
+  本月消费: $53.36
 ```
 
 ### 配置文件

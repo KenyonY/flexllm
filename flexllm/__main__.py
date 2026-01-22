@@ -1018,12 +1018,13 @@ models:
           - OpenRouter (openrouter.ai)
           - SiliconFlow (siliconflow.cn)
           - DeepSeek (deepseek.com)
+          - AI/ML API (aimlapi.com)
           - OpenAI (api.openai.com) - 非官方 API，可能不稳定
 
         不支持的 provider:
           - Anthropic: 需要 Admin API key (sk-ant-admin...)
           - xAI: 需要单独的 Management API key
-          - Groq/Mistral: 无公开余额查询 API
+          - Together AI/Groq/Mistral: 无公开余额查询 API
 
         Examples:
             flexllm credits                # 查询默认模型的 key 余额
@@ -1048,17 +1049,18 @@ models:
         result = _query_credits(base_url, api_key)
 
         if result is None:
-            print(f"错误: 不支持查询此 provider 的余额", file=sys.stderr)
+            print("错误: 不支持查询此 provider 的余额", file=sys.stderr)
             print(f"  base_url: {base_url}", file=sys.stderr)
             print("\n支持的 provider:", file=sys.stderr)
             print("  - OpenRouter (openrouter.ai)", file=sys.stderr)
             print("  - SiliconFlow (siliconflow.cn)", file=sys.stderr)
             print("  - DeepSeek (deepseek.com)", file=sys.stderr)
+            print("  - AI/ML API (aimlapi.com)", file=sys.stderr)
             print("  - OpenAI (api.openai.com)", file=sys.stderr)
             print("\n不支持的 provider:", file=sys.stderr)
             print("  - Anthropic: 需要 Admin API key", file=sys.stderr)
             print("  - xAI: 需要单独的 Management API key", file=sys.stderr)
-            print("  - Groq/Mistral: 无公开余额查询 API", file=sys.stderr)
+            print("  - Together AI/Groq/Mistral: 无公开余额查询 API", file=sys.stderr)
             raise typer.Exit(1)
 
         if "error" in result:
@@ -1176,6 +1178,28 @@ def _query_credits(base_url: str, api_key: str) -> dict | None:
             return {
                 "provider": "DeepSeek",
                 "data": {"余额充足": "是" if data.get("is_available") else "否"},
+            }
+
+        # AI/ML API
+        if "aimlapi.com" in base_url:
+            resp = requests.get(
+                "https://billing.aimlapi.com/v1/billing/balance",
+                headers=headers,
+                timeout=timeout,
+            )
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+            data = resp.json()
+            # credits 转换: 2,000,000 credits = $1
+            credits = data.get("balance", 0)
+            usd_value = credits / 2_000_000
+            return {
+                "provider": "AI/ML API",
+                "data": {
+                    "Credits": f"{credits:,.0f}",
+                    "折合美元": f"${usd_value:.4f}",
+                },
             }
 
         # OpenAI (非官方稳定 API，可能会变化)
