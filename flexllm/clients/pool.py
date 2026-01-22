@@ -907,8 +907,13 @@ class LLMClientPool:
             "router_stats": self._router.stats,
         }
 
+    async def aclose(self):
+        """异步关闭所有客户端（推荐在异步上下文中使用）"""
+        for client in self._clients:
+            await client.aclose()
+
     def close(self):
-        """关闭所有客户端"""
+        """同步关闭所有客户端"""
         for client in self._clients:
             client.close()
 
@@ -922,7 +927,7 @@ class LLMClientPool:
         return self
 
     async def __aexit__(self, *args):
-        self.close()
+        await self.aclose()
 
     def __repr__(self) -> str:
         return (

@@ -132,8 +132,20 @@ class ConcurrentRequester:
             self._create_session()
         yield self._session
 
+    async def aclose(self):
+        """异步关闭 session 和 connector（推荐在异步上下文中使用）"""
+        session = self._session
+        connector = self._connector
+        self._session = None
+        self._connector = None
+
+        if session and not session.closed:
+            await session.close()
+        if connector and not connector.closed:
+            await connector.close()
+
     def close(self):
-        """关闭 session 和 connector"""
+        """同步关闭 session 和 connector"""
         session = self._session
         connector = self._connector
         self._session = None
@@ -142,14 +154,19 @@ class ConcurrentRequester:
         if session and not session.closed:
             try:
                 loop = asyncio.get_running_loop()
+                # 在运行中的事件循环内，创建任务来关闭
                 loop.create_task(self._async_close(session, connector))
             except RuntimeError:
-                # 没有运行中的事件循环，直接让 GC 处理
-                pass
+                # 没有运行中的事件循环，创建新循环来关闭
+                loop = asyncio.new_event_loop()
+                try:
+                    loop.run_until_complete(self._async_close(session, connector))
+                finally:
+                    loop.close()
 
     @staticmethod
     async def _async_close(session: ClientSession, connector: TCPConnector):
-        """异步关闭 session 和 connector"""
+        """异步关闭 session 和 connector（内部使用）"""
         if session and not session.closed:
             await session.close()
         if connector and not connector.closed:

@@ -191,6 +191,15 @@ models:
     provider: openai
     base_url: http://localhost:11434/v1
     api_key: EMPTY
+
+# batch 命令配置（可选）
+batch:
+  concurrency: 10       # 并发数
+  max_qps: 100          # 每秒最大请求数
+  timeout: 120          # 请求超时（秒）
+  cache: false          # 启用响应缓存
+  return_usage: true    # 输出 token 统计
+  track_cost: true      # 进度条显示实时成本
 ```
 
 也支持环境变量配置：`FLEXLLM_BASE_URL`、`FLEXLLM_API_KEY`、`FLEXLLM_MODEL`
@@ -223,10 +232,8 @@ dt transform qa.jsonl --preset=openai_chat | flexllm batch -o output.jsonl
 flexllm batch input.jsonl -o output.jsonl --system "你是翻译专家"
 
 # 断点续传（默认行为，中断后重新运行即可继续）
+# 默认显示实时成本和 token 统计
 flexllm batch input.jsonl -o output.jsonl
-
-# 实时显示成本
-flexllm batch input.jsonl -o output.jsonl --track-cost
 ```
 
 **输出格式：**

@@ -137,6 +137,8 @@ class FlexLLMConfig:
             "cache": False,
             "cache_ttl": 86400,
             # 网络配置
+            "concurrency": 10,
+            "max_qps": None,
             "timeout": 120,
             "retry_times": 3,
             "retry_delay": 1.0,
@@ -149,7 +151,8 @@ class FlexLLMConfig:
             "preprocess_msg": False,
             "flush_interval": 1.0,
             # 输出配置
-            "return_usage": False,
+            "return_usage": True,
+            "track_cost": True,
         }
 
         # 从配置文件读取 batch 配置节
@@ -321,12 +324,12 @@ if HAS_TYPER:
         async def _ask():
             from flexllm import LLMClient
 
-            client = LLMClient(model=model_id, base_url=base_url, api_key=api_key)
-            messages = []
-            if system:
-                messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": full_prompt})
-            return await client.chat_completions(messages)
+            async with LLMClient(model=model_id, base_url=base_url, api_key=api_key) as client:
+                messages = []
+                if system:
+                    messages.append({"role": "system", "content": system})
+                messages.append({"role": "user", "content": full_prompt})
+                return await client.chat_completions(messages)
 
         try:
             result = asyncio.run(_ask())
@@ -389,7 +392,7 @@ if HAS_TYPER:
         input: Annotated[str | None, Argument(help="输入文件路径（省略则从 stdin 读取）")] = None,
         output: Annotated[str | None, Option("-o", "--output", help="输出文件路径（必需）")] = None,
         model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
-        concurrency: Annotated[int, Option("-c", "--concurrency", help="并发数")] = 10,
+        concurrency: Annotated[int | None, Option("-c", "--concurrency", help="并发数")] = None,
         max_qps: Annotated[float | None, Option("--max-qps", help="每秒最大请求数")] = None,
         system: Annotated[str | None, Option("-s", "--system", help="全局 system prompt")] = None,
         temperature: Annotated[float | None, Option("-t", "--temperature", help="采样温度")] = None,
@@ -446,6 +449,11 @@ if HAS_TYPER:
         effective_cache = cache if cache is not None else batch_config["cache"]
         effective_return_usage = return_usage or batch_config["return_usage"]
         effective_preprocess_msg = preprocess_msg or batch_config["preprocess_msg"]
+        effective_track_cost = track_cost or batch_config["track_cost"]
+        effective_concurrency = (
+            concurrency if concurrency is not None else batch_config["concurrency"]
+        )
+        effective_max_qps = max_qps if max_qps is not None else batch_config["max_qps"]
 
         try:
             records, format_type, message_fields = parse_batch_input(input)
@@ -480,16 +488,14 @@ if HAS_TYPER:
                     "model": model_id,
                     "base_url": base_url,
                     "api_key": api_key,
-                    "concurrency_limit": concurrency,
+                    "concurrency_limit": effective_concurrency,
                     "timeout": batch_config["timeout"],
                     "retry_times": batch_config["retry_times"],
                     "retry_delay": batch_config["retry_delay"],
                     "cache": cache_config,
                 }
-                if max_qps is not None:
-                    client_kwargs["max_qps"] = max_qps
-
-                client = LLMClient(**client_kwargs)
+                if effective_max_qps is not None:
+                    client_kwargs["max_qps"] = effective_max_qps
 
                 # 构建 chat_completions_batch 的 kwargs
                 kwargs = {}
@@ -505,18 +511,19 @@ if HAS_TYPER:
                 if batch_config["thinking"] is not None:
                     kwargs["thinking"] = batch_config["thinking"]
 
-                results, summary = await client.chat_completions_batch(
-                    messages_list=messages_list,
-                    output_jsonl=output,
-                    show_progress=True,
-                    return_summary=True,
-                    return_usage=effective_return_usage,
-                    track_cost=track_cost,
-                    preprocess_msg=effective_preprocess_msg,
-                    flush_interval=batch_config["flush_interval"],
-                    metadata_list=metadata_list,
-                    **kwargs,
-                )
+                async with LLMClient(**client_kwargs) as client:
+                    results, summary = await client.chat_completions_batch(
+                        messages_list=messages_list,
+                        output_jsonl=output,
+                        show_progress=True,
+                        return_summary=True,
+                        return_usage=effective_return_usage,
+                        track_cost=effective_track_cost,
+                        preprocess_msg=effective_preprocess_msg,
+                        flush_interval=batch_config["flush_interval"],
+                        metadata_list=metadata_list,
+                        **kwargs,
+                    )
                 return results, summary
 
             results, summary = asyncio.run(_run_batch())
@@ -1000,6 +1007,74 @@ models:
                         print(f"  {name:<28} ${input_price:<14.4f} ${output_price:<14.4f}")
 
     @app.command()
+    def credits(
+        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+    ):
+        """查询 API Key 余额
+
+        自动根据 base_url 识别 provider 并查询余额。
+
+        支持的 provider:
+          - OpenRouter (openrouter.ai)
+          - SiliconFlow (siliconflow.cn)
+          - DeepSeek (deepseek.com)
+          - OpenAI (api.openai.com) - 非官方 API，可能不稳定
+
+        不支持的 provider:
+          - Anthropic: 需要 Admin API key (sk-ant-admin...)
+          - xAI: 需要单独的 Management API key
+          - Groq/Mistral: 无公开余额查询 API
+
+        Examples:
+            flexllm credits                # 查询默认模型的 key 余额
+            flexllm credits -m grok-4      # 查询指定模型的 key 余额
+        """
+        config = get_config()
+        model_config = config.get_model_config(model)
+
+        if not model_config:
+            print("错误: 未找到模型配置", file=sys.stderr)
+            print("提示: 使用 'flexllm list' 查看已配置的模型", file=sys.stderr)
+            raise typer.Exit(1)
+
+        base_url = model_config.get("base_url", "")
+        api_key = model_config.get("api_key", "")
+        model_name = model_config.get("name", model_config.get("id", "unknown"))
+
+        if not api_key or api_key == "EMPTY":
+            print(f"错误: 模型 '{model_name}' 未配置 API Key", file=sys.stderr)
+            raise typer.Exit(1)
+
+        result = _query_credits(base_url, api_key)
+
+        if result is None:
+            print(f"错误: 不支持查询此 provider 的余额", file=sys.stderr)
+            print(f"  base_url: {base_url}", file=sys.stderr)
+            print("\n支持的 provider:", file=sys.stderr)
+            print("  - OpenRouter (openrouter.ai)", file=sys.stderr)
+            print("  - SiliconFlow (siliconflow.cn)", file=sys.stderr)
+            print("  - DeepSeek (deepseek.com)", file=sys.stderr)
+            print("  - OpenAI (api.openai.com)", file=sys.stderr)
+            print("\n不支持的 provider:", file=sys.stderr)
+            print("  - Anthropic: 需要 Admin API key", file=sys.stderr)
+            print("  - xAI: 需要单独的 Management API key", file=sys.stderr)
+            print("  - Groq/Mistral: 无公开余额查询 API", file=sys.stderr)
+            raise typer.Exit(1)
+
+        if "error" in result:
+            print(f"错误: {result['error']}", file=sys.stderr)
+            raise typer.Exit(1)
+
+        # 格式化输出
+        print(f"\n{result['provider']} 账户余额")
+        print(f"模型配置: {model_name}")
+        print(f"API Key: {api_key[:15]}...{api_key[-4:]}")
+        print("-" * 40)
+
+        for key, value in result["data"].items():
+            print(f"  {key}: {value}")
+
+    @app.command()
     def version():
         """显示版本信息"""
         try:
@@ -1014,31 +1089,156 @@ models:
 # ========== 辅助函数 ==========
 
 
+def _query_credits(base_url: str, api_key: str) -> dict | None:
+    """查询 API Key 余额
+
+    Args:
+        base_url: API 基础 URL
+        api_key: API 密钥
+
+    Returns:
+        dict: {"provider": str, "data": dict} 或 {"error": str}
+        None: 不支持的 provider
+    """
+    import requests
+
+    headers = {"Authorization": f"Bearer {api_key}"}
+    timeout = 15
+
+    try:
+        # OpenRouter
+        if "openrouter.ai" in base_url:
+            resp = requests.get(
+                "https://openrouter.ai/api/v1/auth/key",
+                headers=headers,
+                timeout=timeout,
+            )
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+            data = resp.json().get("data", {})
+            return {
+                "provider": "OpenRouter",
+                "data": {
+                    "剩余额度": f"${data.get('limit_remaining', 0):.2f}",
+                    "总额度上限": f"${data.get('limit', 0):.2f}",
+                    "已使用": f"${data.get('usage', 0):.2f}",
+                    "今日消费": f"${data.get('usage_daily', 0):.4f}",
+                    "本月消费": f"${data.get('usage_monthly', 0):.2f}",
+                },
+            }
+
+        # SiliconFlow
+        if "siliconflow.cn" in base_url:
+            resp = requests.get(
+                "https://api.siliconflow.cn/v1/user/info",
+                headers=headers,
+                timeout=timeout,
+            )
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+            data = resp.json().get("data", {})
+            return {
+                "provider": "SiliconFlow",
+                "data": {
+                    "总余额": f"¥{data.get('totalBalance', '0')}",
+                    "充值余额": f"¥{data.get('chargeBalance', '0')}",
+                    "赠送余额": f"¥{data.get('balance', '0')}",
+                    "用户名": data.get("name", "N/A"),
+                    "账户状态": data.get("status", "N/A"),
+                },
+            }
+
+        # DeepSeek
+        if "deepseek.com" in base_url:
+            resp = requests.get(
+                "https://api.deepseek.com/user/balance",
+                headers=headers,
+                timeout=timeout,
+            )
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+            data = resp.json()
+            balance_infos = data.get("balance_infos", [])
+            if balance_infos:
+                info = balance_infos[0]
+                return {
+                    "provider": "DeepSeek",
+                    "data": {
+                        "总余额": f"{info.get('currency', 'CNY')} {info.get('total_balance', '0')}",
+                        "赠送余额": f"{info.get('currency', 'CNY')} {info.get('granted_balance', '0')}",
+                        "充值余额": f"{info.get('currency', 'CNY')} {info.get('topped_up_balance', '0')}",
+                        "余额充足": "是" if data.get("is_available") else "否",
+                    },
+                }
+            return {
+                "provider": "DeepSeek",
+                "data": {"余额充足": "是" if data.get("is_available") else "否"},
+            }
+
+        # OpenAI (非官方稳定 API，可能会变化)
+        if "api.openai.com" in base_url:
+            resp = requests.get(
+                "https://api.openai.com/v1/dashboard/billing/credit_grants",
+                headers=headers,
+                timeout=timeout,
+            )
+            if resp.status_code == 404:
+                return {"error": "OpenAI 余额查询 API 不可用（可能已弃用）"}
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
+
+            data = resp.json()
+            grants = data.get("grants", {}).get("data", [])
+            total_granted = sum(g.get("grant_amount", 0) for g in grants) / 100
+            total_used = sum(g.get("used_amount", 0) for g in grants) / 100
+            total_available = data.get("total_available", 0) / 100
+            total_used_all = data.get("total_used", 0) / 100
+
+            return {
+                "provider": "OpenAI",
+                "data": {
+                    "可用余额": f"${total_available:.2f}",
+                    "已使用": f"${total_used_all:.2f}",
+                    "总授予额度": f"${total_granted:.2f}",
+                },
+            }
+
+        # 不支持的 provider
+        return None
+
+    except requests.exceptions.RequestException as e:
+        return {"error": f"请求失败: {e}"}
+    except Exception as e:
+        return {"error": f"解析失败: {e}"}
+
+
 def _single_chat(message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream):
     """单次对话"""
 
     async def _run():
         from flexllm import LLMClient
 
-        client = LLMClient(model=model, base_url=base_url, api_key=api_key)
+        async with LLMClient(model=model, base_url=base_url, api_key=api_key) as client:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": message})
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": message})
-
-        if stream:
-            print("Assistant: ", end="", flush=True)
-            async for chunk in client.chat_completions_stream(
-                messages, temperature=temperature, max_tokens=max_tokens
-            ):
-                print(chunk, end="", flush=True)
-            print()
-        else:
-            result = await client.chat_completions(
-                messages, temperature=temperature, max_tokens=max_tokens
-            )
-            print(f"Assistant: {result}")
+            if stream:
+                print("Assistant: ", end="", flush=True)
+                async for chunk in client.chat_completions_stream(
+                    messages, temperature=temperature, max_tokens=max_tokens
+                ):
+                    print(chunk, end="", flush=True)
+                print()
+            else:
+                result = await client.chat_completions(
+                    messages, temperature=temperature, max_tokens=max_tokens
+                )
+                print(f"Assistant: {result}")
 
     try:
         asyncio.run(_run())
@@ -1054,51 +1254,50 @@ def _interactive_chat(model, base_url, api_key, system_prompt, temperature, max_
     async def _run():
         from flexllm import LLMClient
 
-        client = LLMClient(model=model, base_url=base_url, api_key=api_key)
+        async with LLMClient(model=model, base_url=base_url, api_key=api_key) as client:
+            messages = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
 
-        messages = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
+            print("\n多轮对话模式")
+            print(f"模型: {model}")
+            print(f"服务器: {base_url}")
+            print("输入 'quit' 或 Ctrl+C 退出")
+            print("-" * 50)
 
-        print("\n多轮对话模式")
-        print(f"模型: {model}")
-        print(f"服务器: {base_url}")
-        print("输入 'quit' 或 Ctrl+C 退出")
-        print("-" * 50)
+            while True:
+                try:
+                    user_input = input("\nYou: ").strip()
 
-        while True:
-            try:
-                user_input = input("\nYou: ").strip()
+                    if user_input.lower() in ["quit", "exit", "q"]:
+                        print("再见！")
+                        break
 
-                if user_input.lower() in ["quit", "exit", "q"]:
-                    print("再见！")
+                    if not user_input:
+                        continue
+
+                    messages.append({"role": "user", "content": user_input})
+
+                    if stream:
+                        print("Assistant: ", end="", flush=True)
+                        full_response = ""
+                        async for chunk in client.chat_completions_stream(
+                            messages, temperature=temperature, max_tokens=max_tokens
+                        ):
+                            print(chunk, end="", flush=True)
+                            full_response += chunk
+                        print()
+                        messages.append({"role": "assistant", "content": full_response})
+                    else:
+                        result = await client.chat_completions(
+                            messages, temperature=temperature, max_tokens=max_tokens
+                        )
+                        print(f"Assistant: {result}")
+                        messages.append({"role": "assistant", "content": result})
+
+                except EOFError:
+                    print("\n再见！")
                     break
-
-                if not user_input:
-                    continue
-
-                messages.append({"role": "user", "content": user_input})
-
-                if stream:
-                    print("Assistant: ", end="", flush=True)
-                    full_response = ""
-                    async for chunk in client.chat_completions_stream(
-                        messages, temperature=temperature, max_tokens=max_tokens
-                    ):
-                        print(chunk, end="", flush=True)
-                        full_response += chunk
-                    print()
-                    messages.append({"role": "assistant", "content": full_response})
-                else:
-                    result = await client.chat_completions(
-                        messages, temperature=temperature, max_tokens=max_tokens
-                    )
-                    print(f"Assistant: {result}")
-                    messages.append({"role": "assistant", "content": result})
-
-            except EOFError:
-                print("\n再见！")
-                break
 
     try:
         asyncio.run(_run())

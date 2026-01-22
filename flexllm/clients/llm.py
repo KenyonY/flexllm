@@ -503,8 +503,12 @@ class LLMClient:
         else:
             return OpenAIClient.parse_thoughts(response_data)
 
+    async def aclose(self):
+        """异步关闭客户端，释放资源（推荐在异步上下文中使用）"""
+        await self._client.aclose()
+
     def close(self):
-        """关闭客户端，释放资源"""
+        """同步关闭客户端，释放资源"""
         self._client.close()
 
     def __enter__(self):
@@ -517,7 +521,7 @@ class LLMClient:
         return self
 
     async def __aexit__(self, *args):
-        self.close()
+        await self.aclose()
 
     def __repr__(self) -> str:
         return f"LLMClient(provider='{self._provider}', model='{self._model}')"

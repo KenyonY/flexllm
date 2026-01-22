@@ -1136,8 +1136,16 @@ class LLMClientBase(ABC):
 
     # ========== 资源管理 ==========
 
+    async def aclose(self):
+        """异步关闭客户端，释放资源（推荐在异步上下文中使用）"""
+        if self._response_cache is not None:
+            self._response_cache.close()
+            self._response_cache = None
+        if self._client is not None:
+            await self._client.aclose()
+
     def close(self):
-        """关闭客户端，释放资源（如缓存连接、HTTP session）"""
+        """同步关闭客户端，释放资源（如缓存连接、HTTP session）"""
         if self._response_cache is not None:
             self._response_cache.close()
             self._response_cache = None
@@ -1154,4 +1162,4 @@ class LLMClientBase(ABC):
         return self
 
     async def __aexit__(self, *args):
-        self.close()
+        await self.aclose()

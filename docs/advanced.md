@@ -479,8 +479,8 @@ client = LLMClient(..., cost_tracker=config)
 ### CLI 用法
 
 ```bash
-# 进度条实时显示成本
-flexllm batch input.jsonl -o output.jsonl --track-cost
+# 进度条默认显示实时成本（track_cost=True）
+flexllm batch input.jsonl -o output.jsonl
 
 # 输出示例：
 # [▉▉▉▉▉▉▉▉▉▉          ] 50.0% (50/100) ⚡ 2.5 req/s avg: 0.8s 💰 $0.0012
