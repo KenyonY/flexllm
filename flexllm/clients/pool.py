@@ -27,15 +27,17 @@ Example:
 """
 
 import asyncio
+import logging
 import time
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from loguru import logger
+logger = logging.getLogger(__name__)
 
 from ..async_api.interface import RequestResult
 from ..async_api.progress import ProgressBarConfig, ProgressTracker
 from ..pricing import get_model_pricing
+from ..utils.core import retry_callback
 from .base import ChatCompletionResult
 from .llm import LLMClient
 from .router import ProviderConfig, ProviderRouter, Strategy
@@ -50,6 +52,9 @@ class EndpointConfig:
     model: str = None
     provider: Literal["openai", "gemini", "auto"] = "auto"
     weight: float = 1.0
+    # endpoint 级别的 rate limit 配置（None 表示使用全局配置）
+    concurrency_limit: int = None
+    max_qps: int = None
     # 其他 LLMClient 参数
     extra: dict[str, Any] = None
 
@@ -154,14 +159,20 @@ class LLMClientPool:
                     ep = EndpointConfig(**ep)
                 self._endpoints.append(ep)
 
+                # 确定 rate limit 配置（endpoint 级别优先）
+                ep_concurrency = (
+                    ep.concurrency_limit if ep.concurrency_limit is not None else concurrency_limit
+                )
+                ep_max_qps = ep.max_qps if ep.max_qps is not None else max_qps
+
                 # 合并参数
                 client_kwargs = {
                     "provider": ep.provider,
                     "base_url": ep.base_url,
                     "api_key": ep.api_key,
                     "model": ep.model,
-                    "concurrency_limit": concurrency_limit,
-                    "max_qps": max_qps,
+                    "concurrency_limit": ep_concurrency,
+                    "max_qps": ep_max_qps,
                     "timeout": timeout,
                     "retry_times": effective_retry_times,
                     **kwargs,
@@ -246,7 +257,11 @@ class LLMClientPool:
 
                 # 检查是否返回了 RequestResult（表示失败）
                 if hasattr(result, "status") and result.status != "success":
-                    raise RuntimeError(f"请求失败: {getattr(result, 'error', result)}")
+                    # 从 result.data 中提取错误信息
+                    error_msg = "unknown"
+                    if hasattr(result, "data") and isinstance(result.data, dict):
+                        error_msg = result.data.get("error", "unknown")
+                    raise RuntimeError(error_msg)
 
                 self._router.mark_success(provider)
                 return result
@@ -254,7 +269,7 @@ class LLMClientPool:
             except Exception as e:
                 last_error = e
                 self._router.mark_failed(provider)
-                logger.warning(f"Endpoint {provider.base_url} 失败: {e}")
+                logger.debug(f"Endpoint {provider.base_url} 失败: {e}")
 
                 if not self._fallback:
                     raise
@@ -454,14 +469,13 @@ class LLMClientPool:
         num_endpoints = len(all_endpoints)
 
         # 获取响应缓存（如果有的话，使用第一个 client 的缓存）
-        # return_usage 时跳过缓存（缓存不包含 usage 信息）
+        # 缓存已支持存储 usage 信息，return_usage 时也可使用缓存
         response_cache = None
-        if not return_usage:
-            for client in self._clients:
-                cache = getattr(client._client, "_response_cache", None)
-                if cache is not None:
-                    response_cache = cache
-                    break
+        for client in self._clients:
+            cache = getattr(client._client, "_response_cache", None)
+            if cache is not None:
+                response_cache = cache
+                break
 
         # 断点续传：读取已完成的记录
         completed_indices = set()
@@ -511,7 +525,14 @@ class LLMClientPool:
                     continue
                 cached_result = response_cache.get(msg, model=effective_model, **kwargs)
                 if cached_result is not None:
-                    results[idx] = cached_result
+                    # 缓存格式为 {"content": ..., "usage": ...}
+                    if return_usage:
+                        results[idx] = ChatCompletionResult(
+                            content=cached_result["content"],
+                            usage=cached_result.get("usage"),
+                        )
+                    else:
+                        results[idx] = cached_result["content"]
                     completed_indices.add(idx)
                     cached_count += 1
             if cached_count > 0:
@@ -653,6 +674,9 @@ class LLMClientPool:
 
                 task_start = time.time()
                 try:
+                    # 设置重试回调，让 async_retry 重试时更新进度条
+                    if tracker:
+                        retry_callback.set(tracker.increment_retry)
                     result = await client.chat_completions(
                         messages=msg,
                         model=worker_model,
@@ -663,17 +687,30 @@ class LLMClientPool:
 
                     # 检查是否返回了 RequestResult（表示失败）
                     if hasattr(result, "status") and result.status != "success":
-                        raise RuntimeError(f"请求失败: {getattr(result, 'error', result)}")
+                        # 从 result.data 中提取错误信息
+                        error_type = "unknown"
+                        error_detail = ""
+                        if hasattr(result, "data") and isinstance(result.data, dict):
+                            error_type = result.data.get("error", "unknown")
+                            error_detail = result.data.get("detail", "")
+                        # 构造包含类型和详情的错误消息
+                        error_msg = f"{error_type}: {error_detail}" if error_detail else error_type
+                        raise RuntimeError(error_msg)
 
                     latency = time.time() - task_start
                     results[idx] = result
                     self._router.mark_success(provider)
 
-                    # 写入缓存
+                    # 写入缓存（存储 content 和 usage）
                     if response_cache is not None:
-                        # 缓存内容（不包含 usage）
-                        cache_content = result.content if hasattr(result, "content") else result
-                        response_cache.set(msg, cache_content, model=worker_model, **kwargs)
+                        if hasattr(result, "content"):
+                            cache_data = {
+                                "content": result.content,
+                                "usage": getattr(result, "usage", None),
+                            }
+                        else:
+                            cache_data = {"content": result, "usage": None}
+                        response_cache.set(msg, cache_data, model=worker_model, **kwargs)
 
                     async with lock:
                         active_tasks -= 1
@@ -733,23 +770,22 @@ class LLMClientPool:
 
                     # 检查是否还有其他 endpoint 可以重试
                     if self._fallback and len(tried_endpoints) < num_endpoints:
-                        logger.debug(
-                            f"Task {idx} failed on {my_endpoint}: {e}, "
-                            f"retrying on other endpoints ({len(tried_endpoints)}/{num_endpoints})"
-                        )
-                        # 放回队列，让其他 endpoint 重试
+                        # 放回队列，让其他 endpoint 重试（进度条会显示 retry 计数）
                         await queue.put((idx, msg, tried_endpoints))
                         async with lock:
                             active_tasks -= 1
+                            # 更新进度条的 retry 计数
+                            if tracker:
+                                tracker.increment_retry()
                     else:
                         # 所有 endpoint 都失败了，或者未启用 fallback
-                        logger.warning(f"Task {idx} failed on {my_endpoint}: {e} (final failure)")
                         results[idx] = None
 
                         async with lock:
                             active_tasks -= 1
                             # 更新进度条
                             if tracker:
+                                # 直接使用异常消息作为错误信息
                                 req_result = RequestResult(
                                     request_id=idx,
                                     data={"error": str(e)},

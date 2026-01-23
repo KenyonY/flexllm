@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable
 from copy import deepcopy
 from typing import TYPE_CHECKING
 
 import aiohttp
-from loguru import logger
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from .image_processor import ImageCacheConfig

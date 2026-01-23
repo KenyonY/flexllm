@@ -10,6 +10,7 @@ import contextlib
 import gc
 import hashlib
 import io
+import logging
 import os
 import sys
 import threading
@@ -22,7 +23,8 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-from loguru import logger
+
+logger = logging.getLogger(__name__)
 
 try:
     import cv2

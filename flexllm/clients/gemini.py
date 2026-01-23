@@ -4,10 +4,11 @@ Gemini API Client - Google Gemini 模型的批量调用客户端
 与 OpenAIClient 保持相同的接口，方便上层代码无缝切换。
 """
 
+import logging
 import re
 from typing import Any
 
-from loguru import logger
+logger = logging.getLogger(__name__)
 
 from ..cache import ResponseCacheConfig
 from .base import LLMClientBase

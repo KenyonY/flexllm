@@ -6,13 +6,14 @@ LLMClientBase - LLM 客户端抽象基类
 
 import asyncio
 import json
+import logging
 import time
 from abc import ABC
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Union
 
-from loguru import logger
+logger = logging.getLogger(__name__)
 
 from ..async_api import ConcurrentRequester
 from ..async_api.progress import ProgressBarConfig
@@ -538,7 +539,7 @@ class LLMClientBase(ABC):
                                     if isinstance(result.data, dict)
                                     else str(result.data)
                                 )
-                                logger.warning(f"请求失败: {error_msg}")
+                                logger.debug(f"请求失败: {error_msg}")
                                 cached_responses[original_idx] = None
                                 on_file_result(original_idx, None, "error", error_msg)
                                 continue
@@ -615,7 +616,7 @@ class LLMClientBase(ABC):
                                     if isinstance(result.data, dict)
                                     else str(result.data)
                                 )
-                                logger.warning(f"请求失败: {error_msg}")
+                                logger.debug(f"请求失败: {error_msg}")
                                 responses[original_idx] = None
                                 on_file_result(original_idx, None, "error", error_msg)
                                 continue
@@ -981,7 +982,7 @@ class LLMClientBase(ABC):
                                 if isinstance(result.data, dict)
                                 else str(result.data)
                             )
-                            logger.warning(f"请求失败: {error_msg}")
+                            logger.debug(f"请求失败: {error_msg}")
                             on_file_result(original_idx, None, "error", error_msg)
                             result.content = None
                             result.usage = None

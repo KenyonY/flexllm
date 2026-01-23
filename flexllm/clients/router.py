@@ -113,8 +113,9 @@ class ProviderRouter:
             healthy = self._get_healthy_providers()
 
             if self.strategy == "round_robin":
-                self._index = (self._index + 1) % len(healthy)
-                return healthy[self._index].config
+                provider = healthy[self._index % len(healthy)].config
+                self._index += 1
+                return provider
 
             elif self.strategy == "weighted":
                 weights = [p.config.weight for p in healthy]

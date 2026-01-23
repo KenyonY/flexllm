@@ -2,7 +2,11 @@
 
 import asyncio
 import logging
+from contextvars import ContextVar
 from functools import wraps
+
+# 用于在 async_retry 重试时通知外部（如进度条）
+retry_callback: ContextVar[callable] = ContextVar("retry_callback", default=None)
 
 
 def async_retry(
@@ -32,7 +36,11 @@ def async_retry(
                 except exceptions as e:
                     if attempt == retry_times - 1:
                         raise
-                    logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+                    logger.debug(f"Attempt {attempt + 1} failed: {str(e)}")
+                    # 通知外部重试（如更新进度条）
+                    callback = retry_callback.get()
+                    if callback:
+                        callback()
                     await asyncio.sleep(retry_delay)
             return await func(*args, **kwargs)
 

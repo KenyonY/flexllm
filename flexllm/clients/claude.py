@@ -5,10 +5,12 @@ Anthropic Claude API Client
 """
 
 import json
+import logging
 import re
 
 import aiohttp
-from loguru import logger
+
+logger = logging.getLogger(__name__)
 
 from ..cache import ResponseCacheConfig
 from .base import LLMClientBase, ToolCall

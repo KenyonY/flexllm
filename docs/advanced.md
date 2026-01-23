@@ -157,22 +157,28 @@ from flexllm import LLMClientPool
 pool = LLMClientPool(
     endpoints=[
         {
-            "base_url": "http://host1:8000/v1",
+            "base_url": "http://fast-host:8000/v1",
             "api_key": "key1",
             "model": "qwen",
-            "weight": 2,  # 权重（用于 weighted 策略）
+            "weight": 2,              # 权重（用于 weighted 策略）
+            "concurrency_limit": 50,  # endpoint 级别并发（可选）
+            "max_qps": 500,           # endpoint 级别 QPS（可选）
         },
         {
-            "base_url": "http://host2:8000/v1",
+            "base_url": "http://slow-host:8000/v1",
             "api_key": "key2",
             "model": "qwen",
             "weight": 1,
+            "concurrency_limit": 5,   # 较慢服务使用更低的并发
+            "max_qps": 50,
         },
     ],
     load_balance="weighted",
     fallback=True,
     failure_threshold=3,   # 连续失败 3 次标记为不健康
     recovery_time=60.0,    # 60 秒后尝试恢复
+    concurrency_limit=10,  # 全局默认值（未指定 endpoint 级别配置时使用）
+    max_qps=100,           # 全局默认值
 )
 ```
 
@@ -184,6 +190,77 @@ pool = LLMClientPool(
 | `weighted` | 加权随机，按 weight 比例分配 |
 | `random` | 完全随机 |
 | `fallback` | 主备模式，优先使用第一个，失败后切换 |
+
+### Endpoint 级别 Rate Limit
+
+每个 endpoint 可以独立配置 `concurrency_limit` 和 `max_qps`，以适应异构 endpoint 场景（不同服务性能差异大）：
+
+```python
+from flexllm import LLMClientPool, EndpointConfig
+
+# 方式1：使用 EndpointConfig（推荐）
+pool = LLMClientPool(
+    endpoints=[
+        EndpointConfig(
+            base_url="http://fast-api.com/v1",
+            api_key="key1",
+            model="qwen",
+            concurrency_limit=50,  # 高性能服务
+            max_qps=500,
+        ),
+        EndpointConfig(
+            base_url="http://slow-api.com/v1",
+            api_key="key2",
+            model="qwen",
+            concurrency_limit=5,   # 低性能服务
+            max_qps=50,
+        ),
+    ],
+)
+
+# 方式2：使用 dict 配置
+pool = LLMClientPool(
+    endpoints=[
+        {"base_url": "http://fast.com/v1", "concurrency_limit": 50, "max_qps": 500},
+        {"base_url": "http://slow.com/v1", "concurrency_limit": 5, "max_qps": 50},
+    ],
+    concurrency_limit=10,  # 全局默认值
+    max_qps=100,           # 全局默认值
+)
+```
+
+**配置优先级**：endpoint 级别配置 > 全局配置 > 默认值
+
+**CLI 配置方式**（`~/.flexllm/config.yaml`）：
+
+```yaml
+batch:
+  concurrency: 10       # 全局默认并发
+  max_qps: 100          # 全局默认 QPS
+  endpoints:
+    - base_url: http://fast-api.com/v1
+      api_key: key1
+      model: qwen
+      concurrency_limit: 50
+      max_qps: 500
+    - base_url: http://slow-api.com/v1
+      api_key: key2
+      model: qwen
+      concurrency_limit: 5
+      max_qps: 50
+  fallback: true
+```
+
+**CLI 优先级**：`-m 参数` > `batch.endpoints` > 默认模型
+
+- 指定 `-m model`：使用指定的模型配置
+- 未指定 `-m` 且配置了 `batch.endpoints`：自动使用 `LLMClientPool`
+- 都没有：使用默认模型
+
+**使用场景**：
+- 混合部署：本地 GPU 服务（高并发）+ 云 API（受限）
+- 成本优化：付费 API（低并发）+ 免费 API（高并发）
+- 性能适配：快速服务处理更多请求，慢速服务不被压垮
 
 ### Fallback 重试机制
 
@@ -339,6 +416,25 @@ client = LLMClient(
     retry_delay=1.0,    # 重试间隔
 )
 ```
+
+### 进度条状态显示
+
+批量处理时，进度条会实时显示重试和失败信息：
+
+```
+[▉▉▉▉▉▉▉▉▉▉          ] 50.0% (500/1000) ⚡ 25.3 req/s avg: 0.04s 💰 $0.0012 ↻12 ✗2
+```
+
+| 标记 | 说明 |
+|------|------|
+| `↻N` | 总重试次数（包括内部重试和 fallback 重试） |
+| `✗N` | 最终失败的请求数 |
+
+**错误警告**：首次遇到新错误类型时，会打印一次警告：
+```
+⚠️  新错误类型: timeout: Request timed out after 120s
+```
+相同错误类型后续出现不会重复打印。
 
 ### 批量处理错误
 

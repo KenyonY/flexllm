@@ -58,6 +58,8 @@ class ProgressTracker:
         self.completed_requests = 0
         self.success_count = 0
         self.error_count = 0
+        self.retry_count = 0  # fallback 重试次数
+        self._seen_error_types: set[str] = set()  # 已打印过的错误类型
         self.start_time = time.time()
         self.latencies = []
         self.errors = {}
@@ -140,6 +142,11 @@ class ProgressTracker:
         if self.config.show_cost:
             self._refresh_progress_bar()
 
+    def increment_retry(self) -> None:
+        """增加 fallback 重试计数并刷新进度条"""
+        self.retry_count += 1
+        self._refresh_progress_bar()
+
     def _get_colored_text(self, text: str, color: str) -> str:
         """添加颜色到文本"""
         if self.config.use_colors:
@@ -214,6 +221,10 @@ class ProgressTracker:
         # 请求计数
         if self.config.show_counts:
             counts = f"({self.completed_requests}/{self.total_requests})"
+            # 显示 retry 和 error 计数
+            if self.retry_count > 0 or self.error_count > 0:
+                counts += f" ↻{self.retry_count}" if self.retry_count > 0 else ""
+                counts += f" ✗{self.error_count}" if self.error_count > 0 else ""
             components.append(self._get_colored_text(counts, "yellow"))
 
         # 速度信息
@@ -290,12 +301,26 @@ class ProgressTracker:
             self.success_count += 1
         else:
             self.error_count += 1
-            # 安全地获取错误类型，处理 result.data 为 None 的情况
+            # 安全地获取错误类型和详情，处理 result.data 为 None 的情况
+            error_type = "unknown"
+            error_detail = ""
             if result.data and isinstance(result.data, dict):
                 error_type = result.data.get("error", "unknown")
-            else:
-                error_type = "unknown"
+                error_detail = result.data.get("detail", "")
             self.errors[error_type] = self.errors.get(error_type, 0) + 1
+
+            # 首次出现的错误类型打印一次警告
+            if error_type not in self._seen_error_types:
+                self._seen_error_types.add(error_type)
+                # 构建显示信息：错误类型 + 详情（不截断）
+                display_error = f"{error_type}: {error_detail}" if error_detail else error_type
+                # 清除当前行并打印警告，避免打乱进度条
+                if self._use_two_lines:
+                    # 双行模式：上移一行，清除两行，打印警告，重置首次渲染标志
+                    print(f"\r\033[A\033[K\033[K⚠️  新错误类型: {display_error}")
+                    self._first_render = True
+                else:
+                    print(f"\r\033[K⚠️  新错误类型: {display_error}")
 
         self._refresh_progress_bar()
 

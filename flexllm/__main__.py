@@ -153,6 +153,9 @@ class FlexLLMConfig:
             # 输出配置
             "return_usage": True,
             "track_cost": True,
+            # 多 endpoint 配置
+            "endpoints": None,
+            "fallback": True,
         }
 
         # 从配置文件读取 batch 配置节
@@ -432,18 +435,40 @@ if HAS_TYPER:
             raise typer.Exit(1)
 
         config = get_config()
-        model_config = config.get_model_config(model)
-        if not model_config:
-            print("错误: 未找到模型配置", file=sys.stderr)
-            print("提示: 使用 'flexllm list' 查看可用模型", file=sys.stderr)
-            raise typer.Exit(1)
-
-        model_id = model_config.get("id")
-        base_url = model_config.get("base_url")
-        api_key = model_config.get("api_key", "EMPTY")
 
         # 获取 batch 配置（配置文件 + 默认值）
         batch_config = config.get_batch_config()
+
+        # 优先级：命令行 -m 参数 > batch.endpoints 配置 > 默认模型
+        model_config = None
+        endpoints_config = None
+        use_pool = False
+
+        if model:
+            # 命令行指定了 -m，使用指定的模型配置
+            model_config = config.get_model_config(model)
+            if not model_config:
+                print(f"错误: 未找到模型 '{model}'", file=sys.stderr)
+                print("提示: 使用 'flexllm list' 查看可用模型", file=sys.stderr)
+                raise typer.Exit(1)
+        elif batch_config.get("endpoints"):
+            # 没有指定 -m，使用 batch.endpoints 配置
+            endpoints_config = batch_config["endpoints"]
+            use_pool = len(endpoints_config) > 0
+        else:
+            # 都没有，使用默认模型
+            model_config = config.get_model_config(None)
+            if not model_config:
+                print("错误: 未找到模型配置", file=sys.stderr)
+                print(
+                    "提示: 使用 'flexllm list' 查看可用模型，或在 batch 节配置 endpoints",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(1)
+
+        model_id = model_config.get("id") if model_config else None
+        base_url = model_config.get("base_url") if model_config else None
+        api_key = model_config.get("api_key", "EMPTY") if model_config else None
 
         # CLI 参数覆盖配置文件
         effective_cache = cache if cache is not None else batch_config["cache"]
@@ -460,6 +485,15 @@ if HAS_TYPER:
             print(f"输入格式: {format_type}", file=sys.stderr)
             print(f"记录数: {len(records)}", file=sys.stderr)
 
+            # 显示使用的客户端类型
+            if use_pool:
+                print(
+                    f"客户端: LLMClientPool ({len(endpoints_config)} endpoints)",
+                    file=sys.stderr,
+                )
+            else:
+                print(f"客户端: LLMClient ({model_config.get('name', model_id)})", file=sys.stderr)
+
             messages_list = []
             metadata_list = []
 
@@ -475,7 +509,7 @@ if HAS_TYPER:
                 metadata_list = None
 
             async def _run_batch():
-                from flexllm import LLMClient
+                from flexllm import LLMClient, LLMClientPool
 
                 from .cache import ResponseCacheConfig
 
@@ -483,19 +517,6 @@ if HAS_TYPER:
                 cache_config = None
                 if effective_cache:
                     cache_config = ResponseCacheConfig.ipc(ttl=batch_config["cache_ttl"])
-
-                client_kwargs = {
-                    "model": model_id,
-                    "base_url": base_url,
-                    "api_key": api_key,
-                    "concurrency_limit": effective_concurrency,
-                    "timeout": batch_config["timeout"],
-                    "retry_times": batch_config["retry_times"],
-                    "retry_delay": batch_config["retry_delay"],
-                    "cache": cache_config,
-                }
-                if effective_max_qps is not None:
-                    client_kwargs["max_qps"] = effective_max_qps
 
                 # 构建 chat_completions_batch 的 kwargs
                 kwargs = {}
@@ -511,19 +532,61 @@ if HAS_TYPER:
                 if batch_config["thinking"] is not None:
                     kwargs["thinking"] = batch_config["thinking"]
 
-                async with LLMClient(**client_kwargs) as client:
-                    results, summary = await client.chat_completions_batch(
-                        messages_list=messages_list,
-                        output_jsonl=output,
-                        show_progress=True,
-                        return_summary=True,
-                        return_usage=effective_return_usage,
-                        track_cost=effective_track_cost,
-                        preprocess_msg=effective_preprocess_msg,
-                        flush_interval=batch_config["flush_interval"],
-                        metadata_list=metadata_list,
-                        **kwargs,
-                    )
+                # 使用 batch.endpoints 配置或单 model 配置
+                if use_pool:
+                    # 多 endpoint 模式：使用 LLMClientPool
+                    # 注：batch 使用动态负载均衡（共享队列），load_balance 参数无效
+                    pool_kwargs = {
+                        "endpoints": endpoints_config,
+                        "fallback": batch_config.get("fallback", True),
+                        "concurrency_limit": effective_concurrency,
+                        "timeout": batch_config["timeout"],
+                        "retry_times": batch_config["retry_times"],
+                        "cache": cache_config,
+                    }
+                    if effective_max_qps is not None:
+                        pool_kwargs["max_qps"] = effective_max_qps
+
+                    async with LLMClientPool(**pool_kwargs) as pool:
+                        results, summary = await pool.chat_completions_batch(
+                            messages_list=messages_list,
+                            output_jsonl=output,
+                            show_progress=True,
+                            return_summary=True,
+                            return_usage=effective_return_usage,
+                            track_cost=effective_track_cost,
+                            flush_interval=batch_config["flush_interval"],
+                            metadata_list=metadata_list,
+                            **kwargs,
+                        )
+                else:
+                    # 单 endpoint 模式：使用 LLMClient
+                    client_kwargs = {
+                        "model": model_id,
+                        "base_url": base_url,
+                        "api_key": api_key,
+                        "concurrency_limit": effective_concurrency,
+                        "timeout": batch_config["timeout"],
+                        "retry_times": batch_config["retry_times"],
+                        "retry_delay": batch_config["retry_delay"],
+                        "cache": cache_config,
+                    }
+                    if effective_max_qps is not None:
+                        client_kwargs["max_qps"] = effective_max_qps
+
+                    async with LLMClient(**client_kwargs) as client:
+                        results, summary = await client.chat_completions_batch(
+                            messages_list=messages_list,
+                            output_jsonl=output,
+                            show_progress=True,
+                            return_summary=True,
+                            return_usage=effective_return_usage,
+                            track_cost=effective_track_cost,
+                            preprocess_msg=effective_preprocess_msg,
+                            flush_interval=batch_config["flush_interval"],
+                            metadata_list=metadata_list,
+                            **kwargs,
+                        )
                 return results, summary
 
             results, summary = asyncio.run(_run_batch())
@@ -645,11 +708,18 @@ if HAS_TYPER:
             model_id = m.get("id", "?")
             provider = m.get("provider", "openai")
             is_default = " (默认)" if name == default or model_id == default else ""
+            endpoints = m.get("endpoints")
 
             print(f"  {name}{is_default}")
             if name != model_id:
                 print(f"    id: {model_id}")
-            print(f"    provider: {provider}")
+
+            if endpoints and len(endpoints) > 1:
+                # 多 endpoint 池
+                print(f"    type: pool ({len(endpoints)} endpoints)")
+                print(f"    fallback: {m.get('fallback', True)}")
+            else:
+                print(f"    provider: {provider}")
             print()
 
     @app.command("set-model")
@@ -833,14 +903,16 @@ models:
 # batch 命令配置（可选）
 # 这些配置可通过 CLI 参数覆盖
 # batch:
-#   # 缓存配置
-#   cache: false              # 是否启用响应缓存
-#   cache_ttl: 86400          # 缓存过期时间（秒），默认 24 小时
-#
-#   # 网络配置
+#   # 网络配置（全局默认值，可被 endpoint 级别配置覆盖）
+#   concurrency: 10           # 并发数
+#   max_qps: 100              # 每秒最大请求数
 #   timeout: 120              # 请求超时时间（秒）
 #   retry_times: 3            # 重试次数
 #   retry_delay: 1.0          # 重试延迟（秒）
+#
+#   # 缓存配置
+#   cache: false              # 是否启用响应缓存
+#   cache_ttl: 86400          # 缓存过期时间（秒），默认 24 小时
 #
 #   # 采样参数（覆盖模型默认值）
 #   # top_p: 0.9
@@ -855,6 +927,21 @@ models:
 #
 #   # 输出配置
 #   return_usage: false       # 是否输出 token 统计
+#
+#   # 多 endpoint 配置（配置后 batch 命令自动使用 LLMClientPool）
+#   # 动态负载均衡：共享队列，快的 endpoint 处理更多任务
+#   # endpoints:
+#   #   - base_url: http://fast-api.com/v1
+#   #     api_key: key1
+#   #     model: qwen
+#   #     concurrency_limit: 50   # endpoint 级别并发（可选）
+#   #     max_qps: 500            # endpoint 级别 QPS（可选）
+#   #   - base_url: http://slow-api.com/v1
+#   #     api_key: key2
+#   #     model: qwen
+#   #     concurrency_limit: 5    # 较慢的服务使用更低的并发
+#   #     max_qps: 50
+#   # fallback: true            # 失败时自动切换到其他 endpoint
 """
 
         try:
@@ -1078,6 +1165,94 @@ models:
 
         for key, value in result["data"].items():
             print(f"  {key}: {value}")
+
+    @app.command()
+    def mock(
+        port: Annotated[int, Option("-p", "--port", help="端口号")] = 8001,
+        delay: Annotated[
+            str, Option("-d", "--delay", help="延迟时间，支持 '0.5' 或 '1-5' 格式")
+        ] = "0.1",
+        response_len: Annotated[
+            str,
+            Option("-l", "--response-len", help="响应长度（字符），支持 '100' 或 '10-1000' 格式"),
+        ] = "10-1000",
+        model: Annotated[str, Option("-m", "--model", help="模型名称")] = "mock-model",
+        rps: Annotated[float, Option("--rps", help="每秒最大请求数，0 表示不限制")] = 0,
+        token_rate: Annotated[
+            float, Option("--token-rate", help="流式返回时每秒 token 数，0 表示不限制")
+        ] = 0,
+        error_rate: Annotated[
+            float, Option("--error-rate", help="请求失败率 (0-1)，0 表示不失败")
+        ] = 0,
+    ):
+        """启动 Mock LLM 服务器
+
+        提供一个轻量级的 Mock 服务器，用于测试和开发。
+        返回符合 OpenAI API 规范的响应，支持流式和非流式。
+
+        Examples:
+            flexllm mock                          # 默认配置，端口 8001
+            flexllm mock -p 8080                  # 指定端口
+            flexllm mock -d 0.5                   # 固定延迟 0.5s
+            flexllm mock -d 1-5                   # 随机延迟 1-5s
+            flexllm mock -l 100-500               # 响应长度 100-500 字符
+            flexllm mock --rps 10                 # 每秒最多 10 个请求
+            flexllm mock --token-rate 50          # 流式返回每秒 50 个 token
+            flexllm mock --error-rate 0.5         # 50% 请求返回错误
+
+        测试:
+            # 非流式
+            curl http://localhost:8001/v1/chat/completions \\
+              -H "Content-Type: application/json" \\
+              -d '{"model": "mock", "messages": [{"role": "user", "content": "hello"}]}'
+
+            # 流式
+            curl http://localhost:8001/v1/chat/completions \\
+              -H "Content-Type: application/json" \\
+              -d '{"model": "mock", "messages": [{"role": "user", "content": "hello"}], "stream": true}'
+        """
+        try:
+            from .mock import MockLLMServer, MockServerConfig, parse_range
+        except ImportError:
+            print("错误: 需要安装 aiohttp: pip install aiohttp", file=sys.stderr)
+            raise typer.Exit(1)
+
+        delay_min, delay_max = parse_range(delay, float)
+        response_min_len, response_max_len = parse_range(response_len, int)
+
+        config = MockServerConfig(
+            port=port,
+            delay_min=delay_min,
+            delay_max=delay_max,
+            model=model,
+            response_min_len=response_min_len,
+            response_max_len=response_max_len,
+            rps=rps,
+            token_rate=token_rate,
+            error_rate=error_rate,
+        )
+
+        print(f"Mock LLM Server starting on port {port}")
+        print(f"  Delay: {delay_min}-{delay_max}s")
+        print(f"  Response length: {response_min_len}-{response_max_len} chars")
+        print(f"  Model: {model}")
+        if rps > 0:
+            print(f"  RPS limit: {rps}")
+        if token_rate > 0:
+            print(f"  Token rate: {token_rate}/s (streaming)")
+        if error_rate > 0:
+            print(f"  Error rate: {error_rate * 100:.1f}%")
+        print(f"  URL: http://localhost:{port}/v1")
+        print("\nPress Ctrl+C to stop")
+
+        try:
+            server = MockLLMServer(config)
+            server.run()
+        except KeyboardInterrupt:
+            print("\nServer stopped")
+        except Exception as e:
+            print(f"错误: {e}", file=sys.stderr)
+            raise typer.Exit(1)
 
     @app.command()
     def version():
@@ -1345,6 +1520,7 @@ def _fallback_cli():
         print("  ask <prompt>      快速问答")
         print("  chat              交互对话")
         print("  batch             批量处理 JSONL 文件")
+        print("  mock              启动 Mock LLM 服务器")
         print("  models            列出远程模型")
         print("  list              列出配置模型")
         print("  set-model <name>  设置默认模型")

@@ -4,9 +4,10 @@ OpenAI 兼容 API 客户端
 支持 OpenAI、vLLM、通义千问、DeepSeek 等兼容 OpenAI API 的服务。
 """
 
+import logging
 from typing import TYPE_CHECKING
 
-from loguru import logger
+logger = logging.getLogger(__name__)
 
 from ..cache import ResponseCacheConfig
 from .base import LLMClientBase

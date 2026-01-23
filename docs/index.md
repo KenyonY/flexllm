@@ -8,7 +8,8 @@
 docs/
 ├── index.md              # 本文档（主入口）
 ├── api.md                # API 详细参考
-└── advanced.md           # 高级用法
+├── advanced.md           # 高级用法
+└── roadmap.md            # 开发路线图
 ```
 
 ## 快速开始
@@ -235,12 +236,26 @@ models:
 
 # batch 命令配置（可选）
 batch:
-  concurrency: 10       # 并发数
-  max_qps: 100          # 每秒最大请求数
+  concurrency: 10       # 并发数（全局默认，可被 endpoint 级别配置覆盖）
+  max_qps: 100          # 每秒最大请求数（全局默认）
   timeout: 120          # 请求超时（秒）
   cache: false          # 启用响应缓存
   return_usage: true    # 输出 token 统计
   track_cost: true      # 进度条显示实时成本
+
+  # 多 endpoint 配置（配置后 batch 命令自动使用 LLMClientPool）
+  endpoints:
+    - base_url: http://fast-api.com/v1
+      api_key: key1
+      model: qwen
+      concurrency_limit: 50   # endpoint 级别并发（可选）
+      max_qps: 500            # endpoint 级别 QPS（可选）
+    - base_url: http://slow-api.com/v1
+      api_key: key2
+      model: qwen
+      concurrency_limit: 5    # 较慢服务使用更低的并发
+      max_qps: 50
+  fallback: true              # 失败时自动切换到其他 endpoint
 ```
 
 也支持环境变量配置：`FLEXLLM_BASE_URL`、`FLEXLLM_API_KEY`、`FLEXLLM_MODEL`

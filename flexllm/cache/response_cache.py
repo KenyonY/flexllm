@@ -9,11 +9,12 @@ LLM 响应缓存模块
 - 本地模式：直接读写 LevelDB，单进程场景
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from loguru import logger
+logger = logging.getLogger(__name__)
 
 from ..pricing.token_counter import messages_hash
 
