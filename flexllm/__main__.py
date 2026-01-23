@@ -542,6 +542,9 @@ if HAS_TYPER:
             print(f"错误: 文件不存在 - {input}", file=sys.stderr)
             raise typer.Exit(1)
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
             print(f"错误: {e}", file=sys.stderr)
             raise typer.Exit(1)
 

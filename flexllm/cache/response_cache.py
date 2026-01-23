@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from flaxkv2 import FlaxKV
 
 
-DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/maque/llm_response")
+DEFAULT_CACHE_DIR = os.path.expanduser("~/.flexllm/cache/response")
 
 
 @dataclass

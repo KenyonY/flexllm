@@ -240,17 +240,22 @@ class LLMClientBase(ABC):
             - 默认: str 内容文本
 
         Note:
-            缓存由初始化时的 cache 参数控制，return_raw/return_usage 时自动跳过缓存
+            缓存由初始化时的 cache 参数控制，return_raw 时自动跳过缓存
         """
         effective_model = self._get_effective_model(model)
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
-        # 检查缓存（缓存不包含 usage 信息，return_raw/return_usage 时跳过缓存）
-        use_cache = self._response_cache is not None and not return_raw and not return_usage
+        # 检查缓存
+        use_cache = self._response_cache is not None and not return_raw
         if use_cache:
             cached = self._response_cache.get(messages, model=effective_model, **kwargs)
             if cached is not None:
-                return cached
+                if return_usage:
+                    return ChatCompletionResult(
+                        content=cached["content"],
+                        usage=cached.get("usage"),
+                    )
+                return cached["content"]
 
         body = self._build_request_body(messages, effective_model, stream=False, **kwargs)
         request_params = {"json": body, "headers": self._get_headers()}
@@ -268,14 +273,16 @@ class LLMClientBase(ABC):
             return data
         if data.status == "success":
             content = self._extract_content(data.data)
-            # 写入缓存
+            usage = self._extract_usage(data.data)
+
+            # 写入缓存（始终存储 usage）
             if use_cache and content is not None:
-                self._response_cache.set(messages, content, model=effective_model, **kwargs)
+                self._response_cache.set(
+                    messages, {"content": content, "usage": usage}, model=effective_model, **kwargs
+                )
 
             if return_usage:
-                usage = self._extract_usage(data.data)
                 tool_calls = self._extract_tool_calls(data.data)
-                # 记录成本
                 if self._cost_tracker:
                     self._cost_tracker.record(usage, effective_model)
                 return ChatCompletionResult(content=content, usage=usage, tool_calls=tool_calls)
@@ -342,7 +349,7 @@ class LLMClientBase(ABC):
             - 默认: List[str] 或 (List[str], summary)
 
         Note:
-            缓存由初始化时的 cache 参数控制，return_usage=True 时自动跳过缓存
+            缓存由初始化时的 cache 参数控制
 
         Raises:
             BudgetExceededError: 当超过预算硬限制时（由 cost_tracker 配置）
@@ -366,17 +373,21 @@ class LLMClientBase(ABC):
 
         messages_list = await self._preprocess_messages_batch(messages_list, preprocess_msg)
 
-        # return_usage 时跳过缓存（缓存不包含 usage 信息）
-        use_cache = self._response_cache is not None and not return_usage
+        use_cache = self._response_cache is not None
 
         def extractor(result):
-            return self._extract_content(result.data)
-
-        def extractor_with_usage(result):
+            """提取 content 和 usage（用于缓存存储）"""
             content = self._extract_content(result.data)
             usage = self._extract_usage(result.data)
-            tool_calls = self._extract_tool_calls(result.data)
-            return ChatCompletionResult(content=content, usage=usage, tool_calls=tool_calls)
+            return {"content": content, "usage": usage}
+
+        def to_chat_result(extracted):
+            """转换为 ChatCompletionResult"""
+            return ChatCompletionResult(
+                content=extracted["content"],
+                usage=extracted.get("usage"),
+                tool_calls=None,  # 缓存不存储 tool_calls
+            )
 
         # 进度条配置（支持成本显示）
         progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None
@@ -487,12 +498,15 @@ class LLMClientBase(ABC):
                 # 将缓存命中的写入文件（如果文件中没有）
                 for i, resp in enumerate(cached_responses):
                     if resp is not None and i not in completed_indices:
-                        on_file_result(i, resp)
+                        on_file_result(i, resp["content"], usage=resp.get("usage"))
 
                 # 过滤掉文件中已完成的
                 actual_uncached = [i for i in uncached_indices if i not in completed_indices]
+                cache_hit_count = len(messages_list) - len(uncached_indices)
 
                 progress = None
+                if cache_hit_count > 0:
+                    logger.info(f"缓存命中: {cache_hit_count}/{len(messages_list)}")
                 if actual_uncached:
                     logger.info(f"待执行: {len(actual_uncached)}/{len(messages_list)}")
 
@@ -504,9 +518,6 @@ class LLMClientBase(ABC):
                         }
                         for m in uncached_messages
                     ]
-
-                    # 选择提取器
-                    extract_fn = extractor_with_usage if return_usage else extractor
 
                     async for batch in self._client.aiter_stream_requests(
                         request_params=request_params,
@@ -521,7 +532,6 @@ class LLMClientBase(ABC):
                     ):
                         for result in batch.completed_requests:
                             original_idx = actual_uncached[result.request_id]
-                            # 检查请求状态
                             if result.status != "success":
                                 error_msg = (
                                     result.data.get("error", "Unknown error")
@@ -533,38 +543,32 @@ class LLMClientBase(ABC):
                                 on_file_result(original_idx, None, "error", error_msg)
                                 continue
                             try:
-                                extracted = extract_fn(result)
+                                extracted = extractor(result)
                                 cached_responses[original_idx] = extracted
-                                # 写入缓存（仅当不需要 usage 时，因为缓存不存储 usage）
-                                if not return_usage:
-                                    self._response_cache.set(
-                                        messages_list[original_idx],
-                                        extracted,
-                                        model=effective_model,
-                                        **kwargs,
+                                # 写入缓存
+                                self._response_cache.set(
+                                    messages_list[original_idx],
+                                    extracted,
+                                    model=effective_model,
+                                    **kwargs,
+                                )
+                                # 文件输出
+                                on_file_result(
+                                    original_idx, extracted["content"], usage=extracted.get("usage")
+                                )
+                                # 记录成本
+                                if self._cost_tracker and extracted.get("usage"):
+                                    self._cost_tracker.record(extracted["usage"], effective_model)
+                                # 更新进度条的成本显示
+                                if track_cost and batch.progress and extracted.get("usage"):
+                                    usage = extracted["usage"]
+                                    input_tokens = usage.get("prompt_tokens", 0)
+                                    output_tokens = usage.get("completion_tokens", 0)
+                                    cost = estimate_cost(
+                                        input_tokens, output_tokens, effective_model
                                     )
-                                # 文件输出（存储 content 和 usage）
-                                if return_usage:
-                                    on_file_result(
-                                        original_idx, extracted.content, usage=extracted.usage
-                                    )
-                                    # 记录成本
-                                    if self._cost_tracker:
-                                        self._cost_tracker.record(extracted.usage, effective_model)
-                                    # 更新进度条的成本显示
-                                    if track_cost and batch.progress and extracted.usage:
-                                        input_tokens = extracted.usage.get("prompt_tokens", 0)
-                                        output_tokens = extracted.usage.get("completion_tokens", 0)
-                                        cost = estimate_cost(
-                                            input_tokens, output_tokens, effective_model
-                                        )
-                                        batch.progress.update_cost(
-                                            input_tokens, output_tokens, cost
-                                        )
-                                else:
-                                    on_file_result(original_idx, extracted)
+                                    batch.progress.update_cost(input_tokens, output_tokens, cost)
                             except BudgetExceededError:
-                                # 预算超限，优雅停止
                                 logger.warning("预算超限，停止批量处理")
                                 raise
                             except Exception as e:
@@ -582,9 +586,6 @@ class LLMClientBase(ABC):
                 ]
                 responses = [None] * len(messages_list)
 
-                # 选择提取器
-                extract_fn = extractor_with_usage if return_usage else extractor
-
                 progress = None
                 if indices_to_run:
                     messages_to_run = [messages_list[i] for i in indices_to_run]
@@ -595,7 +596,6 @@ class LLMClientBase(ABC):
                         }
                         for m in messages_to_run
                     ]
-                    # 使用流式处理，每完成一个请求就写入文件
                     async for batch in self._client.aiter_stream_requests(
                         request_params=request_params,
                         url=effective_url,
@@ -609,7 +609,6 @@ class LLMClientBase(ABC):
                     ):
                         for result in batch.completed_requests:
                             original_idx = indices_to_run[result.request_id]
-                            # 检查请求状态
                             if result.status != "success":
                                 error_msg = (
                                     result.data.get("error", "Unknown error")
@@ -621,30 +620,22 @@ class LLMClientBase(ABC):
                                 on_file_result(original_idx, None, "error", error_msg)
                                 continue
                             try:
-                                extracted = extract_fn(result)
+                                extracted = extractor(result)
                                 responses[original_idx] = extracted
-                                # 文件输出（存储 content 和 usage）
-                                if return_usage:
-                                    on_file_result(
-                                        original_idx, extracted.content, usage=extracted.usage
+                                on_file_result(
+                                    original_idx, extracted["content"], usage=extracted.get("usage")
+                                )
+                                if self._cost_tracker and extracted.get("usage"):
+                                    self._cost_tracker.record(extracted["usage"], effective_model)
+                                if track_cost and batch.progress and extracted.get("usage"):
+                                    usage = extracted["usage"]
+                                    input_tokens = usage.get("prompt_tokens", 0)
+                                    output_tokens = usage.get("completion_tokens", 0)
+                                    cost = estimate_cost(
+                                        input_tokens, output_tokens, effective_model
                                     )
-                                    # 记录成本
-                                    if self._cost_tracker:
-                                        self._cost_tracker.record(extracted.usage, effective_model)
-                                    # 更新进度条的成本显示
-                                    if track_cost and batch.progress and extracted.usage:
-                                        input_tokens = extracted.usage.get("prompt_tokens", 0)
-                                        output_tokens = extracted.usage.get("completion_tokens", 0)
-                                        cost = estimate_cost(
-                                            input_tokens, output_tokens, effective_model
-                                        )
-                                        batch.progress.update_cost(
-                                            input_tokens, output_tokens, cost
-                                        )
-                                else:
-                                    on_file_result(original_idx, extracted)
+                                    batch.progress.update_cost(input_tokens, output_tokens, cost)
                             except BudgetExceededError:
-                                # 预算超限，优雅停止
                                 logger.warning("预算超限，停止批量处理")
                                 raise
                             except Exception as e:
@@ -668,16 +659,22 @@ class LLMClientBase(ABC):
 
         summary = progress.summary(print_to_console=False) if progress else None
 
+        # 转换返回值格式
+        if return_usage:
+            final_responses = [to_chat_result(r) if r is not None else None for r in responses]
+        else:
+            final_responses = [r["content"] if r is not None else None for r in responses]
+
         # 构建返回值
-        result = responses
+        result = final_responses
         if return_summary:
-            result = (responses, summary)
+            result = (final_responses, summary)
         if return_cost_report and self._cost_tracker:
             cost_report = self._cost_tracker.get_report()
             if return_summary:
-                result = (responses, summary, cost_report)
+                result = (final_responses, summary, cost_report)
             else:
-                result = (responses, cost_report)
+                result = (final_responses, cost_report)
         return result
 
     def _compact_output_file(self, file_path: str):
@@ -797,7 +794,7 @@ class LLMClientBase(ABC):
                     - avg_latency: 平均延迟（秒）
 
         Note:
-            缓存由初始化时的 cache 参数控制，return_usage=True 时自动跳过缓存
+            缓存由初始化时的 cache 参数控制
         """
         effective_model = self._get_effective_model(model)
         effective_url = url or self._get_url(effective_model, stream=False)
@@ -815,13 +812,7 @@ class LLMClientBase(ABC):
 
         messages_list = await self._preprocess_messages_batch(messages_list, preprocess_msg)
 
-        # return_usage 时跳过缓存
-        use_cache = self._response_cache is not None and not return_usage
-
-        def extractor(result):
-            if return_raw:
-                return result.data
-            return self._extract_content(result.data) if result.data else None
+        use_cache = self._response_cache is not None and not return_raw
 
         # 文件输出相关状态
         file_writer = None
@@ -926,8 +917,7 @@ class LLMClientBase(ABC):
                 for i, resp in enumerate(cached_responses):
                     if resp is not None:
                         if i not in completed_indices:
-                            on_file_result(i, resp)
-                        # 缓存命中时创建结果对象
+                            on_file_result(i, resp["content"], usage=resp.get("usage"))
                         from types import SimpleNamespace
 
                         yielded_count += 1
@@ -936,8 +926,8 @@ class LLMClientBase(ABC):
                         is_last = yielded_count == total_count
 
                         cached_result = SimpleNamespace(
-                            content=resp,
-                            usage=None,  # 缓存不包含 usage 信息
+                            content=resp["content"],
+                            usage=resp.get("usage"),
                             original_idx=i,
                             latency=0.0,
                             status="cached",
@@ -999,25 +989,21 @@ class LLMClientBase(ABC):
                             result.error = error_msg
                         else:
                             try:
-                                content = extractor(result)
-                                usage = self._extract_usage(result.data) if return_usage else None
+                                content = (
+                                    self._extract_content(result.data) if result.data else None
+                                )
+                                usage = self._extract_usage(result.data)
                                 # 写入缓存
-                                if (
-                                    use_cache
-                                    and self._response_cache
-                                    and content is not None
-                                    and not return_raw
-                                ):
+                                if use_cache and self._response_cache and content is not None:
                                     self._response_cache.set(
                                         messages_list[original_idx],
-                                        content,
+                                        {"content": content, "usage": usage},
                                         model=effective_model,
                                         **kwargs,
                                     )
                                 on_file_result(original_idx, content, usage=usage)
-                                # 在 result 对象上添加属性
                                 result.content = content
-                                result.usage = usage
+                                result.usage = usage if return_usage else None
                                 result.original_idx = original_idx
                                 success_count += 1
                                 total_latency += result.latency
