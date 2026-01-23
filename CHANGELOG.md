@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.5] - 2026-01-23
+
+### Features
+
+- **cache**: 优化响应缓存结构，支持存储 usage 信息
+
+## [0.4.4] - 2026-01-22
+
+### Bug Fixes
+
+- **pool**: 修复 aiohttp session 未关闭警告
+- **pool**: 为 LLMClientPool.chat_completions_batch 添加 metadata_list 参数支持
+
+### Features
+
+- **cli**: 添加 credits 命令支持查询 API Key 余额
+
 ## [0.4.3] - 2026-01-21
 
 ### Features
