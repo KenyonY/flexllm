@@ -1265,6 +1265,37 @@ models:
             v = "0.1.0"
         print(f"flexllm {v}")
 
+    @app.command("install-skill")
+    def install_skill():
+        """安装 Claude Code skill 文件
+
+        将 flexllm 的 skill 文件安装到 ~/.claude/skills/flexllm/，
+        使 Claude Code 能够获取 flexllm 的使用文档。
+        """
+        import shutil
+        from pathlib import Path
+
+        # 查找 skill 文件（在包的 data 目录下）
+        skill_src = Path(__file__).parent / "data" / "SKILL.md"
+
+        if not skill_src.exists():
+            print("错误: 找不到 skill 文件", file=sys.stderr)
+            print("请尝试重新安装 flexllm: pip install --force-reinstall flexllm", file=sys.stderr)
+            raise typer.Exit(1)
+
+        # 目标路径
+        skill_dir = Path.home() / ".claude" / "skills" / "flexllm"
+        skill_dst = skill_dir / "SKILL.md"
+
+        try:
+            skill_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(skill_src, skill_dst)
+            print(f"已安装 skill 文件到: {skill_dst}")
+            print("Claude Code 现在可以使用 flexllm skill 了")
+        except Exception as e:
+            print(f"安装失败: {e}", file=sys.stderr)
+            raise typer.Exit(1)
+
 
 # ========== 辅助函数 ==========
 
