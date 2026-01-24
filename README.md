@@ -42,14 +42,14 @@ results = await client.chat_completions_batch(
 
 ## Features
 
-| Feature | Description |
-|---------|-------------|
-| **Checkpoint Recovery** | Batch jobs auto-resume from interruption - process millions of requests safely |
-| **Response Caching** | Built-in caching with TTL and IPC multi-process sharing |
-| **Load Balancing** | Multi-endpoint distribution with dynamic task allocation and automatic failover |
-| **Cost Tracking** | Real-time cost monitoring with budget control |
-| **High-Performance Async** | Fine-grained concurrency control, QPS limiting, and streaming |
-| **Multi-Provider** | Supports OpenAI-compatible APIs, Gemini, Claude |
+| Feature                          | Description                                                                     |
+| -------------------------------- | ------------------------------------------------------------------------------- |
+| **Checkpoint Recovery**    | Batch jobs auto-resume from interruption - process millions of requests safely  |
+| **Response Caching**       | Built-in caching with TTL and IPC multi-process sharing                         |
+| **Load Balancing**         | Multi-endpoint distribution with dynamic task allocation and automatic failover |
+| **Cost Tracking**          | Real-time cost monitoring with budget control                                   |
+| **High-Performance Async** | Fine-grained concurrency control, QPS limiting, and streaming                   |
+| **Multi-Provider**         | Supports OpenAI-compatible APIs, Gemini, Claude                                 |
 
 ---
 
@@ -64,11 +64,13 @@ pip install flexllm[all]
 
 ### Claude Code Integration
 
-Install the skill file for Claude Code to get flexllm documentation and usage assistance:
+Enable Claude Code to use flexllm for LLM API calls, batch processing, and more:
 
 ```bash
 flexllm install-skill
 ```
+
+After installation, Claude Code can directly use flexllm in your projects.
 
 ---
 
@@ -255,6 +257,7 @@ print(pool.stats)  # {'num_endpoints': 3, 'router_stats': {...}}
 ```
 
 **Key Features:**
+
 - **Dynamic Load Balancing**: Shared queue model - faster endpoints automatically process more tasks
 - **Automatic Failover**: Failed requests retry on other healthy endpoints
 - **Health Monitoring**: Unhealthy endpoints auto-recover after `recovery_time`
@@ -318,6 +321,7 @@ batch:
 ```
 
 Environment variables (higher priority than config file):
+
 - `FLEXLLM_BASE_URL` / `OPENAI_BASE_URL`
 - `FLEXLLM_API_KEY` / `OPENAI_API_KEY`
 - `FLEXLLM_MODEL` / `OPENAI_MODEL`
@@ -385,13 +389,13 @@ LLMClient(
 
 ### Main Methods
 
-| Method | Description |
-|--------|-------------|
-| `chat_completions(messages)` | Single async request |
-| `chat_completions_sync(messages)` | Single sync request |
-| `chat_completions_batch(messages_list)` | Batch async with checkpoint |
-| `iter_chat_completions_batch(messages_list)` | Streaming batch results |
-| `chat_completions_stream(messages)` | Token-by-token streaming |
+| Method                                         | Description                 |
+| ---------------------------------------------- | --------------------------- |
+| `chat_completions(messages)`                 | Single async request        |
+| `chat_completions_sync(messages)`            | Single sync request         |
+| `chat_completions_batch(messages_list)`      | Batch async with checkpoint |
+| `iter_chat_completions_batch(messages_list)` | Streaming batch results     |
+| `chat_completions_stream(messages)`          | Token-by-token streaming    |
 
 ---
 
