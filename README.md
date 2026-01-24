@@ -70,7 +70,7 @@ Enable Claude Code to use flexllm for LLM API calls, batch processing, and more:
 flexllm install-skill
 ```
 
-After installation, Claude Code can directly use flexllm in your projects.
+After installation, Claude Code gains the ability to use flexllm across all your projects.
 
 ---
 

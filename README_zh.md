@@ -71,7 +71,7 @@ pip install flexllm[all]
 flexllm install-skill
 ```
 
-安装后，Claude Code 可以在你的项目中直接使用 flexllm。
+安装后，Claude Code 在任何项目中都能使用 flexllm。
 
 ---
 
