@@ -1258,9 +1258,9 @@ models:
     def version():
         """显示版本信息"""
         try:
-            from importlib.metadata import version as get_version
+            from flexllm import __version__
 
-            v = get_version("flexllm")
+            v = __version__
         except Exception:
             v = "0.1.0"
         print(f"flexllm {v}")
