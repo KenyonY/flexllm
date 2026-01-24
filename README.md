@@ -62,6 +62,14 @@ pip install flexllm
 pip install flexllm[all]
 ```
 
+### Claude Code Integration
+
+Install the skill file for Claude Code to get flexllm documentation and usage assistance:
+
+```bash
+flexllm install-skill
+```
+
 ---
 
 ## Quick Start

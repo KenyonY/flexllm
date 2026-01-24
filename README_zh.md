@@ -63,6 +63,14 @@ pip install flexllm
 pip install flexllm[all]
 ```
 
+### Claude Code 集成
+
+安装 skill 文件，让 Claude Code 获取 flexllm 的文档和使用帮助：
+
+```bash
+flexllm install-skill
+```
+
 ---
 
 ## 快速开始
