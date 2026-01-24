@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "flexllm"
 description = "High-performance LLM client with batch processing, caching, and checkpoint recovery"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache-2.0"}
 authors = [
     {name = "kunyuan", email = "beidongjiedeguang@gmail.com"}
 ]

@@ -1,8 +1,8 @@
 <h1 align="center">flexllm</h1>
 
 <p align="center">
-    <strong>一个客户端，所有大模型</strong><br>
-    <em>生产级 LLM 客户端，支持断点续传、响应缓存、多 Provider 统一接口</em>
+    <strong>生产级高性能 LLM 客户端</strong><br>
+    <em>批量处理 + 断点续传、响应缓存、负载均衡、成本追踪</em>
 </p>
 
 <p align="center">
@@ -20,34 +20,23 @@
 
 ---
 
-## 设计理念
+## 为什么选择 flexllm？
 
-**一个统一入口，适配所有 LLM 服务商。**
+**专为大规模生产级批量处理而设计。**
 
 ```python
 from flexllm import LLMClient
 
-# 只需导入这一个类，其他都是配置。
-```
-
-flexllm 遵循 **"单一接口，多后端"** 原则。无论调用 OpenAI、Gemini、Claude 还是自建模型，API 完全一致。Provider 差异被抽象封装，你只需关注业务逻辑。
-
-```python
-# OpenAI GPT-4
 client = LLMClient(base_url="https://api.openai.com/v1", model="gpt-4", api_key="...")
 
-# Google Gemini
-client = LLMClient(provider="gemini", model="gemini-2.0-flash", api_key="...")
-
-# Anthropic Claude
-client = LLMClient(provider="claude", model="claude-sonnet-4-20250514", api_key="...")
-
-# 自建服务 (vLLM, Ollama 等)
-client = LLMClient(base_url="http://localhost:8000/v1", model="qwen2.5")
-
-# API 完全一致：
-result = await client.chat_completions(messages)
-results = await client.chat_completions_batch(messages_list)
+# 处理 10 万条请求，支持自动断点续传
+# 50000 条时中断？重新运行，从 50001 继续
+results = await client.chat_completions_batch(
+    messages_list,
+    output_jsonl="results.jsonl",  # 进度保存在此
+    show_progress=True,
+    track_cost=True,  # 实时显示成本
+)
 ```
 
 ---
@@ -56,12 +45,12 @@ results = await client.chat_completions_batch(messages_list)
 
 | 特性 | 说明 |
 |------|------|
-| **统一接口** | 一个 `LLMClient` 适配 OpenAI、Gemini、Claude 及所有 OpenAI 兼容 API |
 | **断点续传** | 批量任务自动恢复，百万级请求安全处理 |
 | **响应缓存** | 内置缓存，支持 TTL 和 IPC 多进程共享 |
+| **负载均衡** | 多 Endpoint 动态分发，自动故障转移 |
 | **成本追踪** | 实时成本监控，支持预算控制 |
 | **高性能异步** | 精细并发控制、QPS 限流、流式处理 |
-| **负载均衡** | 多 Endpoint 分发，自动故障转移 |
+| **多 Provider** | 支持 OpenAI 兼容 API、Gemini、Claude |
 
 ---
 
@@ -83,21 +72,29 @@ pip install flexllm[all]
 ```python
 from flexllm import LLMClient
 
-client = LLMClient(
+# 推荐：使用上下文管理器自动管理资源
+async with LLMClient(
     model="gpt-4",
     base_url="https://api.openai.com/v1",
     api_key="your-api-key"
+) as client:
+    # 异步调用
+    response = await client.chat_completions([
+        {"role": "user", "content": "你好！"}
+    ])
+
+# 同步版本（同样支持上下文管理器）
+with LLMClient(model="gpt-4", base_url="...", api_key="...") as client:
+    response = client.chat_completions_sync([
+        {"role": "user", "content": "你好！"}
+    ])
+
+# 获取 token 用量
+result = await client.chat_completions(
+    messages=[{"role": "user", "content": "你好！"}],
+    return_usage=True,  # 返回包含 usage 信息的 ChatCompletionResult
 )
-
-# 异步
-response = await client.chat_completions([
-    {"role": "user", "content": "你好！"}
-])
-
-# 同步
-response = client.chat_completions_sync([
-    {"role": "user", "content": "你好！"}
-])
+print(f"Token 用量: {result.usage}")  # {'prompt_tokens': 10, 'completion_tokens': 5, ...}
 ```
 
 ### 批量处理 + 断点续传
@@ -154,23 +151,108 @@ results = await client.chat_completions_batch(
 )
 ```
 
-### 负载均衡
+### 流式输出
+
+```python
+# 逐 token 流式输出
+async for chunk in client.chat_completions_stream(messages):
+    print(chunk, end="", flush=True)
+
+# 批量流式 - 结果完成即返回
+async for result in client.iter_chat_completions_batch(messages_list):
+    process(result)
+```
+
+### 思考模式（推理模型）
+
+统一接口支持 DeepSeek-R1、Qwen3、Claude 扩展思考、Gemini 思考模式。
+
+```python
+result = await client.chat_completions(
+    messages,
+    thinking=True,      # 启用思考
+    return_raw=True,
+)
+
+# 跨 Provider 统一解析
+parsed = client.parse_thoughts(result.data)
+print("思考过程:", parsed["thought"])
+print("答案:", parsed["answer"])
+```
+
+### 工具调用（Function Calling）
+
+```python
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "获取天气信息",
+        "parameters": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"],
+        },
+    },
+}]
+
+result = await client.chat_completions(
+    messages=[{"role": "user", "content": "东京天气怎么样？"}],
+    tools=tools,
+    return_usage=True,
+)
+
+if result.tool_calls:
+    for call in result.tool_calls:
+        print(f"调用: {call.function['name']}({call.function['arguments']})")
+```
+
+### 负载均衡（LLMClientPool）
+
+多 Endpoint 负载均衡，支持自动故障转移、健康检查和动态任务分配。
 
 ```python
 from flexllm import LLMClientPool
 
 pool = LLMClientPool(
     endpoints=[
-        {"base_url": "http://gpu1:8000/v1", "model": "qwen"},
-        {"base_url": "http://gpu2:8000/v1", "model": "qwen"},
+        # 每个 endpoint 可独立配置限流参数
+        {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50, "max_qps": 100},
+        {"base_url": "http://gpu2:8000/v1", "model": "qwen", "concurrency_limit": 20, "max_qps": 50},
+        {"base_url": "http://gpu3:8000/v1", "model": "qwen", "weight": 2.0},  # 更高权重 = 更多流量
     ],
-    load_balance="round_robin",  # 或 "weighted", "random", "fallback"
-    fallback=True,               # 故障自动切换
+    load_balance="round_robin",  # "round_robin" | "weighted" | "random" | "fallback"
+    fallback=True,               # endpoint 故障时自动切换
+    failure_threshold=3,         # 连续失败 3 次后标记为不健康
+    recovery_time=60.0,          # 60 秒后尝试恢复
 )
 
-# 请求自动分发
-results = await pool.chat_completions_batch(messages_list, distribute=True)
+# 单次请求，自动故障转移
+result = await pool.chat_completions(messages)
+
+# 批量处理，动态负载均衡
+# 快的 endpoint 自动处理更多任务（共享队列模型）
+results = await pool.chat_completions_batch(
+    messages_list,
+    distribute=True,      # 启用分布式处理
+    output_jsonl="results.jsonl",  # 支持断点续传
+    track_cost=True,
+)
+
+# 流式输出，支持故障转移
+async for chunk in pool.chat_completions_stream(messages):
+    print(chunk, end="", flush=True)
+
+# 查看池统计信息
+print(pool.stats)  # {'num_endpoints': 3, 'router_stats': {...}}
 ```
+
+**核心特性：**
+- **动态负载均衡**：共享队列模型，快的 endpoint 自动处理更多任务
+- **自动故障转移**：失败请求自动在其他健康 endpoint 重试
+- **健康监控**：不健康的 endpoint 在 `recovery_time` 后自动恢复
+- **独立配置**：每个 endpoint 可独立设置 `concurrency_limit`、`max_qps`、`weight`
+- **完整功能支持**：断点续传、响应缓存、成本追踪均可在 Pool 中使用
 
 ---
 
@@ -187,10 +269,51 @@ flexllm chat
 flexllm batch input.jsonl -o output.jsonl --track-cost
 
 # 模型管理
-flexllm list        # 已配置模型
-flexllm models      # 远程可用模型
-flexllm test        # 测试连接
+flexllm list              # 已配置模型
+flexllm models            # 远程可用模型
+flexllm set-model gpt-4   # 设置默认模型
+flexllm test              # 测试连接
+flexllm init              # 初始化配置文件
+
+# 实用工具
+flexllm pricing gpt-4     # 查询模型定价
+flexllm credits           # 查询 API Key 余额
+flexllm mock              # 启动 Mock 服务器（测试用）
 ```
+
+### 配置文件
+
+配置文件位置：`~/.flexllm/config.yaml`
+
+```yaml
+# 默认模型
+default: "gpt-4"
+
+# 模型列表
+models:
+  - id: gpt-4
+    name: gpt-4
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key: your-api-key
+
+  - id: local-ollama
+    name: local-ollama
+    provider: openai
+    base_url: http://localhost:11434/v1
+    api_key: EMPTY
+
+# batch 命令配置（可选）
+batch:
+  concurrency: 20
+  cache: true
+  track_cost: true
+```
+
+环境变量（优先级高于配置文件）：
+- `FLEXLLM_BASE_URL` / `OPENAI_BASE_URL`
+- `FLEXLLM_API_KEY` / `OPENAI_API_KEY`
+- `FLEXLLM_MODEL` / `OPENAI_MODEL`
 
 ---
 

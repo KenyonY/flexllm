@@ -26,10 +26,12 @@ messages = [
     }
 ]
 
-# 单条调用
-result = await client.call_llm([messages])
+# 单条调用（call_llm 返回列表）
+results = await client.call_llm([messages])
+result = results[0]
 
 # 批量调用
+messages_list = [[msg1], [msg2], ...]  # 每个元素是一组消息
 results = await client.call_llm(messages_list)
 ```
 
@@ -69,17 +71,31 @@ processed = await unified_batch_process_messages(
 ```python
 from flexllm import MllmClient, MllmTableProcessor
 
-client = MllmClient(...)
+client = MllmClient(base_url="...", api_key="...", model="gpt-4o")
 processor = MllmTableProcessor(client)
 
 # 加载数据
-df = processor.load_dataframe("data.xlsx", sheet_name=0)
+df = processor.load_dataframe("data.xlsx", sheet_name=0, max_num=100)
 
-# 批量处理
-results = await processor.process_dataframe(
+# 方式1：直接处理表格文件（推荐）
+results = await processor.call_table(
+    table_path="data.xlsx",
+    text_col="question",      # 文本列名
+    image_col="image_path",   # 图像列名（可选，None 表示纯文本）
+)
+
+# 方式2：处理 DataFrame
+results = await processor.call_dataframe(
     df,
-    prompt_template="分析这条数据: {row}",
-    show_progress=True,
+    text_col="question",
+    image_col=None,  # 纯文本模式
+)
+
+# 方式3：批量处理表格中的图像
+results = await processor.call_table_images(
+    table_path="images.xlsx",
+    image_col="image_path",
+    text_prompt="描述这张图片",
 )
 ```
 
@@ -90,20 +106,29 @@ results = await processor.process_dataframe(
 ```python
 from flexllm import MllmClient, MllmFolderProcessor
 
-client = MllmClient(...)
+client = MllmClient(base_url="...", api_key="...", model="gpt-4o")
 processor = MllmFolderProcessor(client)
 
 # 扫描图像
 images = processor.scan_folder_images(
     "/path/to/images",
     recursive=True,
+    max_num=100,
     extensions={'.jpg', '.png'},
 )
 
-# 批量处理
-results = await processor.process_folder(
+# 批量处理文件夹中的图像
+results = await processor.call_folder_images(
     "/path/to/images",
-    prompt="描述这张图片",
+    text_prompt="描述这张图片",
+    system_prompt="你是一个图像分析助手",
+    recursive=True,
+)
+
+# 或处理指定的图像文件列表
+results = await processor.call_image_files(
+    image_files=["/path/to/img1.jpg", "/path/to/img2.png"],
+    text_prompt="这张图片中有什么？",
 )
 ```
 
@@ -116,33 +141,42 @@ results = await processor.process_folder(
 多步骤推理任务：
 
 ```python
-from flexllm.chain_of_thought_client import ChainOfThoughtClient, Step
+from flexllm import OpenAIClient
+from flexllm.clients.chain_of_thought import ChainOfThoughtClient, Step
 
-client = ChainOfThoughtClient(llm_client=base_client)
+# 创建底层客户端
+base_client = OpenAIClient(base_url="...", api_key="...", model="gpt-4")
+
+# 创建链式推理客户端
+client = ChainOfThoughtClient(openai_client=base_client)
 
 # 定义推理步骤
 steps = [
     Step(
         name="分析问题",
-        prepare_messages=lambda ctx: [
-            {"role": "user", "content": f"分析问题: {ctx['query']}"}
+        prepare_messages_fn=lambda ctx: [
+            {"role": "user", "content": f"分析问题: {ctx.query}"}
         ],
-        decide_next=lambda response, ctx: "综合" if "需要" in response else None,
+        get_next_step_fn=lambda response, ctx: "综合" if "需要" in response else None,
     ),
     Step(
         name="综合",
-        prepare_messages=lambda ctx: [
-            {"role": "user", "content": f"基于分析给出答案: {ctx['analysis']}"}
+        prepare_messages_fn=lambda ctx: [
+            {"role": "user", "content": f"基于分析给出答案: {ctx.get('analysis')}"}
         ],
-        is_final=True,
+        get_next_step_fn=lambda response, ctx: None,  # 返回 None 表示结束
     ),
 ]
 
+# 注册步骤
+client.add_steps(steps)
+
 # 执行推理链
-result = await client.execute_chain(
-    query="复杂问题",
-    steps=steps,
+context = await client.execute_chain(
+    initial_step_name="分析问题",
+    initial_context={"query": "复杂问题"},
 )
+print(context.final_response)
 ```
 
 ---
@@ -330,7 +364,7 @@ cache = ResponseCacheConfig(
 # 1. 使用输出文件（断点续传）
 results = await client.chat_completions_batch(
     messages_list,
-    output_file="results.jsonl",
+    output_jsonl="results.jsonl",
 )
 
 # 2. 使用 metadata_list 保存额外信息
@@ -342,7 +376,7 @@ metadata_list = [
 results = await client.chat_completions_batch(
     messages_list,
     metadata_list=metadata_list,  # 元数据会保存到输出文件
-    output_file="results.jsonl",
+    output_jsonl="results.jsonl",
 )
 # 输出文件格式：{"index": 0, "output": "...", "status": "success", "input": [...], "metadata": {"id": "001", ...}}
 
@@ -477,12 +511,23 @@ for item in results:
 async with LLMClient(...) as client:
     result = await client.chat_completions(messages)
 
-# 手动清理
+# 同步版本使用 with
+with LLMClient(...) as client:
+    result = client.chat_completions_sync(messages)
+
+# 手动清理（异步）
 client = LLMClient(...)
 try:
     result = await client.chat_completions(messages)
 finally:
-    await client.close()
+    await client.aclose()
+
+# 手动清理（同步）
+client = LLMClient(...)
+try:
+    result = client.chat_completions_sync(messages)
+finally:
+    client.close()
 ```
 
 ---

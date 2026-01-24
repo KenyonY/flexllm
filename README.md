@@ -1,8 +1,8 @@
 <h1 align="center">flexllm</h1>
 
 <p align="center">
-    <strong>One Client, All LLMs</strong><br>
-    <em>Production-grade LLM client with checkpoint recovery, response caching, and multi-provider support</em>
+    <strong>High-Performance LLM Client for Production</strong><br>
+    <em>Batch processing with checkpoint recovery, response caching, load balancing, and cost tracking</em>
 </p>
 
 <p align="center">
@@ -19,34 +19,23 @@
 
 ---
 
-## Design Philosophy
+## Why flexllm?
 
-**One unified entry point for all LLM providers.**
+**Built for production batch processing at scale.**
 
 ```python
 from flexllm import LLMClient
 
-# That's all you need to import. Everything else is configuration.
-```
-
-flexllm follows the **"Single Interface, Multiple Backends"** principle. Whether you're calling OpenAI, Gemini, Claude, or a self-hosted model, the API stays the same. Provider differences are abstracted away - you focus on your application logic, not on SDK quirks.
-
-```python
-# OpenAI GPT-4
 client = LLMClient(base_url="https://api.openai.com/v1", model="gpt-4", api_key="...")
 
-# Google Gemini
-client = LLMClient(provider="gemini", model="gemini-2.0-flash", api_key="...")
-
-# Anthropic Claude
-client = LLMClient(provider="claude", model="claude-sonnet-4-20250514", api_key="...")
-
-# Self-hosted (vLLM, Ollama, etc.)
-client = LLMClient(base_url="http://localhost:8000/v1", model="qwen2.5")
-
-# The API is identical for all:
-result = await client.chat_completions(messages)
-results = await client.chat_completions_batch(messages_list)
+# Process 100k requests with automatic checkpoint recovery
+# Interrupted at 50k? Just restart - it continues from 50,001
+results = await client.chat_completions_batch(
+    messages_list,
+    output_jsonl="results.jsonl",  # Progress saved here
+    show_progress=True,
+    track_cost=True,  # Real-time cost display
+)
 ```
 
 ---
@@ -55,12 +44,12 @@ results = await client.chat_completions_batch(messages_list)
 
 | Feature | Description |
 |---------|-------------|
-| **Unified Interface** | One `LLMClient` for OpenAI, Gemini, Claude, and any OpenAI-compatible API |
 | **Checkpoint Recovery** | Batch jobs auto-resume from interruption - process millions of requests safely |
 | **Response Caching** | Built-in caching with TTL and IPC multi-process sharing |
+| **Load Balancing** | Multi-endpoint distribution with dynamic task allocation and automatic failover |
 | **Cost Tracking** | Real-time cost monitoring with budget control |
 | **High-Performance Async** | Fine-grained concurrency control, QPS limiting, and streaming |
-| **Load Balancing** | Multi-endpoint distribution with automatic failover |
+| **Multi-Provider** | Supports OpenAI-compatible APIs, Gemini, Claude |
 
 ---
 
@@ -82,21 +71,29 @@ pip install flexllm[all]
 ```python
 from flexllm import LLMClient
 
-client = LLMClient(
+# Recommended: use context manager for proper resource cleanup
+async with LLMClient(
     model="gpt-4",
     base_url="https://api.openai.com/v1",
     api_key="your-api-key"
+) as client:
+    # Async call
+    response = await client.chat_completions([
+        {"role": "user", "content": "Hello!"}
+    ])
+
+# Sync version (also supports context manager)
+with LLMClient(model="gpt-4", base_url="...", api_key="...") as client:
+    response = client.chat_completions_sync([
+        {"role": "user", "content": "Hello!"}
+    ])
+
+# Get token usage
+result = await client.chat_completions(
+    messages=[{"role": "user", "content": "Hello!"}],
+    return_usage=True,  # Returns ChatCompletionResult with usage info
 )
-
-# Async
-response = await client.chat_completions([
-    {"role": "user", "content": "Hello!"}
-])
-
-# Sync
-response = client.chat_completions_sync([
-    {"role": "user", "content": "Hello!"}
-])
+print(f"Tokens: {result.usage}")  # {'prompt_tokens': 10, 'completion_tokens': 5, ...}
 ```
 
 ### Batch Processing with Checkpoint Recovery
@@ -165,39 +162,6 @@ async for result in client.iter_chat_completions_batch(messages_list):
     process(result)
 ```
 
-### Multi-Provider Support
-
-```python
-from flexllm import LLMClient
-
-# OpenAI (auto-detected from base_url)
-client = LLMClient(
-    base_url="https://api.openai.com/v1",
-    api_key="sk-...",
-    model="gpt-4o",
-)
-
-# Gemini
-client = LLMClient(
-    provider="gemini",
-    api_key="your-gemini-key",
-    model="gemini-2.0-flash",
-)
-
-# Claude
-client = LLMClient(
-    provider="claude",
-    api_key="your-anthropic-key",
-    model="claude-sonnet-4-20250514",
-)
-
-# Self-hosted (vLLM, Ollama, etc.)
-client = LLMClient(
-    base_url="http://localhost:8000/v1",
-    model="qwen2.5",
-)
-```
-
 ### Thinking Mode (Reasoning Models)
 
 Unified interface for DeepSeek-R1, Qwen3, Claude extended thinking, Gemini thinking.
@@ -215,23 +179,79 @@ print("Thinking:", parsed["thought"])
 print("Answer:", parsed["answer"])
 ```
 
-### Load Balancing
+### Tool Calls (Function Calling)
+
+```python
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get weather information",
+        "parameters": {
+            "type": "object",
+            "properties": {"location": {"type": "string"}},
+            "required": ["location"],
+        },
+    },
+}]
+
+result = await client.chat_completions(
+    messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
+    tools=tools,
+    return_usage=True,
+)
+
+if result.tool_calls:
+    for call in result.tool_calls:
+        print(f"Call: {call.function['name']}({call.function['arguments']})")
+```
+
+### Load Balancing (LLMClientPool)
+
+Multi-endpoint load balancing with automatic failover, health checks, and dynamic task distribution.
 
 ```python
 from flexllm import LLMClientPool
 
 pool = LLMClientPool(
     endpoints=[
-        {"base_url": "http://gpu1:8000/v1", "model": "qwen"},
-        {"base_url": "http://gpu2:8000/v1", "model": "qwen"},
+        # Each endpoint can have independent rate limits
+        {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50, "max_qps": 100},
+        {"base_url": "http://gpu2:8000/v1", "model": "qwen", "concurrency_limit": 20, "max_qps": 50},
+        {"base_url": "http://gpu3:8000/v1", "model": "qwen", "weight": 2.0},  # Higher weight = more traffic
     ],
-    load_balance="round_robin",  # or "weighted", "random", "fallback"
-    fallback=True,               # Auto-switch on failure
+    load_balance="round_robin",  # "round_robin" | "weighted" | "random" | "fallback"
+    fallback=True,               # Auto-switch on endpoint failure
+    failure_threshold=3,         # Mark unhealthy after 3 consecutive failures
+    recovery_time=60.0,          # Try to recover after 60 seconds
 )
 
-# Requests automatically distributed
-results = await pool.chat_completions_batch(messages_list, distribute=True)
+# Single request with automatic failover
+result = await pool.chat_completions(messages)
+
+# Batch processing with dynamic load balancing
+# Faster endpoints automatically handle more tasks (shared queue model)
+results = await pool.chat_completions_batch(
+    messages_list,
+    distribute=True,      # Enable distributed processing
+    output_jsonl="results.jsonl",  # Checkpoint recovery supported
+    track_cost=True,
+)
+
+# Streaming with failover
+async for chunk in pool.chat_completions_stream(messages):
+    print(chunk, end="", flush=True)
+
+# Check pool statistics
+print(pool.stats)  # {'num_endpoints': 3, 'router_stats': {...}}
 ```
+
+**Key Features:**
+- **Dynamic Load Balancing**: Shared queue model - faster endpoints automatically process more tasks
+- **Automatic Failover**: Failed requests retry on other healthy endpoints
+- **Health Monitoring**: Unhealthy endpoints auto-recover after `recovery_time`
+- **Per-Endpoint Config**: Independent `concurrency_limit`, `max_qps`, and `weight` for each endpoint
+- **Full Feature Support**: Checkpoint recovery, response caching, cost tracking all work with Pool
 
 ---
 
@@ -248,10 +268,51 @@ flexllm chat
 flexllm batch input.jsonl -o output.jsonl --track-cost
 
 # Model management
-flexllm list        # Configured models
-flexllm models      # Remote available models
-flexllm test        # Test connection
+flexllm list              # Configured models
+flexllm models            # Remote available models
+flexllm set-model gpt-4   # Set default model
+flexllm test              # Test connection
+flexllm init              # Initialize config file
+
+# Utilities
+flexllm pricing gpt-4     # Query model pricing
+flexllm credits           # Check API key balance
+flexllm mock              # Start mock LLM server for testing
 ```
+
+### Configuration
+
+Config file location: `~/.flexllm/config.yaml`
+
+```yaml
+# Default model
+default: "gpt-4"
+
+# Model list
+models:
+  - id: gpt-4
+    name: gpt-4
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key: your-api-key
+
+  - id: local-ollama
+    name: local-ollama
+    provider: openai
+    base_url: http://localhost:11434/v1
+    api_key: EMPTY
+
+# Batch command config (optional)
+batch:
+  concurrency: 20
+  cache: true
+  track_cost: true
+```
+
+Environment variables (higher priority than config file):
+- `FLEXLLM_BASE_URL` / `OPENAI_BASE_URL`
+- `FLEXLLM_API_KEY` / `OPENAI_API_KEY`
+- `FLEXLLM_MODEL` / `OPENAI_MODEL`
 
 ---
 
