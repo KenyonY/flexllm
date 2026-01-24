@@ -60,7 +60,7 @@ class ProviderRouter:
         self,
         providers: list[ProviderConfig],
         strategy: Strategy = "round_robin",
-        failure_threshold: int = 3,
+        failure_threshold: int | float = float("inf"),
         recovery_time: float = 60.0,
     ):
         """

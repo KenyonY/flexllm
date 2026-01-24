@@ -86,7 +86,7 @@ class LLMClientPool:
         load_balance: Strategy = "round_robin",
         fallback: bool = True,
         max_fallback_attempts: int = None,
-        failure_threshold: int = 3,
+        failure_threshold: int | float = float("inf"),
         recovery_time: float = 60.0,
         # 共享的 LLMClient 参数（仅当使用 endpoints 时生效）
         concurrency_limit: int = 10,
