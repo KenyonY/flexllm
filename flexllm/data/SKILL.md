@@ -5,8 +5,6 @@ description: LLM API 客户端 - 批量处理、断点续传、响应缓存、�
 
 # flexllm - 生产级高性能 LLM 客户端
 
-安装：`pip install flexllm` 或 `pip install flexllm[all]`
-
 ## 核心特性
 
 | 特性 | 说明 |
@@ -281,12 +279,3 @@ batch:
 - `FLEXLLM_BASE_URL` / `OPENAI_BASE_URL`
 - `FLEXLLM_API_KEY` / `OPENAI_API_KEY`
 - `FLEXLLM_MODEL` / `OPENAI_MODEL`
-
-## 安装说明
-
-将此文件复制到 `~/.claude/skills/flexllm/SKILL.md` 即可在 Claude Code 中使用。
-
-```bash
-mkdir -p ~/.claude/skills/flexllm
-cp docs/claude-skill/SKILL.md ~/.claude/skills/flexllm/
-```
