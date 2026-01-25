@@ -80,6 +80,10 @@ class ProgressTracker:
         self._first_render = True
         self._use_two_lines = False  # 是否使用双行显示
 
+        # 节流控制：限制刷新频率，避免高并发时过多终端 I/O
+        self._last_refresh_time = 0.0
+        self._min_refresh_interval = 0.05  # 最小刷新间隔 50ms
+
         # 如果提供了模型信息，直接启用双行显示
         if model_name is not None:
             self.set_model_pricing(model_name, input_price_per_1m, output_price_per_1m)
@@ -191,9 +195,20 @@ class ProgressTracker:
 
         return " | ".join(parts)
 
-    def _refresh_progress_bar(self) -> None:
-        """刷新进度条显示"""
-        total_time = time.time() - self.start_time
+    def _refresh_progress_bar(self, force: bool = False) -> None:
+        """刷新进度条显示
+
+        Args:
+            force: 强制刷新，忽略节流限制
+        """
+        now = time.time()
+        # 节流：距离上次刷新不足间隔则跳过（除非强制刷新）
+        if not force and self.completed_requests < self.total_requests:
+            if now - self._last_refresh_time < self._min_refresh_interval:
+                return
+
+        self._last_refresh_time = now
+        total_time = now - self.start_time
         progress = self.completed_requests / self.total_requests
 
         # 计算统计信息
@@ -322,7 +337,9 @@ class ProgressTracker:
                 else:
                     print(f"\r\033[K⚠️  新错误类型: {display_error}")
 
-        self._refresh_progress_bar()
+        # 最后一个请求完成时强制刷新，确保显示 100%
+        force = self.completed_requests >= self.total_requests
+        self._refresh_progress_bar(force=force)
 
     def summary(self, show_p999=False, print_to_console=True) -> str:
         """打印请求汇总信息"""
