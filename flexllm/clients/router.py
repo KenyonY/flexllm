@@ -3,16 +3,12 @@
 """
 多 Provider 负载均衡和故障转移
 
-支持多个 API endpoint 的轮询、加权分配和自动 fallback。
+支持多个 API endpoint 的轮询分配和自动 fallback。
 """
 
-import random
 import time
 from dataclasses import dataclass
 from threading import Lock
-from typing import Literal
-
-Strategy = Literal["round_robin", "weighted", "random", "fallback"]
 
 
 @dataclass
@@ -23,14 +19,12 @@ class ProviderConfig:
     Attributes:
         base_url: API 基础 URL
         api_key: API 密钥
-        weight: 权重 (用于 weighted 策略)
         model: 可选的模型覆盖
         enabled: 是否启用
     """
 
     base_url: str
     api_key: str = "EMPTY"
-    weight: float = 1.0
     model: str | None = None
     enabled: bool = True
 
@@ -49,17 +43,13 @@ class ProviderRouter:
     """
     Provider 路由器
 
-    支持策略:
-        - round_robin: 轮询
-        - weighted: 加权随机
-        - random: 随机
-        - fallback: 主备模式 (只有主挂了才用备)
+    使用轮询（round_robin）策略分配请求到多个 Provider，
+    支持健康检查和自动恢复。
     """
 
     def __init__(
         self,
         providers: list[ProviderConfig],
-        strategy: Strategy = "round_robin",
         failure_threshold: int | float = float("inf"),
         recovery_time: float = 60.0,
     ):
@@ -68,14 +58,12 @@ class ProviderRouter:
 
         Args:
             providers: Provider 配置列表
-            strategy: 路由策略
             failure_threshold: 连续失败多少次后标记为不健康
             recovery_time: 不健康后多久尝试恢复 (秒)
         """
         if not providers:
             raise ValueError("至少需要一个 provider")
 
-        self.strategy = strategy
         self.failure_threshold = failure_threshold
         self.recovery_time = recovery_time
 
@@ -104,39 +92,16 @@ class ProviderRouter:
 
     def get_next(self) -> ProviderConfig:
         """
-        获取下一个可用的 provider
+        获取下一个可用的 provider（轮询策略）
 
         Returns:
             ProviderConfig
         """
         with self._lock:
             healthy = self._get_healthy_providers()
-
-            if self.strategy == "round_robin":
-                provider = healthy[self._index % len(healthy)].config
-                self._index += 1
-                return provider
-
-            elif self.strategy == "weighted":
-                weights = [p.config.weight for p in healthy]
-                total = sum(weights)
-                r = random.uniform(0, total)
-                cumsum = 0
-                for p in healthy:
-                    cumsum += p.config.weight
-                    if r <= cumsum:
-                        return p.config
-                return healthy[-1].config
-
-            elif self.strategy == "random":
-                return random.choice(healthy).config
-
-            elif self.strategy == "fallback":
-                # 优先使用第一个健康的
-                return healthy[0].config
-
-            else:
-                return healthy[0].config
+            provider = healthy[self._index % len(healthy)].config
+            self._index += 1
+            return provider
 
     def mark_failed(self, provider: ProviderConfig) -> None:
         """
@@ -180,7 +145,6 @@ class ProviderRouter:
             return {
                 "total": len(self._providers),
                 "healthy": sum(1 for p in self._providers if p.is_healthy),
-                "strategy": self.strategy,
                 "providers": [
                     {
                         "base_url": p.config.base_url,
@@ -195,7 +159,6 @@ class ProviderRouter:
 def create_router_from_urls(
     urls: list[str],
     api_key: str = "EMPTY",
-    strategy: Strategy = "round_robin",
 ) -> ProviderRouter:
     """
     便捷函数：从 URL 列表创建路由器
@@ -203,10 +166,9 @@ def create_router_from_urls(
     Args:
         urls: API URL 列表
         api_key: 统一的 API 密钥
-        strategy: 路由策略
 
     Returns:
         ProviderRouter 实例
     """
     providers = [ProviderConfig(base_url=url, api_key=api_key) for url in urls]
-    return ProviderRouter(providers, strategy=strategy)
+    return ProviderRouter(providers)

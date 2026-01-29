@@ -229,9 +229,8 @@ pool = LLMClientPool(
         # 每个 endpoint 可独立配置限流参数
         {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50, "max_qps": 100},
         {"base_url": "http://gpu2:8000/v1", "model": "qwen", "concurrency_limit": 20, "max_qps": 50},
-        {"base_url": "http://gpu3:8000/v1", "model": "qwen", "weight": 2.0},  # 更高权重 = 更多流量
+        {"base_url": "http://gpu3:8000/v1", "model": "qwen"},
     ],
-    load_balance="round_robin",  # "round_robin" | "weighted" | "random" | "fallback"
     fallback=True,               # endpoint 故障时自动切换
     failure_threshold=3,         # 连续失败 3 次后标记为不健康
     recovery_time=60.0,          # 60 秒后尝试恢复
@@ -261,7 +260,7 @@ print(pool.stats)  # {'num_endpoints': 3, 'router_stats': {...}}
 - **动态负载均衡**：共享队列模型，快的 endpoint 自动处理更多任务
 - **自动故障转移**：失败请求自动在其他健康 endpoint 重试
 - **健康监控**：不健康的 endpoint 在 `recovery_time` 后自动恢复
-- **独立配置**：每个 endpoint 可独立设置 `concurrency_limit`、`max_qps`、`weight`
+- **独立配置**：每个 endpoint 可独立设置 `concurrency_limit`、`max_qps`
 - **完整功能支持**：断点续传、响应缓存、成本追踪均可在 Pool 中使用
 
 ---

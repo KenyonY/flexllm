@@ -169,9 +169,8 @@ pool = LLMClientPool(
     endpoints=[
         {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50},
         {"base_url": "http://gpu2:8000/v1", "model": "qwen", "concurrency_limit": 20},
-        {"base_url": "http://gpu3:8000/v1", "model": "qwen", "weight": 2.0},
+        {"base_url": "http://gpu3:8000/v1", "model": "qwen"},
     ],
-    load_balance="round_robin",  # 或 "weighted", "random", "fallback"
     fallback=True,               # 失败自动切换
     failure_threshold=3,         # 连续失败 3 次后标记不健康（默认不启用）
     recovery_time=60.0,          # 60 秒后尝试恢复

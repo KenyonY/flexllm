@@ -194,7 +194,6 @@ pool = LLMClientPool(
             "base_url": "http://fast-host:8000/v1",
             "api_key": "key1",
             "model": "qwen",
-            "weight": 2,              # 权重（用于 weighted 策略）
             "concurrency_limit": 50,  # endpoint 级别并发（可选）
             "max_qps": 500,           # endpoint 级别 QPS（可选）
         },
@@ -202,12 +201,10 @@ pool = LLMClientPool(
             "base_url": "http://slow-host:8000/v1",
             "api_key": "key2",
             "model": "qwen",
-            "weight": 1,
             "concurrency_limit": 5,   # 较慢服务使用更低的并发
             "max_qps": 50,
         },
     ],
-    load_balance="weighted",
     fallback=True,
     failure_threshold=3,   # 连续失败 3 次标记为不健康
     recovery_time=60.0,    # 60 秒后尝试恢复
@@ -216,14 +213,7 @@ pool = LLMClientPool(
 )
 ```
 
-### 策略说明
-
-| 策略 | 说明 |
-|------|------|
-| `round_robin` | 轮询，依次使用每个 endpoint |
-| `weighted` | 加权随机，按 weight 比例分配 |
-| `random` | 完全随机 |
-| `fallback` | 主备模式，优先使用第一个，失败后切换 |
+多 endpoint 模式使用轮询（round_robin）策略分配请求，配合共享队列实现动态负载均衡。
 
 ### Endpoint 级别 Rate Limit
 

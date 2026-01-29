@@ -38,6 +38,24 @@ results = await client.chat_completions_batch(
 )
 ```
 
+**Scale out across multiple endpoints with zero code change.**
+
+```python
+from flexllm import LLMClientPool
+
+# Same API, multiple GPU nodes — faster endpoints automatically handle more tasks
+pool = LLMClientPool(
+    endpoints=[
+        {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50},
+        {"base_url": "http://gpu2:8000/v1", "model": "qwen", "concurrency_limit": 20},
+        {"base_url": "http://gpu3:8000/v1", "model": "qwen"},
+    ],
+    fallback=True,  # Auto-switch on endpoint failure
+)
+
+results = await pool.chat_completions_batch(messages_list, output_jsonl="results.jsonl")
+```
+
 ---
 
 ## Features
@@ -45,8 +63,8 @@ results = await client.chat_completions_batch(
 | Feature                          | Description                                                                     |
 | -------------------------------- | ------------------------------------------------------------------------------- |
 | **Checkpoint Recovery**    | Batch jobs auto-resume from interruption - process millions of requests safely  |
+| **Multi-Endpoint Pool**   | Distribute tasks across GPU nodes with shared-queue dynamic balancing and automatic failover |
 | **Response Caching**       | Built-in caching with TTL and IPC multi-process sharing                         |
-| **Load Balancing**         | Multi-endpoint distribution with dynamic task allocation and automatic failover |
 | **Cost Tracking**          | Real-time cost monitoring with budget control                                   |
 | **High-Performance Async** | Fine-grained concurrency control, QPS limiting, and streaming                   |
 | **Multi-Provider**         | Supports OpenAI-compatible APIs, Gemini, Claude                                 |
@@ -123,6 +141,49 @@ results = await client.chat_completions_batch(
     show_progress=True,
 )
 ```
+
+### Multi-Endpoint Pool
+
+Distribute batch tasks across multiple GPU nodes / API endpoints. Faster endpoints automatically handle more tasks via a shared queue model, with automatic failover and health monitoring.
+
+> `LLMClient` and `LLMClientPool` share the same API. Single endpoint → use `LLMClient`; multiple endpoints → use `LLMClientPool`.
+
+```python
+from flexllm import LLMClientPool
+
+pool = LLMClientPool(
+    endpoints=[
+        # Each endpoint can have independent rate limits
+        {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50, "max_qps": 100},
+        {"base_url": "http://gpu2:8000/v1", "model": "qwen", "concurrency_limit": 20, "max_qps": 50},
+        {"base_url": "http://gpu3:8000/v1", "model": "qwen"},
+    ],
+    fallback=True,               # Auto-switch on endpoint failure
+    failure_threshold=3,         # Mark unhealthy after 3 consecutive failures
+    recovery_time=60.0,          # Try to recover after 60 seconds
+)
+
+# Single request — automatic failover across endpoints
+result = await pool.chat_completions(messages)
+
+# Distributed batch — shared queue, dynamic load balancing, checkpoint recovery
+results = await pool.chat_completions_batch(
+    messages_list,
+    distribute=True,
+    output_jsonl="results.jsonl",
+    track_cost=True,
+)
+
+# Streaming with failover
+async for chunk in pool.chat_completions_stream(messages):
+    print(chunk, end="", flush=True)
+```
+
+**Highlights:**
+- **Shared Queue**: Faster endpoints automatically pull more tasks — no manual tuning needed
+- **Automatic Failover**: Failed requests retry on healthy endpoints; unhealthy nodes auto-recover
+- **Per-Endpoint Config**: Independent `concurrency_limit` and `max_qps` for each endpoint
+- **Full Feature Support**: Checkpoint recovery, caching, cost tracking all work with Pool
 
 ### Response Caching
 
@@ -216,56 +277,6 @@ if result.tool_calls:
         print(f"Call: {call.function['name']}({call.function['arguments']})")
 ```
 
-### Load Balancing
-
-Multi-endpoint load balancing with automatic failover, health checks, and dynamic task distribution.
-
-> **Note**: `LLMClient` and `LLMClientPool` are now unified - both support single and multi-endpoint modes with the same API. Use either name interchangeably.
-
-```python
-from flexllm import LLMClientPool
-
-pool = LLMClientPool(
-    endpoints=[
-        # Each endpoint can have independent rate limits
-        {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50, "max_qps": 100},
-        {"base_url": "http://gpu2:8000/v1", "model": "qwen", "concurrency_limit": 20, "max_qps": 50},
-        {"base_url": "http://gpu3:8000/v1", "model": "qwen", "weight": 2.0},  # Higher weight = more traffic
-    ],
-    load_balance="round_robin",  # "round_robin" | "weighted" | "random" | "fallback"
-    fallback=True,               # Auto-switch on endpoint failure
-    failure_threshold=3,         # Mark unhealthy after 3 consecutive failures
-    recovery_time=60.0,          # Try to recover after 60 seconds
-)
-
-# Single request with automatic failover
-result = await pool.chat_completions(messages)
-
-# Batch processing with dynamic load balancing
-# Faster endpoints automatically handle more tasks (shared queue model)
-results = await pool.chat_completions_batch(
-    messages_list,
-    distribute=True,      # Enable distributed processing
-    output_jsonl="results.jsonl",  # Checkpoint recovery supported
-    track_cost=True,
-)
-
-# Streaming with failover
-async for chunk in pool.chat_completions_stream(messages):
-    print(chunk, end="", flush=True)
-
-# Check pool statistics
-print(pool.stats)  # {'num_endpoints': 3, 'router_stats': {...}}
-```
-
-**Key Features:**
-
-- **Dynamic Load Balancing**: Shared queue model - faster endpoints automatically process more tasks
-- **Automatic Failover**: Failed requests retry on other healthy endpoints
-- **Health Monitoring**: Unhealthy endpoints auto-recover after `recovery_time`
-- **Per-Endpoint Config**: Independent `concurrency_limit`, `max_qps`, and `weight` for each endpoint
-- **Full Feature Support**: Checkpoint recovery, response caching, cost tracking all work with Pool
-
 ---
 
 ## CLI
@@ -353,20 +364,22 @@ flexllm/
 The architecture follows a simple layered design:
 
 ```
-LLMClient (Unified entry point - recommended)
-    │
-    ├── Provider auto-detection or explicit selection
-    │
-    └── Backend Clients (internal)
-            ├── OpenAIClient
-            ├── GeminiClient
-            └── ClaudeClient
-                    │
-                    └── LLMClientBase (Abstract - 4 methods to implement)
+LLMClient (single endpoint)  /  LLMClientPool (multi-endpoint)
+    │                                  │
+    │                                  ├── ProviderRouter (round_robin)
+    │                                  ├── Health Monitor (failure threshold + auto recovery)
+    │                                  └── Shared Task Queue (dynamic load balancing)
+    │                                  │
+    └──────────── Backend Clients ─────┘
+                    ├── OpenAIClient
+                    ├── GeminiClient
+                    └── ClaudeClient
                             │
-                            ├── ConcurrentRequester (Async engine)
-                            ├── ResponseCache (Caching layer)
-                            └── CostTracker (Cost monitoring)
+                            └── LLMClientBase (Abstract - 4 methods to implement)
+                                    │
+                                    ├── ConcurrentRequester (Async engine)
+                                    ├── ResponseCache (Caching layer)
+                                    └── CostTracker (Cost monitoring)
 ```
 
 ---

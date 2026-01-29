@@ -15,7 +15,6 @@ pool = LLMClientPool(
         {"base_url": "http://100.95.177.11:8000/qwen3/v1", "model": "Qwen3-32B"},
         {"base_url": "http://100.95.177.11:8000/qwen25/v1", "model": "Qwen3-32B"},
     ],
-    load_balance="round_robin",  # or "weighted", "random", "fallback"
     fallback=True,  # Auto-switch on failure
     concurrency_limit=10,
 )

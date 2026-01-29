@@ -535,7 +535,6 @@ if HAS_TYPER:
                 # 使用 batch.endpoints 配置或单 model 配置
                 if use_pool:
                     # 多 endpoint 模式：使用 LLMClientPool
-                    # 注：batch 使用动态负载均衡（共享队列），load_balance 参数无效
                     pool_kwargs = {
                         "endpoints": endpoints_config,
                         "fallback": batch_config.get("fallback", True),

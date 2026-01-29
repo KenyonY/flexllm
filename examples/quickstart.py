@@ -119,7 +119,6 @@ async def load_balancing():
             {"base_url": "http://host1:8000/v1", "api_key": "k1", "model": "qwen"},
             {"base_url": "http://host2:8000/v1", "api_key": "k2", "model": "qwen"},
         ],
-        load_balance="round_robin",  # round_robin/weighted/random/fallback
         fallback=True,  # 节点故障自动切换
     )
 

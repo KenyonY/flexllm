@@ -155,7 +155,7 @@ client = GeminiClient(
 
 ### LLMClientPool
 
-多 Endpoint 客户端池，支持负载均衡和故障转移。
+多 Endpoint 客户端池，支持轮询分发和故障转移。
 
 ```python
 from flexllm import LLMClientPool
@@ -163,18 +163,11 @@ from flexllm import LLMClientPool
 pool = LLMClientPool(
     endpoints: List[dict] = None,        # Endpoint 配置列表
     clients: List[LLMClient] = None,     # 或直接传入客户端
-    load_balance: str = "round_robin",   # 负载均衡策略
     fallback: bool = True,               # 故障转移
     failure_threshold: int = 3,          # 失败阈值
     recovery_time: float = 60.0,         # 恢复时间（秒）
 )
 ```
-
-**负载均衡策略：**
-- `round_robin`: 轮询
-- `weighted`: 加权随机
-- `random`: 随机
-- `fallback`: 主备模式
 
 **方法：** 与 LLMClient 完全一致。
 
@@ -295,7 +288,6 @@ from flexllm import ProviderRouter, ProviderConfig, create_router_from_urls
 router = create_router_from_urls(
     urls=["http://host1:8000/v1", "http://host2:8000/v1"],
     api_key="EMPTY",
-    strategy="round_robin",
 )
 
 # 获取下一个 provider

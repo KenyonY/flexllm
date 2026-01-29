@@ -109,7 +109,6 @@ Example:
             {"base_url": "http://host1:8000/v1", "api_key": "key1", "model": "qwen"},
             {"base_url": "http://host2:8000/v1", "api_key": "key2", "model": "qwen"},
         ],
-        load_balance="round_robin",  # round_robin, weighted, random, fallback
         fallback=True,  # 失败时自动切换到其他 endpoint
     )
 
@@ -129,7 +128,6 @@ Example:
     router = create_router_from_urls(
         urls=["http://host1:8000/v1", "http://host2:8000/v1"],
         api_key="EMPTY",
-        strategy="round_robin",
     )
 
     # 获取下一个可用 provider

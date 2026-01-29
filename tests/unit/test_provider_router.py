@@ -15,7 +15,6 @@ class TestProviderConfig:
         config = ProviderConfig(base_url="http://api.example.com/v1")
         assert config.base_url == "http://api.example.com/v1"
         assert config.api_key == "EMPTY"
-        assert config.weight == 1.0
         assert config.model is None
         assert config.enabled is True
 
@@ -23,12 +22,10 @@ class TestProviderConfig:
         config = ProviderConfig(
             base_url="http://api.example.com/v1",
             api_key="sk-xxx",
-            weight=2.0,
             model="gpt-4",
             enabled=False,
         )
         assert config.api_key == "sk-xxx"
-        assert config.weight == 2.0
         assert config.model == "gpt-4"
         assert config.enabled is False
 
@@ -81,7 +78,7 @@ class TestRoundRobinStrategy:
             ProviderConfig(base_url="http://api2.com/v1"),
             ProviderConfig(base_url="http://api3.com/v1"),
         ]
-        router = ProviderRouter(providers, strategy="round_robin")
+        router = ProviderRouter(providers)
 
         # 获取 6 次，应该循环 2 轮
         urls = [router.get_next().base_url for _ in range(6)]
@@ -96,7 +93,7 @@ class TestRoundRobinStrategy:
             ProviderConfig(base_url="http://api1.com/v1"),
             ProviderConfig(base_url="http://api2.com/v1"),
         ]
-        router = ProviderRouter(providers, strategy="round_robin")
+        router = ProviderRouter(providers)
 
         urls = [router.get_next().base_url for _ in range(100)]
         counter = Counter(urls)
@@ -104,73 +101,6 @@ class TestRoundRobinStrategy:
         # 应该均匀分布
         assert counter["http://api1.com/v1"] == 50
         assert counter["http://api2.com/v1"] == 50
-
-
-class TestWeightedStrategy:
-    """测试加权策略"""
-
-    def test_weighted_respects_weights(self):
-        providers = [
-            ProviderConfig(base_url="http://api1.com/v1", weight=1.0),
-            ProviderConfig(base_url="http://api2.com/v1", weight=3.0),
-        ]
-        router = ProviderRouter(providers, strategy="weighted")
-
-        urls = [router.get_next().base_url for _ in range(1000)]
-        counter = Counter(urls)
-
-        # weight=3 应该大约是 weight=1 的 3 倍
-        ratio = counter["http://api2.com/v1"] / counter["http://api1.com/v1"]
-        assert 2.0 < ratio < 4.0  # 允许一定误差
-
-
-class TestRandomStrategy:
-    """测试随机策略"""
-
-    def test_random_uses_all_providers(self):
-        providers = [
-            ProviderConfig(base_url="http://api1.com/v1"),
-            ProviderConfig(base_url="http://api2.com/v1"),
-            ProviderConfig(base_url="http://api3.com/v1"),
-        ]
-        router = ProviderRouter(providers, strategy="random")
-
-        urls = set(router.get_next().base_url for _ in range(100))
-
-        # 应该使用了所有 provider
-        assert len(urls) == 3
-
-
-class TestFallbackStrategy:
-    """测试主备策略"""
-
-    def test_fallback_prefers_first(self):
-        providers = [
-            ProviderConfig(base_url="http://primary.com/v1"),
-            ProviderConfig(base_url="http://backup.com/v1"),
-        ]
-        router = ProviderRouter(providers, strategy="fallback")
-
-        # 应该总是返回第一个
-        for _ in range(10):
-            assert router.get_next().base_url == "http://primary.com/v1"
-
-    def test_fallback_switches_on_failure(self):
-        providers = [
-            ProviderConfig(base_url="http://primary.com/v1"),
-            ProviderConfig(base_url="http://backup.com/v1"),
-        ]
-        router = ProviderRouter(providers, strategy="fallback", failure_threshold=2)
-
-        primary = router.get_next()
-        assert primary.base_url == "http://primary.com/v1"
-
-        # 标记失败 2 次
-        router.mark_failed(primary)
-        router.mark_failed(primary)
-
-        # 现在应该返回 backup
-        assert router.get_next().base_url == "http://backup.com/v1"
 
 
 class TestHealthCheck:
@@ -274,14 +204,12 @@ class TestStats:
 
     def test_stats_structure(self):
         providers = [ProviderConfig(base_url="http://api.com/v1")]
-        router = ProviderRouter(providers, strategy="round_robin")
+        router = ProviderRouter(providers)
 
         stats = router.stats
         assert "total" in stats
         assert "healthy" in stats
-        assert "strategy" in stats
         assert "providers" in stats
-        assert stats["strategy"] == "round_robin"
 
 
 class TestCreateRouterFromUrls:
@@ -294,9 +222,3 @@ class TestCreateRouterFromUrls:
         assert router.stats["total"] == 2
         provider = router.get_next()
         assert provider.api_key == "sk-xxx"
-
-    def test_create_with_strategy(self):
-        urls = ["http://api1.com/v1", "http://api2.com/v1"]
-        router = create_router_from_urls(urls, strategy="fallback")
-
-        assert router.strategy == "fallback"

@@ -36,17 +36,6 @@ class TestClientPoolCreation:
         with pytest.raises(ValueError, match="必须提供 base_url.*或 endpoints"):
             LLMClientPool()
 
-    def test_create_with_load_balance_strategy(self):
-        """Test pool creation with different load balance strategies"""
-        for strategy in ["round_robin", "weighted", "random", "fallback"]:
-            pool = LLMClientPool(
-                endpoints=[
-                    {"base_url": "http://api1.com/v1", "model": "model1"},
-                ],
-                load_balance=strategy,
-            )
-            assert pool._load_balance == strategy
-
     def test_create_with_concurrency_limit(self):
         """Test pool creation with concurrency limit"""
         pool = LLMClientPool(
@@ -163,12 +152,10 @@ class TestClientPoolRepr:
                 {"base_url": "http://api1.com/v1", "model": "model1"},
                 {"base_url": "http://api2.com/v1", "model": "model2"},
             ],
-            load_balance="round_robin",
             fallback=True,
         )
 
         repr_str = repr(pool)
         assert "LLMClientPool" in repr_str
         assert "endpoints=2" in repr_str
-        assert "round_robin" in repr_str
         assert "fallback=True" in repr_str

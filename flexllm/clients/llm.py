@@ -19,7 +19,7 @@ Example (多 endpoint):
     ...         {"base_url": "http://api1.com/v1", "model": "qwen"},
     ...         {"base_url": "http://api2.com/v1", "model": "qwen"},
     ...     ],
-    ...     load_balance="round_robin",
+    ...     fallback=True,
     ... )
     >>> result = await client.chat_completions(messages)
 """

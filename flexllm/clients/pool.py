@@ -19,7 +19,6 @@ Example:
             {"base_url": "http://api1.com/v1", "api_key": "key1", "model": "qwen"},
             {"base_url": "http://api2.com/v1", "api_key": "key2", "model": "qwen"},
         ],
-        load_balance="round_robin",
         fallback=True,
     )
 
@@ -45,7 +44,7 @@ from .base import ChatCompletionResult, LLMClientBase
 from .claude import ClaudeClient
 from .gemini import GeminiClient
 from .openai import OpenAIClient
-from .router import ProviderConfig, ProviderRouter, Strategy
+from .router import ProviderConfig, ProviderRouter
 
 if TYPE_CHECKING:
     from ..async_api.interface import RequestResult
@@ -59,7 +58,6 @@ class EndpointConfig:
     api_key: str = "EMPTY"
     model: str = None
     provider: Literal["openai", "gemini", "auto"] = "auto"
-    weight: float = 1.0
     # endpoint 级别的 rate limit 配置（None 表示使用全局配置）
     concurrency_limit: int = None
     max_qps: int = None
@@ -77,11 +75,10 @@ class LLMClientPool:
 
     功能：
     - 单 endpoint：直接使用底层客户端，零额外开销
-    - 多 endpoint：负载均衡 + 故障转移
+    - 多 endpoint：轮询分发 + 故障转移
     - 统一接口：所有模式API完全一致
 
     Attributes:
-        load_balance: 负载均衡策略（仅多 endpoint 模式）
         fallback: 是否启用故障转移
         max_fallback_attempts: 最大故障转移尝试次数
     """
@@ -96,7 +93,6 @@ class LLMClientPool:
         # 多 endpoint 参数
         endpoints: list[dict | EndpointConfig] = None,
         clients: list = None,  # 已废弃的参数，保留向后兼容
-        load_balance: Strategy = "round_robin",
         fallback: bool = True,
         max_fallback_attempts: int = None,
         failure_threshold: int | float = float("inf"),
@@ -130,11 +126,6 @@ class LLMClientPool:
             # 多 endpoint 模式参数
             endpoints: Endpoint 配置列表，每个元素可以是 dict 或 EndpointConfig
             clients: （已废弃）已创建的客户端列表
-            load_balance: 负载均衡策略
-                - "round_robin": 轮询
-                - "weighted": 加权随机
-                - "random": 随机
-                - "fallback": 主备模式
             fallback: 是否启用故障转移（某个 endpoint 失败时尝试其他）
             max_fallback_attempts: 最大故障转移次数，默认为 endpoint 数量
             failure_threshold: 连续失败多少次后标记为不健康
@@ -213,7 +204,6 @@ class LLMClientPool:
             self._init_multi_mode(
                 endpoints=endpoints,
                 clients=clients,
-                load_balance=load_balance,
                 fallback=fallback,
                 max_fallback_attempts=max_fallback_attempts,
                 failure_threshold=failure_threshold,
@@ -337,7 +327,6 @@ class LLMClientPool:
         self._mode = "single"
         self._model = model
         self._fallback = False
-        self._load_balance = None
         self._router = None
         self._clients = None
         self._endpoints = None
@@ -374,7 +363,6 @@ class LLMClientPool:
         self,
         endpoints: list,
         clients: list,
-        load_balance: str,
         fallback: bool,
         max_fallback_attempts: int,
         failure_threshold: float,
@@ -391,7 +379,6 @@ class LLMClientPool:
         """初始化多 endpoint 模式"""
         self._mode = "multi"
         self._fallback = fallback
-        self._load_balance = load_balance
         self._single_client = None
         self._provider = None
         self._model = None
@@ -478,14 +465,12 @@ class LLMClientPool:
             ProviderConfig(
                 base_url=ep.base_url,
                 api_key=ep.api_key,
-                weight=ep.weight,
                 model=ep.model,
             )
             for ep in self._endpoints
         ]
         self._router = ProviderRouter(
             providers=provider_configs,
-            strategy=load_balance,
             failure_threshold=failure_threshold,
             recovery_time=recovery_time,
         )
@@ -1171,7 +1156,7 @@ class LLMClientPool:
                 file_writer.close()
                 # 自动 compact：去重并按 index 排序
                 if output_jsonl:
-                    self._clients[0]._client._compact_output_file(output_jsonl)
+                    self._clients[0]._compact_output_file(output_jsonl)
             # 打印最终统计
             if tracker:
                 tracker.summary(print_to_console=True)
@@ -1435,7 +1420,6 @@ class LLMClientPool:
         else:
             return {
                 "mode": "multi",
-                "load_balance": self._load_balance,
                 "fallback": self._fallback,
                 "num_endpoints": len(self._clients),
                 "router_stats": self._router.stats,
@@ -1473,10 +1457,7 @@ class LLMClientPool:
         if self._mode == "single":
             return f"LLMClientPool(provider='{self._provider}', model='{self._model}')"
         else:
-            return (
-                f"LLMClientPool(endpoints={len(self._clients)}, "
-                f"load_balance='{self._load_balance}', fallback={self._fallback})"
-            )
+            return f"LLMClientPool(endpoints={len(self._clients)}, fallback={self._fallback})"
 
     def __getattr__(self, name):
         """自动委托未显式定义的方法给底层客户端（仅单模式）"""
