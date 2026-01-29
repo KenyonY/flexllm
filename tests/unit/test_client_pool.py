@@ -33,7 +33,7 @@ class TestClientPoolCreation:
 
     def test_create_requires_endpoints_or_clients(self):
         """Test that creation requires endpoints or clients"""
-        with pytest.raises(ValueError, match="必须提供 endpoints 或 clients"):
+        with pytest.raises(ValueError, match="必须提供 base_url.*或 endpoints"):
             LLMClientPool()
 
     def test_create_with_load_balance_strategy(self):
@@ -55,7 +55,8 @@ class TestClientPoolCreation:
             ],
             concurrency_limit=5,
         )
-        assert pool._clients[0]._client._concurrency_limit == 5
+        # 现在 _clients 直接存储底层客户端，不再是 LLMClient 包装
+        assert pool._clients[0]._concurrency_limit == 5
 
 
 class TestClientPoolBatchParameters:

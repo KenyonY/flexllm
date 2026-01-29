@@ -37,23 +37,60 @@ class RateLimiter:
         self.max_qps = max_qps
         self._use_bucket = use_bucket
 
-        if max_qps:
-            if use_bucket:
+        # lazy init，避免绑定错误的 event loop（多次 asyncio.run 场景）
+        self._limiter = None
+        self._lock: asyncio.Lock | None = None
+        self._last_request_time = 0
+        if max_qps and not use_bucket:
+            self._min_interval = 1 / max_qps
+
+    def _get_limiter(self):
+        """获取或创建 limiter（确保绑定到当前 event loop）
+
+        注：_loop 是 asyncio 对象的内部属性，可能在 Python 版本间变化，
+        使用 getattr 安全获取。
+        """
+        if not self.max_qps or not self._use_bucket:
+            return None
+        try:
+            loop = asyncio.get_running_loop()
+            if self._limiter is not None:
+                # aiolimiter.AsyncLimiter 内部也有 _loop 属性
+                limiter_loop = getattr(self._limiter, "_loop", None)
+                if limiter_loop is not None and limiter_loop is not loop:
+                    self._limiter = None
+            if self._limiter is None:
                 from aiolimiter import AsyncLimiter
 
-                self._limiter = AsyncLimiter(max_qps, 1)
-            else:
+                self._limiter = AsyncLimiter(self.max_qps, 1)
+        except RuntimeError:
+            # 没有运行的 event loop，不应该发生（acquire 在 async 中调用）
+            pass
+        return self._limiter
+
+    def _get_lock(self) -> asyncio.Lock:
+        """获取或创建 Lock（确保绑定到当前 event loop）"""
+        try:
+            loop = asyncio.get_running_loop()
+            if self._lock is not None:
+                lock_loop = getattr(self._lock, "_loop", None)
+                if lock_loop is not None and lock_loop is not loop:
+                    self._lock = None
+            if self._lock is None:
                 self._lock = asyncio.Lock()
-                self._last_request_time = 0
-                self._min_interval = 1 / max_qps
+        except RuntimeError:
+            # 没有运行的 event loop，不应该发生
+            if self._lock is None:
+                self._lock = asyncio.Lock()
+        return self._lock
 
     async def acquire(self):
         if not self.max_qps:
             return
         if self._use_bucket:
-            await self._limiter.acquire()
+            await self._get_limiter().acquire()
         else:
-            async with self._lock:
+            async with self._get_lock():
                 elapsed = time.time() - self._last_request_time
                 if elapsed < self._min_interval:
                     await asyncio.sleep(self._min_interval - elapsed)
@@ -106,13 +143,32 @@ class ConcurrentRequester:
         else:
             self._timeout = None
         self._rate_limiter = RateLimiter(max_qps)
-        self._semaphore = asyncio.Semaphore(concurrency_limit)
+        self._semaphore: asyncio.Semaphore | None = None  # lazy init，避免绑定错误的 event loop
         self.retry_times = retry_times
         self.retry_delay = retry_delay
 
         # Session 复用：避免每次请求都创建新的 session
         self._connector: TCPConnector | None = None
         self._session: ClientSession | None = None
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """获取或创建 Semaphore（确保绑定到当前 event loop）"""
+        try:
+            loop = asyncio.get_running_loop()
+            # 检查 semaphore 是否绑定到当前 loop
+            if self._semaphore is not None:
+                # Python 3.10+ Semaphore 有 _loop 属性（内部）
+                sem_loop = getattr(self._semaphore, "_loop", None)
+                if sem_loop is not None and sem_loop is not loop:
+                    # 绑定到不同的 loop，需要重新创建
+                    self._semaphore = None
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(self._concurrency_limit)
+        except RuntimeError:
+            # 没有运行的 event loop，创建新的 semaphore
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(self._concurrency_limit)
+        return self._semaphore
 
     def _create_session(self) -> ClientSession:
         """创建新的 session（内部使用）"""
@@ -124,11 +180,37 @@ class ConcurrentRequester:
         )
         return self._session
 
+    def _is_session_valid(self) -> bool:
+        """检查 session 是否有效（存在、未关闭、且绑定到当前 event loop）"""
+        if self._session is None or self._session.closed:
+            return False
+        # 检查 session 的 connector 是否绑定到当前 loop
+        try:
+            current_loop = asyncio.get_running_loop()
+            if self._connector is not None:
+                connector_loop = getattr(self._connector, "_loop", None)
+                if connector_loop is not None and connector_loop is not current_loop:
+                    return False
+        except RuntimeError:
+            pass
+        return True
+
     @asynccontextmanager
     async def _get_session(self):
-        """获取或创建 session（复用模式）"""
-        # 如果 session 不存在或已关闭，创建新的
-        if self._session is None or self._session.closed:
+        """获取或创建 session（复用模式，确保绑定到当前 event loop）"""
+        # 如果 session 无效（不存在、已关闭、或绑定到不同的 loop），创建新的
+        if not self._is_session_valid():
+            # 清理旧的 session（如果存在）
+            if self._session is not None and not self._session.closed:
+                try:
+                    await self._session.close()
+                except Exception:
+                    pass
+            if self._connector is not None and not self._connector.closed:
+                try:
+                    await self._connector.close()
+                except Exception:
+                    pass
             self._create_session()
         yield self._session
 
@@ -195,7 +277,7 @@ class ConcurrentRequester:
     ) -> RequestResult:
         """发送单个请求"""
         start_time = time.time()  # 在 semaphore 外计时，包含等待时间
-        async with self._semaphore:
+        async with self._get_semaphore():
             try:
                 await self._rate_limiter.acquire()
                 response, data = await self.make_requests(session, method, url, **kwargs)

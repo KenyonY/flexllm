@@ -216,9 +216,11 @@ if result.tool_calls:
         print(f"Call: {call.function['name']}({call.function['arguments']})")
 ```
 
-### Load Balancing (LLMClientPool)
+### Load Balancing
 
 Multi-endpoint load balancing with automatic failover, health checks, and dynamic task distribution.
+
+> **Note**: `LLMClient` and `LLMClientPool` are now unified - both support single and multi-endpoint modes with the same API. Use either name interchangeably.
 
 ```python
 from flexllm import LLMClientPool

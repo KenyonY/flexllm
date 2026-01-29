@@ -1,10 +1,19 @@
 """
-LLMClientPool - 多 Endpoint 客户端池
+LLMClientPool - 统一的 LLM 客户端
 
-提供多个 LLM endpoint 的负载均衡和故障转移能力，接口与 LLMClient 一致。
+支持单 endpoint 和多 endpoint 两种模式：
+- 单 endpoint：直接使用底层客户端（OpenAI/Gemini/Claude），零额外开销
+- 多 endpoint：负载均衡 + 故障转移
 
 Example:
-    # 方式1：传入 endpoints 配置
+    # 单 endpoint 模式（等价于原 LLMClient）
+    client = LLMClientPool(
+        base_url="https://api.openai.com/v1",
+        api_key="your-key",
+        model="gpt-4",
+    )
+
+    # 多 endpoint 模式（负载均衡 + 故障转移）
     pool = LLMClientPool(
         endpoints=[
             {"base_url": "http://api1.com/v1", "api_key": "key1", "model": "qwen"},
@@ -14,15 +23,8 @@ Example:
         fallback=True,
     )
 
-    # 方式2：传入已有的 clients
-    pool = LLMClientPool(
-        clients=[client1, client2],
-        load_balance="round_robin",
-        fallback=True,
-    )
-
-    # 接口与 LLMClient 一致
-    result = await pool.chat_completions(messages)
+    # 接口完全一致
+    result = await client.chat_completions(messages)
     results = await pool.chat_completions_batch(messages_list)
 """
 
@@ -30,17 +32,23 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 logger = logging.getLogger(__name__)
 
 from ..async_api.interface import RequestResult
 from ..async_api.progress import ProgressBarConfig, ProgressTracker
+from ..cache import ResponseCacheConfig
 from ..pricing import get_model_pricing
 from ..utils.core import retry_callback
-from .base import ChatCompletionResult
-from .llm import LLMClient
+from .base import ChatCompletionResult, LLMClientBase
+from .claude import ClaudeClient
+from .gemini import GeminiClient
+from .openai import OpenAIClient
 from .router import ProviderConfig, ProviderRouter, Strategy
+
+if TYPE_CHECKING:
+    from ..async_api.interface import RequestResult
 
 
 @dataclass
@@ -65,42 +73,63 @@ class EndpointConfig:
 
 class LLMClientPool:
     """
-    多 Endpoint 客户端池
+    统一的 LLM 客户端（支持单/多 endpoint）
 
     功能：
-    - 负载均衡：round_robin, weighted, random
-    - 故障转移：fallback=True 时自动尝试其他 endpoint
-    - 健康检查：自动标记失败的 endpoint，一段时间后尝试恢复
-    - 统一接口：与 LLMClient 完全一致的调用方式
+    - 单 endpoint：直接使用底层客户端，零额外开销
+    - 多 endpoint：负载均衡 + 故障转移
+    - 统一接口：所有模式API完全一致
 
     Attributes:
-        load_balance: 负载均衡策略
+        load_balance: 负载均衡策略（仅多 endpoint 模式）
         fallback: 是否启用故障转移
         max_fallback_attempts: 最大故障转移尝试次数
     """
 
     def __init__(
         self,
+        # 单 endpoint 参数（与原 LLMClient 兼容）
+        provider: Literal["openai", "gemini", "claude", "auto"] = "auto",
+        base_url: str = None,
+        api_key: str = None,
+        model: str = None,
+        # 多 endpoint 参数
         endpoints: list[dict | EndpointConfig] = None,
-        clients: list[LLMClient] = None,
+        clients: list = None,  # 已废弃的参数，保留向后兼容
         load_balance: Strategy = "round_robin",
         fallback: bool = True,
         max_fallback_attempts: int = None,
         failure_threshold: int | float = float("inf"),
         recovery_time: float = 60.0,
-        # 共享的 LLMClient 参数（仅当使用 endpoints 时生效）
+        # 共享参数
         concurrency_limit: int = 10,
-        max_qps: int = 1000,
+        max_qps: int = None,
         timeout: int = 120,
         retry_times: int = None,
+        cache_image: bool = False,
+        cache_dir: str = "image_cache",
+        # Gemini/Vertex AI 专用
+        use_vertex_ai: bool = False,
+        project_id: str = None,
+        location: str = "us-central1",
+        credentials=None,
+        # 响应缓存配置
+        cache: ResponseCacheConfig | None = None,
         **kwargs,
     ):
         """
-        初始化客户端池
+        初始化统一 LLM 客户端
 
         Args:
+            # 单 endpoint 模式参数
+            provider: Provider 类型（"openai", "gemini", "claude", "auto"）
+            base_url: API 基础 URL（单 endpoint 模式）
+            api_key: API 密钥（单 endpoint 模式）
+            model: 默认模型名称
+
+            # 多 endpoint 模式参数
             endpoints: Endpoint 配置列表，每个元素可以是 dict 或 EndpointConfig
-            clients: 已创建的 LLMClient 列表（与 endpoints 二选一）
+            clients: （已废弃）已创建的客户端列表
             load_balance: 负载均衡策略
                 - "round_robin": 轮询
                 - "weighted": 加权随机
@@ -110,35 +139,291 @@ class LLMClientPool:
             max_fallback_attempts: 最大故障转移次数，默认为 endpoint 数量
             failure_threshold: 连续失败多少次后标记为不健康
             recovery_time: 不健康后多久尝试恢复（秒）
-            concurrency_limit: 每个 client 的并发限制
-            max_qps: 每个 client 的 QPS 限制
-            timeout: 请求超时时间
-            retry_times: 重试次数。fallback=True 时表示总重试次数（会在多个 endpoint 间分配，
-                内部 retry = retry_times // num_endpoints），默认为 0；
-                fallback=False 时为单 client 重试次数，默认为 3
-            **kwargs: 其他传递给 LLMClient 的参数
-        """
-        if not endpoints and not clients:
-            raise ValueError("必须提供 endpoints 或 clients")
-        if endpoints and clients:
-            raise ValueError("endpoints 和 clients 只能二选一")
 
+            # 共享参数
+            concurrency_limit: 并发请求限制
+            max_qps: 最大 QPS（openai 默认 1000，gemini 默认 60）
+            timeout: 请求超时时间
+            retry_times: 重试次数。fallback=True 时表示总重试次数（会在多个 endpoint 间分配），默认为 0；
+                fallback=False 时为单 client 重试次数，默认为 3
+            cache_image: 是否缓存图片
+            cache_dir: 图片缓存目录
+            use_vertex_ai: 是否使用 Vertex AI（仅 Gemini）
+            project_id: GCP 项目 ID（仅 Vertex AI）
+            location: GCP 区域（仅 Vertex AI）
+            credentials: Google Cloud 凭证（仅 Vertex AI）
+            cache: 响应缓存配置
+            **kwargs: 其他传递给底层客户端的参数
+        """
+        # 判断是单 endpoint 还是多 endpoint 模式
+        # 单模式：提供了 base_url，或者 provider 是 gemini/claude（它们不需要 base_url）
+        # 多模式：提供了 endpoints 或 clients
+        # 无参数：抛出错误
+        has_multi_endpoint = endpoints is not None or clients is not None
+
+        # 如果没有提供多 endpoint 参数，检查是否是单 endpoint 模式
+        if not has_multi_endpoint:
+            # 单 endpoint 模式的条件：
+            # 1. 提供了 base_url，或
+            # 2. provider 是 gemini/claude（它们不需要 base_url），或
+            # 3. 提供了 api_key（可能是 gemini/claude）
+            has_single_endpoint = (
+                base_url is not None
+                or provider in ("gemini", "claude")
+                or (api_key is not None and provider != "openai")  # openai 必须有 base_url
+            )
+        else:
+            has_single_endpoint = base_url is not None
+
+        if not has_single_endpoint and not has_multi_endpoint:
+            raise ValueError("必须提供 base_url（单 endpoint）或 endpoints/clients（多 endpoint）")
+
+        if has_single_endpoint and has_multi_endpoint:
+            raise ValueError(
+                "不能同时提供 base_url 和 endpoints/clients，请选择单或多 endpoint 模式"
+            )
+
+        if has_single_endpoint:
+            # ========== 单 endpoint 模式 ==========
+            self._init_single_mode(
+                provider=provider,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                concurrency_limit=concurrency_limit,
+                max_qps=max_qps,
+                timeout=timeout,
+                retry_times=retry_times if retry_times is not None else 3,
+                cache_image=cache_image,
+                cache_dir=cache_dir,
+                use_vertex_ai=use_vertex_ai,
+                project_id=project_id,
+                location=location,
+                credentials=credentials,
+                cache=cache,
+                **kwargs,
+            )
+        else:
+            # ========== 多 endpoint 模式 ==========
+            if not endpoints and not clients:
+                raise ValueError("多 endpoint 模式必须提供 endpoints 或 clients")
+            if endpoints and clients:
+                raise ValueError("endpoints 和 clients 只能二选一")
+
+            self._init_multi_mode(
+                endpoints=endpoints,
+                clients=clients,
+                load_balance=load_balance,
+                fallback=fallback,
+                max_fallback_attempts=max_fallback_attempts,
+                failure_threshold=failure_threshold,
+                recovery_time=recovery_time,
+                concurrency_limit=concurrency_limit,
+                max_qps=max_qps,
+                timeout=timeout,
+                retry_times=retry_times,
+                cache_image=cache_image,
+                cache_dir=cache_dir,
+                cache=cache,
+                **kwargs,
+            )
+
+    @staticmethod
+    def _infer_provider(base_url: str, use_vertex_ai: bool) -> str:
+        """根据 base_url 推断 provider"""
+        if use_vertex_ai:
+            return "gemini"
+        if base_url:
+            url_lower = base_url.lower()
+            if "generativelanguage.googleapis.com" in url_lower:
+                return "gemini"
+            if "aiplatform.googleapis.com" in url_lower:
+                return "gemini"
+            if "anthropic.com" in url_lower:
+                return "claude"
+        return "openai"
+
+    def _create_base_client(
+        self,
+        provider: str,
+        base_url: str = None,
+        api_key: str = None,
+        model: str = None,
+        concurrency_limit: int = 10,
+        max_qps: int = None,
+        timeout: int = 120,
+        retry_times: int = 3,
+        cache_image: bool = False,
+        cache_dir: str = "image_cache",
+        use_vertex_ai: bool = False,
+        project_id: str = None,
+        location: str = "us-central1",
+        credentials=None,
+        cache: ResponseCacheConfig | None = None,
+        **kwargs,
+    ) -> LLMClientBase:
+        """创建底层客户端（OpenAI/Gemini/Claude）"""
+        if provider == "gemini":
+            return GeminiClient(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                concurrency_limit=concurrency_limit,
+                max_qps=max_qps if max_qps is not None else 60,
+                timeout=timeout,
+                retry_times=retry_times,
+                cache_image=cache_image,
+                cache_dir=cache_dir,
+                cache=cache,
+                use_vertex_ai=use_vertex_ai,
+                project_id=project_id,
+                location=location,
+                credentials=credentials,
+                **kwargs,
+            )
+        elif provider == "claude":
+            if not api_key:
+                raise ValueError("Claude provider 需要提供 api_key")
+            return ClaudeClient(
+                api_key=api_key,
+                model=model,
+                base_url=base_url,
+                concurrency_limit=concurrency_limit,
+                max_qps=max_qps if max_qps is not None else 60,
+                timeout=timeout,
+                retry_times=retry_times,
+                cache_image=cache_image,
+                cache_dir=cache_dir,
+                cache=cache,
+                **kwargs,
+            )
+        else:  # openai
+            if not base_url:
+                raise ValueError("OpenAI provider 需要提供 base_url")
+            return OpenAIClient(
+                base_url=base_url,
+                api_key=api_key or "EMPTY",
+                model=model,
+                concurrency_limit=concurrency_limit,
+                max_qps=max_qps if max_qps is not None else 1000,
+                timeout=timeout,
+                retry_times=retry_times,
+                cache_image=cache_image,
+                cache_dir=cache_dir,
+                cache=cache,
+                **kwargs,
+            )
+
+    def _init_single_mode(
+        self,
+        provider: str,
+        base_url: str,
+        api_key: str,
+        model: str,
+        concurrency_limit: int,
+        max_qps: int,
+        timeout: int,
+        retry_times: int,
+        cache_image: bool,
+        cache_dir: str,
+        use_vertex_ai: bool,
+        project_id: str,
+        location: str,
+        credentials,
+        cache: ResponseCacheConfig,
+        **kwargs,
+    ):
+        """初始化单 endpoint 模式"""
+        self._mode = "single"
+        self._model = model
+        self._fallback = False
+        self._load_balance = None
+        self._router = None
+        self._clients = None
+        self._endpoints = None
+        self._client_map = None
+        self._max_fallback_attempts = 1
+
+        # 自动推断 provider
+        if provider == "auto":
+            provider = self._infer_provider(base_url, use_vertex_ai)
+
+        self._provider = provider
+
+        # 直接创建底层客户端（跳过 LLMClient 中间层）
+        self._single_client = self._create_base_client(
+            provider=provider,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            concurrency_limit=concurrency_limit,
+            max_qps=max_qps,
+            timeout=timeout,
+            retry_times=retry_times,
+            cache_image=cache_image,
+            cache_dir=cache_dir,
+            use_vertex_ai=use_vertex_ai,
+            project_id=project_id,
+            location=location,
+            credentials=credentials,
+            cache=cache,
+            **kwargs,
+        )
+
+    def _init_multi_mode(
+        self,
+        endpoints: list,
+        clients: list,
+        load_balance: str,
+        fallback: bool,
+        max_fallback_attempts: int,
+        failure_threshold: float,
+        recovery_time: float,
+        concurrency_limit: int,
+        max_qps: int,
+        timeout: int,
+        retry_times: int,
+        cache_image: bool,
+        cache_dir: str,
+        cache: ResponseCacheConfig,
+        **kwargs,
+    ):
+        """初始化多 endpoint 模式"""
+        self._mode = "multi"
         self._fallback = fallback
         self._load_balance = load_balance
+        self._single_client = None
+        self._provider = None
+        self._model = None
 
         if clients:
-            # 使用已有的 clients
-            self._clients = clients
-            self._endpoints = [
-                EndpointConfig(
-                    base_url=c._client._base_url,
-                    api_key=c._client._api_key or "EMPTY",
-                    model=c._model,
-                )
-                for c in clients
-            ]
+            # 使用已有的 clients（向后兼容，但已废弃）
+            # 需要从 LLMClient 包装器中提取底层客户端
+            self._clients = []
+            self._endpoints = []
+            for c in clients:
+                # 检查是否是 LLMClient（有 _client 属性）
+                if hasattr(c, "_client"):
+                    self._clients.append(c._client)  # 提取底层客户端
+                    self._endpoints.append(
+                        EndpointConfig(
+                            base_url=c._client._base_url,
+                            api_key=c._client._api_key or "EMPTY",
+                            model=c._model if hasattr(c, "_model") else None,
+                        )
+                    )
+                else:
+                    # 已经是底层客户端
+                    self._clients.append(c)
+                    self._endpoints.append(
+                        EndpointConfig(
+                            base_url=c._base_url,
+                            api_key=c._api_key or "EMPTY",
+                            model=getattr(c, "_model", None),
+                        )
+                    )
         else:
-            # 从 endpoints 创建 clients
+            # 从 endpoints 创建底层 clients
             self._endpoints = []
             self._clients = []
 
@@ -146,7 +431,6 @@ class LLMClientPool:
 
             # 确定有效的 client retry_times
             # fallback 模式下，用户指定的 retry_times 是"总重试次数"，会在多个 endpoint 间分配
-            # effective_client_retry_times = retry_times // num_endpoints
             if fallback:
                 user_retry_times = retry_times if retry_times is not None else 0
                 effective_retry_times = user_retry_times // num_endpoints
@@ -165,9 +449,14 @@ class LLMClientPool:
                 )
                 ep_max_qps = ep.max_qps if ep.max_qps is not None else max_qps
 
+                # 自动推断 provider
+                provider = ep.provider
+                if provider == "auto":
+                    provider = self._infer_provider(ep.base_url, False)
+
                 # 合并参数
                 client_kwargs = {
-                    "provider": ep.provider,
+                    "provider": provider,
                     "base_url": ep.base_url,
                     "api_key": ep.api_key,
                     "model": ep.model,
@@ -175,10 +464,14 @@ class LLMClientPool:
                     "max_qps": ep_max_qps,
                     "timeout": timeout,
                     "retry_times": effective_retry_times,
+                    "cache_image": cache_image,
+                    "cache_dir": cache_dir,
+                    "cache": cache,
                     **kwargs,
                     **(ep.extra or {}),
                 }
-                self._clients.append(LLMClient(**client_kwargs))
+                # 直接创建底层客户端
+                self._clients.append(self._create_base_client(**client_kwargs))
 
         # 创建路由器
         provider_configs = [
@@ -204,8 +497,8 @@ class LLMClientPool:
 
         self._max_fallback_attempts = max_fallback_attempts or len(self._clients)
 
-    def _get_client(self) -> tuple[LLMClient, ProviderConfig]:
-        """获取下一个可用的 client"""
+    def _get_client(self) -> tuple[LLMClientBase, ProviderConfig]:
+        """获取下一个可用的 client（返回底层客户端）"""
         provider = self._router.get_next()
         client = self._client_map[provider.base_url]
         return client, provider
@@ -216,8 +509,10 @@ class LLMClientPool:
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
+        show_progress: bool = False,
+        preprocess_msg: bool = False,
         **kwargs,
-    ) -> str | ChatCompletionResult:
+    ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """
         单条聊天完成（支持故障转移）
 
@@ -226,11 +521,26 @@ class LLMClientPool:
             model: 模型名称（可选，使用 endpoint 配置的默认值）
             return_raw: 是否返回原始响应
             return_usage: 是否返回包含 usage 的结果
+            show_progress: 是否显示进度
+            preprocess_msg: 是否预处理消息（图片转 base64）
             **kwargs: 其他参数
 
         Returns:
             与 LLMClient.chat_completions 返回值一致
         """
+        # 单 endpoint 模式：直接调用底层客户端
+        if self._mode == "single":
+            return await self._single_client.chat_completions(
+                messages=messages,
+                model=model,
+                return_raw=return_raw,
+                return_usage=return_usage,
+                show_progress=show_progress,
+                preprocess_msg=preprocess_msg,
+                **kwargs,
+            )
+
+        # 多 endpoint 模式：使用 fallback
         last_error = None
         tried_providers = set()
 
@@ -252,6 +562,8 @@ class LLMClientPool:
                     model=model or provider.model,
                     return_raw=return_raw,
                     return_usage=return_usage,
+                    show_progress=show_progress,
+                    preprocess_msg=preprocess_msg,
                     **kwargs,
                 )
 
@@ -283,8 +595,19 @@ class LLMClientPool:
         return_raw: bool = False,
         return_usage: bool = False,
         **kwargs,
-    ) -> str | ChatCompletionResult:
+    ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """同步版本的聊天完成"""
+        # 单 endpoint 模式：使用底层客户端的 sync 方法
+        if self._mode == "single":
+            return self._single_client.chat_completions_sync(
+                messages=messages,
+                model=model,
+                return_raw=return_raw,
+                return_usage=return_usage,
+                **kwargs,
+            )
+
+        # 多 endpoint 模式：运行异步方法
         return asyncio.run(
             self.chat_completions(
                 messages=messages,
@@ -304,6 +627,7 @@ class LLMClientPool:
         show_progress: bool = True,
         return_summary: bool = False,
         track_cost: bool = False,
+        preprocess_msg: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         distribute: bool = True,
@@ -321,6 +645,7 @@ class LLMClientPool:
             show_progress: 是否显示进度条
             return_summary: 是否返回统计摘要
             track_cost: 是否在进度条中显示实时成本
+            preprocess_msg: 是否预处理消息
             output_jsonl: 输出文件路径（JSONL）
             flush_interval: 文件刷新间隔（秒）
             distribute: 是否将请求分散到多个 endpoint（True）
@@ -331,6 +656,23 @@ class LLMClientPool:
         Returns:
             与 LLMClient.chat_completions_batch 返回值一致
         """
+        # 单 endpoint 模式：直接调用底层客户端
+        if self._mode == "single":
+            return await self._single_client.chat_completions_batch(
+                messages_list=messages_list,
+                model=model,
+                return_raw=return_raw,
+                return_usage=return_usage,
+                show_progress=show_progress,
+                return_summary=return_summary,
+                preprocess_msg=preprocess_msg,
+                output_jsonl=output_jsonl,
+                flush_interval=flush_interval,
+                metadata_list=metadata_list,
+                **kwargs,
+            )
+
+        # 多 endpoint 模式：参数校验
         # track_cost 需要 usage 信息
         if track_cost:
             return_usage = True
@@ -863,6 +1205,22 @@ class LLMClientPool:
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
+        # 单 endpoint 模式：使用底层客户端的 sync 方法
+        if self._mode == "single":
+            return self._single_client.chat_completions_batch_sync(
+                messages_list=messages_list,
+                model=model,
+                return_raw=return_raw,
+                return_usage=return_usage,
+                show_progress=show_progress,
+                return_summary=return_summary,
+                output_jsonl=output_jsonl,
+                flush_interval=flush_interval,
+                metadata_list=metadata_list,
+                **kwargs,
+            )
+
+        # 多 endpoint 模式：运行异步方法
         return asyncio.run(
             self.chat_completions_batch(
                 messages_list=messages_list,
@@ -885,6 +1243,8 @@ class LLMClientPool:
         messages: list[dict],
         model: str = None,
         return_usage: bool = False,
+        preprocess_msg: bool = False,
+        timeout: int = None,
         **kwargs,
     ):
         """
@@ -894,11 +1254,27 @@ class LLMClientPool:
             messages: 消息列表
             model: 模型名称
             return_usage: 是否返回 usage 信息
+            preprocess_msg: 是否预处理消息
+            timeout: 超时时间（秒）
             **kwargs: 其他参数
 
         Yields:
             与 LLMClient.chat_completions_stream 一致
         """
+        # 单 endpoint 模式：直接调用底层客户端
+        if self._mode == "single":
+            async for chunk in self._single_client.chat_completions_stream(
+                messages=messages,
+                model=model,
+                return_usage=return_usage,
+                preprocess_msg=preprocess_msg,
+                timeout=timeout,
+                **kwargs,
+            ):
+                yield chunk
+            return
+
+        # 多 endpoint 模式：使用 fallback
         last_error = None
         tried_providers = set()
 
@@ -917,6 +1293,8 @@ class LLMClientPool:
                     messages=messages,
                     model=model or provider.model,
                     return_usage=return_usage,
+                    preprocess_msg=preprocess_msg,
+                    timeout=timeout,
                     **kwargs,
                 ):
                     yield chunk
@@ -933,25 +1311,151 @@ class LLMClientPool:
 
         raise last_error or RuntimeError("所有 endpoint 都失败了")
 
+    async def iter_chat_completions_batch(
+        self,
+        messages_list: list[list[dict]],
+        model: str = None,
+        return_raw: bool = False,
+        return_usage: bool = False,
+        show_progress: bool = True,
+        preprocess_msg: bool = False,
+        output_jsonl: str | None = None,
+        flush_interval: float = 1.0,
+        metadata_list: list[dict] | None = None,
+        batch_size: int = None,
+        **kwargs,
+    ):
+        """
+        迭代式批量聊天完成（边请求边返回结果）
+
+        Args:
+            messages_list: 消息列表的列表
+            model: 模型名称
+            return_raw: 是否返回原始响应
+            return_usage: 是否在 result 对象上添加 usage 属性
+            show_progress: 是否显示进度条
+            preprocess_msg: 是否预处理消息
+            output_jsonl: 输出文件路径（JSONL）
+            flush_interval: 文件刷新间隔（秒）
+            metadata_list: 元数据列表
+            batch_size: 每批返回的数量
+            **kwargs: 其他参数
+
+        Yields:
+            result: 包含 content、usage、original_idx 等属性的结果对象
+        """
+        # 单 endpoint 模式：直接调用底层客户端
+        if self._mode == "single":
+            async for result in self._single_client.iter_chat_completions_batch(
+                messages_list=messages_list,
+                model=model,
+                return_raw=return_raw,
+                return_usage=return_usage,
+                show_progress=show_progress,
+                preprocess_msg=preprocess_msg,
+                output_jsonl=output_jsonl,
+                flush_interval=flush_interval,
+                metadata_list=metadata_list,
+                batch_size=batch_size,
+                **kwargs,
+            ):
+                yield result
+            return
+
+        # 多 endpoint 模式：暂不支持，使用批量方法
+        # TODO: 未来可以实现分布式迭代
+        raise NotImplementedError("多 endpoint 模式暂不支持 iter_chat_completions_batch")
+
+    def model_list(self) -> list[str]:
+        """获取可用模型列表"""
+        if self._mode == "single":
+            return self._single_client.model_list()
+        else:
+            # 多 endpoint 模式：返回第一个客户端的模型列表
+            return self._clients[0].model_list() if self._clients else []
+
+    def parse_thoughts(self, response_data: dict) -> dict:
+        """
+        从响应中解析思考内容和答案
+
+        Args:
+            response_data: 原始响应数据（通过 return_raw=True 获取）
+
+        Returns:
+            dict: {"thought": str, "answer": str}
+        """
+        if self._mode == "single":
+            # 单模式：根据 provider 选择解析方法
+            if self._provider == "gemini":
+                return GeminiClient.parse_thoughts(response_data)
+            elif self._provider == "claude":
+                return ClaudeClient.parse_thoughts(response_data)
+            else:
+                return OpenAIClient.parse_thoughts(response_data)
+        else:
+            # 多模式：使用第一个客户端的方法
+            if isinstance(self._clients[0], GeminiClient):
+                return GeminiClient.parse_thoughts(response_data)
+            elif isinstance(self._clients[0], ClaudeClient):
+                return ClaudeClient.parse_thoughts(response_data)
+            else:
+                return OpenAIClient.parse_thoughts(response_data)
+
+    @property
+    def provider(self) -> str:
+        """返回当前使用的 provider"""
+        if self._mode == "single":
+            return self._provider
+        else:
+            # 多模式：返回 "multi"
+            return "multi"
+
+    @property
+    def client(self) -> LLMClientBase:
+        """返回底层客户端实例（单模式）或第一个客户端（多模式）"""
+        if self._mode == "single":
+            return self._single_client
+        else:
+            return self._clients[0] if self._clients else None
+
+    @property
+    def _client(self) -> LLMClientBase:
+        """向后兼容属性：返回底层客户端"""
+        return self.client
+
     @property
     def stats(self) -> dict:
         """返回池的统计信息"""
-        return {
-            "load_balance": self._load_balance,
-            "fallback": self._fallback,
-            "num_endpoints": len(self._clients),
-            "router_stats": self._router.stats,
-        }
+        if self._mode == "single":
+            return {
+                "mode": "single",
+                "provider": self._provider,
+                "model": self._model,
+            }
+        else:
+            return {
+                "mode": "multi",
+                "load_balance": self._load_balance,
+                "fallback": self._fallback,
+                "num_endpoints": len(self._clients),
+                "router_stats": self._router.stats,
+            }
 
     async def aclose(self):
         """异步关闭所有客户端（推荐在异步上下文中使用）"""
-        for client in self._clients:
-            await client.aclose()
+        if self._mode == "single":
+            await self._single_client.aclose()
+        else:
+            for client in self._clients:
+                await client.aclose()
 
     def close(self):
         """同步关闭所有客户端"""
-        for client in self._clients:
-            client.close()
+        if self._mode == "single":
+            self._single_client.close()
+        else:
+            for client in self._clients:
+                client.close()
 
     def __enter__(self):
         return self
@@ -966,7 +1470,20 @@ class LLMClientPool:
         await self.aclose()
 
     def __repr__(self) -> str:
-        return (
-            f"LLMClientPool(endpoints={len(self._clients)}, "
-            f"load_balance='{self._load_balance}', fallback={self._fallback})"
-        )
+        if self._mode == "single":
+            return f"LLMClientPool(provider='{self._provider}', model='{self._model}')"
+        else:
+            return (
+                f"LLMClientPool(endpoints={len(self._clients)}, "
+                f"load_balance='{self._load_balance}', fallback={self._fallback})"
+            )
+
+    def __getattr__(self, name):
+        """自动委托未显式定义的方法给底层客户端（仅单模式）"""
+        if self._mode == "single":
+            return getattr(self._single_client, name)
+        else:
+            raise AttributeError(
+                f"'{self.__class__.__name__}' object has no attribute '{name}' "
+                f"(仅单 endpoint 模式支持自动委托)"
+            )

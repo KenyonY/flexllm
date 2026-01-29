@@ -179,10 +179,26 @@ class ConcurrentExecutor:
     ):
         self._concurrency_limit = concurrency_limit
         self._rate_limiter = RateLimiter(max_qps)
-        self._semaphore = asyncio.Semaphore(concurrency_limit)
+        self._semaphore: asyncio.Semaphore | None = None  # lazy init，避免绑定错误的 event loop
         self.retry_times = retry_times
         self.retry_delay = retry_delay
         self.error_handler = error_handler  # 自定义错误处理函数
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        """获取或创建 Semaphore（确保绑定到当前 event loop）"""
+        try:
+            loop = asyncio.get_running_loop()
+            # 检查 semaphore 是否绑定到当前 loop
+            if self._semaphore is not None:
+                sem_loop = getattr(self._semaphore, "_loop", None)
+                if sem_loop is not None and sem_loop is not loop:
+                    self._semaphore = None
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(self._concurrency_limit)
+        except RuntimeError:
+            if self._semaphore is None:
+                self._semaphore = asyncio.Semaphore(self._concurrency_limit)
+        return self._semaphore
 
     def _inspect_function_signature(self, func: Callable) -> dict:
         """检查函数签名，返回参数信息"""
@@ -256,7 +272,7 @@ class ConcurrentExecutor:
         last_error = None
         executor_kwargs = {**(executor_kwargs or {}), **kwargs}
 
-        async with self._semaphore:
+        async with self._get_semaphore():
             while retry_count <= self.retry_times:
                 try:
                     await self._rate_limiter.acquire()
