@@ -407,6 +407,13 @@ if HAS_TYPER:
         return_usage: Annotated[bool, Option("--return-usage", help="输出 token 统计")] = False,
         preprocess_msg: Annotated[bool, Option("--preprocess-msg", help="预处理图片消息")] = False,
         track_cost: Annotated[bool, Option("--track-cost", help="在进度条中显示实时成本")] = False,
+        save_input: Annotated[
+            str | None,
+            Option(
+                "--save-input",
+                help="输出文件中 input 字段的保存策略: true(默认,完整保存), last(仅最后user内容), false(不保存)",
+            ),
+        ] = None,
     ):
         """批量处理 JSONL 文件（支持断点续传）
 
@@ -479,6 +486,23 @@ if HAS_TYPER:
             concurrency if concurrency is not None else batch_config["concurrency"]
         )
         effective_max_qps = max_qps if max_qps is not None else batch_config["max_qps"]
+
+        # 解析 save_input: CLI 字符串 -> bool | str
+        effective_save_input: bool | str = True
+        if save_input is not None:
+            low = save_input.lower()
+            if low == "false":
+                effective_save_input = False
+            elif low == "last":
+                effective_save_input = "last"
+            elif low == "true":
+                effective_save_input = True
+            else:
+                print(
+                    f"错误: --save-input 仅支持 true/last/false，当前: {save_input}",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(1)
 
         try:
             records, format_type, message_fields = parse_batch_input(input)
@@ -556,6 +580,7 @@ if HAS_TYPER:
                             track_cost=effective_track_cost,
                             flush_interval=batch_config["flush_interval"],
                             metadata_list=metadata_list,
+                            save_input=effective_save_input,
                             **kwargs,
                         )
                 else:
@@ -584,6 +609,7 @@ if HAS_TYPER:
                             preprocess_msg=effective_preprocess_msg,
                             flush_interval=batch_config["flush_interval"],
                             metadata_list=metadata_list,
+                            save_input=effective_save_input,
                             **kwargs,
                         )
                 return results, summary
