@@ -246,6 +246,20 @@ def convert_to_messages(
                 messages.append({"role": "system", "content": system})
             messages.append({"role": "user", "content": record[prompt_field]})
 
+    elif format_type == "custom":
+        # message_fields = [user_field, system_field]（由 --user-field/--system-field 指定）
+        user_field, system_field = message_fields[0], message_fields[1]
+        used_fields.add(user_field)
+
+        system = None
+        if system_field and system_field in record:
+            system = record[system_field]
+            used_fields.add(system_field)
+
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": record[user_field]})
+
     if global_system and format_type != "openai_chat":
         messages = [m for m in messages if m.get("role") != "system"]
         messages.insert(0, {"role": "system", "content": global_system})
@@ -426,10 +440,19 @@ if HAS_TYPER:
                 help="输出文件中 input 字段的保存策略: true(默认,完整保存), last(仅最后user内容), false(不保存)",
             ),
         ] = None,
+        user_field: Annotated[
+            str | None,
+            Option("--user-field", "-uf", help="指定 user content 的字段名（跳过自动格式检测）"),
+        ] = None,
+        system_field: Annotated[
+            str | None,
+            Option("--system-field", "-sf", help="指定 system prompt 的字段名（跳过自动格式检测）"),
+        ] = None,
     ):
         """批量处理 JSONL 文件（支持断点续传）
 
-        自动检测输入格式：openai_chat, alpaca, simple (q/question/prompt)
+        自动检测输入格式：openai_chat, alpaca, simple (q/question/prompt/input/user)
+        也可用 --user-field 和 --system-field 指定任意字段名。
 
         高级配置可在 ~/.flexllm/config.yaml 的 batch 节中设置。
         CLI 参数优先级高于配置文件。
@@ -438,6 +461,7 @@ if HAS_TYPER:
             flexllm batch input.jsonl -o output.jsonl
             flexllm batch input.jsonl -o output.jsonl -c 20 -m gpt-4
             flexllm batch input.jsonl -o output.jsonl --cache --return-usage
+            flexllm batch data.jsonl -o out.jsonl --user-field text --system-field sys_prompt
             cat input.jsonl | flexllm batch -o output.jsonl
         """
         if not output:
@@ -517,7 +541,21 @@ if HAS_TYPER:
                 raise typer.Exit(1)
 
         try:
-            records, format_type, message_fields = parse_batch_input(input)
+            if user_field:
+                # 指定了 --user-field，跳过自动格式检测
+                records, _, _ = parse_batch_input(input)
+                format_type = "custom"
+                message_fields = [user_field, system_field]
+                # 校验首条记录是否包含指定字段
+                if user_field not in records[0]:
+                    available = list(records[0].keys())
+                    print(
+                        f"错误: 字段 '{user_field}' 不存在，可用字段: {available}",
+                        file=sys.stderr,
+                    )
+                    raise typer.Exit(1)
+            else:
+                records, format_type, message_fields = parse_batch_input(input)
             print(f"输入格式: {format_type}", file=sys.stderr)
             print(f"记录数: {len(records)}", file=sys.stderr)
 
