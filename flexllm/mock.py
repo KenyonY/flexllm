@@ -7,8 +7,9 @@
 - 可配置的响应长度（随机范围）
 - RPS 限制（每秒请求数）
 - Token 速率控制（流式返回时每秒 token 数）
-- 符合 OpenAI API 规范的完整响应格式
+- 支持 OpenAI / Claude / Gemini 三种 API 格式
 - 支持流式和非流式响应
+- 可选的思考/推理内容返回
 
 用法:
     # CLI
@@ -19,12 +20,15 @@
     flexllm mock -l 100-500               # 响应长度 100-500 字符
     flexllm mock --rps 10                 # 每秒最多 10 个请求
     flexllm mock --token-rate 50          # 流式返回每秒 50 个 token
+    flexllm mock --thinking               # 响应包含思考内容
 
     # Python
     from flexllm.mock import MockLLMServer, MockServerConfig
-    server = MockLLMServer(MockServerConfig(port=8001, rps=10, token_rate=50))
+    server = MockLLMServer(MockServerConfig(port=8001, rps=10, thinking=True))
     with server:
-        # server.url -> "http://localhost:8001/v1"
+        # OpenAI: server.url -> "http://localhost:8001/v1"
+        # Claude: server.url -> "http://localhost:8001/v1"  (共享前缀)
+        # Gemini: server.gemini_url -> "http://localhost:8001"
         ...
 """
 
@@ -70,6 +74,20 @@ SENTENCES = [
     "代码审查是保证代码质量的重要环节。",
 ]
 
+# 预定义思考过程句子
+THINKING_SENTENCES = [
+    "让我仔细想想这个问题。",
+    "首先，我需要分析问题的核心。",
+    "这个问题可以从多个角度来考虑。",
+    "根据已知信息，我可以推断出以下几点。",
+    "让我逐步分析这个问题的各个方面。",
+    "需要考虑的关键因素包括以下几个方面。",
+    "从逻辑上看，这个推理过程是合理的。",
+    "我需要验证一下这个结论是否正确。",
+    "综合以上分析，我得出了以下结论。",
+    "让我重新审视一下这个问题的前提条件。",
+]
+
 
 class RPSLimiter:
     """RPS 限制器（令牌桶算法）"""
@@ -110,10 +128,11 @@ class MockServerConfig:
     rps: float = 0  # 每秒请求数限制，0 表示不限制
     token_rate: float = 0  # 流式返回时每秒 token 数，0 表示不限制
     error_rate: float = 0  # 请求失败率 (0-1)，0 表示不失败
+    thinking: bool = False  # 是否在响应中包含思考内容
 
 
 class MockLLMServer:
-    """Mock LLM 服务器"""
+    """Mock LLM 服务器，支持 OpenAI / Claude / Gemini 三种 API 格式"""
 
     def __init__(self, config: MockServerConfig = None):
         if not HAS_AIOHTTP:
@@ -127,14 +146,21 @@ class MockLLMServer:
 
     @property
     def url(self) -> str:
+        """OpenAI / Claude API 的 base URL"""
         return f"http://localhost:{self.config.port}/v1"
 
     @property
     def base_url(self) -> str:
         return self.url
 
+    @property
+    def gemini_url(self) -> str:
+        """Gemini API 的 base URL（不带 /v1 前缀）"""
+        return f"http://localhost:{self.config.port}"
+
+    # ── 通用辅助方法 ──
+
     def _get_delay(self) -> float:
-        """获取延迟时间"""
         if self.config.delay_min == self.config.delay_max:
             return self.config.delay_min
         return random.uniform(self.config.delay_min, self.config.delay_max)
@@ -151,13 +177,41 @@ class MockLLMServer:
             current_len += len(sentence)
 
         text = "".join(result)
-        # 截断到目标长度附近（在句子边界）
         if len(text) > target_len + 50:
             cut_pos = text.rfind("。", 0, target_len + 50)
             if cut_pos > 0:
                 text = text[: cut_pos + 1]
 
         return text
+
+    def _generate_thinking_text(self) -> str:
+        """生成随机的思考过程文本"""
+        target_len = random.randint(50, 500)
+        result = []
+        current_len = 0
+        while current_len < target_len:
+            sentence = random.choice(THINKING_SENTENCES)
+            result.append(sentence)
+            current_len += len(sentence)
+        return "".join(result)
+
+    def _should_include_thinking(self, data: dict) -> bool:
+        """判断是否应在响应中包含思考内容（全局配置或请求参数）"""
+        if self.config.thinking:
+            return True
+        # OpenAI: "think": true
+        if data.get("think") is True:
+            return True
+        # Claude: "thinking": {"type": "enabled", ...}
+        thinking = data.get("thinking", {})
+        if isinstance(thinking, dict) and thinking.get("type") == "enabled":
+            return True
+        # Gemini: generationConfig.thinkingConfig.includeThoughts
+        gen_config = data.get("generationConfig", {})
+        thinking_config = gen_config.get("thinkingConfig", {})
+        if thinking_config.get("includeThoughts") is True:
+            return True
+        return False
 
     def _estimate_tokens(self, text: str) -> int:
         """估算 token 数（简单按字符数估算，中文约 1.5 字符/token）"""
@@ -176,6 +230,15 @@ class MockLLMServer:
                 for item in content:
                     if isinstance(item, dict) and item.get("type") == "text":
                         total += self._estimate_tokens(item.get("text", ""))
+            total += 4
+        return total
+
+    def _count_gemini_prompt_tokens(self, contents: list[dict]) -> int:
+        """计算 Gemini 格式 prompt 的 token 数"""
+        total = 0
+        for c in contents:
+            for p in c.get("parts", []):
+                total += self._estimate_tokens(p.get("text", ""))
             total += 4
         return total
 
@@ -203,57 +266,75 @@ class MockLLMServer:
 
         return tokens
 
+    async def _wait_token_interval(self, token_interval: float, last_time: float) -> float:
+        """Token 速率控制，返回更新后的 last_time"""
+        if token_interval > 0:
+            now = time.perf_counter()
+            wait_time = token_interval - (now - last_time)
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+        return time.perf_counter()
+
+    # ── OpenAI 格式 ──
+
     async def _stream_response(
-        self, response_text: str, model: str, prompt_tokens: int, request_id: str
+        self,
+        response_text: str,
+        model: str,
+        prompt_tokens: int,
+        request_id: str,
+        thinking_text: str | None = None,
     ):
-        """生成流式响应"""
-        tokens = self._tokenize(response_text)
+        """生成 OpenAI 格式的流式响应"""
         token_interval = 1.0 / self.config.token_rate if self.config.token_rate > 0 else 0
         last_time = time.perf_counter()
         completion_tokens = 0
+        first_chunk = True
 
-        for i, token in enumerate(tokens):
-            # Token 速率控制
-            if token_interval > 0:
-                now = time.perf_counter()
-                wait_time = token_interval - (now - last_time)
-                if wait_time > 0:
-                    await asyncio.sleep(wait_time)
-                last_time = time.perf_counter()
+        # 先发送 reasoning chunks
+        if thinking_text:
+            for token in self._tokenize(thinking_text):
+                last_time = await self._wait_token_interval(token_interval, last_time)
+                completion_tokens += 1
+                delta = {"reasoning": token}
+                if first_chunk:
+                    delta["role"] = "assistant"
+                    first_chunk = False
+                chunk = {
+                    "id": request_id,
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {"index": 0, "delta": delta, "logprobs": None, "finish_reason": None}
+                    ],
+                }
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
+        # 发送 content chunks
+        for token in self._tokenize(response_text):
+            last_time = await self._wait_token_interval(token_interval, last_time)
             completion_tokens += 1
+            delta = {"content": token}
+            if first_chunk:
+                delta["role"] = "assistant"
+                first_chunk = False
             chunk = {
                 "id": request_id,
                 "object": "chat.completion.chunk",
                 "created": int(time.time()),
                 "model": model,
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {"content": token}
-                        if i > 0
-                        else {"role": "assistant", "content": token},
-                        "logprobs": None,
-                        "finish_reason": None,
-                    }
-                ],
+                "choices": [{"index": 0, "delta": delta, "logprobs": None, "finish_reason": None}],
             }
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
-        # 发送结束标记
+        # 结束标记
         final_chunk = {
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
-            "choices": [
-                {
-                    "index": 0,
-                    "delta": {},
-                    "logprobs": None,
-                    "finish_reason": "stop",
-                }
-            ],
+            "choices": [{"index": 0, "delta": {}, "logprobs": None, "finish_reason": "stop"}],
             "usage": {
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
@@ -264,10 +345,8 @@ class MockLLMServer:
         yield "data: [DONE]\n\n"
 
     async def _handle_chat_completions(self, request: web.Request) -> web.Response:
-        """处理 /v1/chat/completions 请求"""
-        # RPS 限制
+        """处理 /v1/chat/completions 请求（OpenAI 格式）"""
         await self._rps_limiter.acquire()
-
         self.request_count += 1
         request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
@@ -279,28 +358,27 @@ class MockLLMServer:
         messages = data.get("messages", [])
         model = data.get("model", self.config.model)
         stream = data.get("stream", False)
+        include_thinking = self._should_include_thinking(data)
 
-        # 首次响应延迟（模拟 TTFT）
-        delay = self._get_delay()
-        await asyncio.sleep(delay)
+        await asyncio.sleep(self._get_delay())
 
-        # 模拟错误（根据 error_rate）
         if self.config.error_rate > 0 and random.random() < self.config.error_rate:
-            error_response = {
-                "error": {
-                    "message": f"Mock server simulated error (error_rate={self.config.error_rate})",
-                    "type": "server_error",
-                    "code": "mock_error",
-                }
-            }
-            return web.json_response(error_response, status=500)
+            return web.json_response(
+                {
+                    "error": {
+                        "message": f"Mock server simulated error (error_rate={self.config.error_rate})",
+                        "type": "server_error",
+                        "code": "mock_error",
+                    }
+                },
+                status=500,
+            )
 
-        # 生成响应文本
         response_text = self._generate_response_text()
+        thinking_text = self._generate_thinking_text() if include_thinking else None
         prompt_tokens = self._count_prompt_tokens(messages)
 
         if stream:
-            # 流式响应
             response = web.StreamResponse(
                 status=200,
                 headers={
@@ -310,41 +388,345 @@ class MockLLMServer:
                 },
             )
             await response.prepare(request)
-
             async for chunk in self._stream_response(
-                response_text, model, prompt_tokens, request_id
+                response_text, model, prompt_tokens, request_id, thinking_text
             ):
                 await response.write(chunk.encode("utf-8"))
-
             await response.write_eof()
             return response
         else:
-            # 非流式响应
             completion_tokens = self._estimate_tokens(response_text)
-            response = {
-                "id": request_id,
-                "object": "chat.completion",
-                "created": int(time.time()),
-                "model": model,
-                "choices": [
+            if thinking_text:
+                completion_tokens += self._estimate_tokens(thinking_text)
+            message_obj = {"role": "assistant", "content": response_text}
+            if thinking_text:
+                message_obj["reasoning"] = thinking_text
+            return web.json_response(
+                {
+                    "id": request_id,
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": message_obj,
+                            "logprobs": None,
+                            "finish_reason": "stop",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
+                    "system_fingerprint": "mock-fp-001",
+                }
+            )
+
+    # ── Claude 格式 ──
+
+    async def _claude_stream_response(
+        self,
+        request: web.Request,
+        response_text: str,
+        thinking_text: str | None,
+        model: str,
+        prompt_tokens: int,
+        output_tokens: int,
+        request_id: str,
+    ) -> web.StreamResponse:
+        """生成 Claude 格式的流式响应"""
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await resp.prepare(request)
+
+        token_interval = 1.0 / self.config.token_rate if self.config.token_rate > 0 else 0
+        last_time = time.perf_counter()
+
+        async def send_event(event_type: str, data: dict):
+            line = f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            await resp.write(line.encode("utf-8"))
+
+        # message_start
+        await send_event(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": request_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": model,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": prompt_tokens, "output_tokens": 0},
+                },
+            },
+        )
+
+        block_index = 0
+
+        # thinking block
+        if thinking_text:
+            await send_event(
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": block_index,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                },
+            )
+            for token in self._tokenize(thinking_text):
+                last_time = await self._wait_token_interval(token_interval, last_time)
+                await send_event(
+                    "content_block_delta",
                     {
-                        "index": 0,
-                        "message": {
-                            "role": "assistant",
-                            "content": response_text,
-                        },
-                        "logprobs": None,
-                        "finish_reason": "stop",
+                        "type": "content_block_delta",
+                        "index": block_index,
+                        "delta": {"type": "thinking_delta", "thinking": token},
+                    },
+                )
+            await send_event(
+                "content_block_stop",
+                {"type": "content_block_stop", "index": block_index},
+            )
+            block_index += 1
+
+        # text block
+        await send_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": block_index,
+                "content_block": {"type": "text", "text": ""},
+            },
+        )
+        for token in self._tokenize(response_text):
+            last_time = await self._wait_token_interval(token_interval, last_time)
+            await send_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": block_index,
+                    "delta": {"type": "text_delta", "text": token},
+                },
+            )
+        await send_event(
+            "content_block_stop",
+            {"type": "content_block_stop", "index": block_index},
+        )
+
+        # message_delta + message_stop
+        await send_event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn", "stop_sequence": None},
+                "usage": {"output_tokens": output_tokens},
+            },
+        )
+        await send_event("message_stop", {"type": "message_stop"})
+
+        await resp.write_eof()
+        return resp
+
+    async def _handle_claude_messages(self, request: web.Request) -> web.Response:
+        """处理 /v1/messages 请求（Claude 格式）"""
+        await self._rps_limiter.acquire()
+        self.request_count += 1
+        request_id = f"msg_{uuid.uuid4().hex[:24]}"
+
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        messages = data.get("messages", [])
+        model = data.get("model", self.config.model)
+        stream = data.get("stream", False)
+        include_thinking = self._should_include_thinking(data)
+
+        await asyncio.sleep(self._get_delay())
+
+        if self.config.error_rate > 0 and random.random() < self.config.error_rate:
+            return web.json_response(
+                {"type": "error", "error": {"type": "server_error", "message": "Mock error"}},
+                status=500,
+            )
+
+        response_text = self._generate_response_text()
+        thinking_text = self._generate_thinking_text() if include_thinking else None
+        prompt_tokens = self._count_prompt_tokens(messages)
+        completion_tokens = self._estimate_tokens(response_text)
+        if thinking_text:
+            completion_tokens += self._estimate_tokens(thinking_text)
+
+        if stream:
+            return await self._claude_stream_response(
+                request,
+                response_text,
+                thinking_text,
+                model,
+                prompt_tokens,
+                completion_tokens,
+                request_id,
+            )
+
+        content_blocks = []
+        if thinking_text:
+            content_blocks.append({"type": "thinking", "thinking": thinking_text})
+        content_blocks.append({"type": "text", "text": response_text})
+
+        return web.json_response(
+            {
+                "id": request_id,
+                "type": "message",
+                "role": "assistant",
+                "content": content_blocks,
+                "model": model,
+                "stop_reason": "end_turn",
+                "stop_sequence": None,
+                "usage": {
+                    "input_tokens": prompt_tokens,
+                    "output_tokens": completion_tokens,
+                },
+            }
+        )
+
+    # ── Gemini 格式 ──
+
+    async def _gemini_stream_response(
+        self,
+        request: web.Request,
+        response_text: str,
+        thinking_text: str | None,
+        prompt_tokens: int,
+        output_tokens: int,
+    ) -> web.StreamResponse:
+        """生成 Gemini 格式的流式响应"""
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+            },
+        )
+        await resp.prepare(request)
+
+        token_interval = 1.0 / self.config.token_rate if self.config.token_rate > 0 else 0
+        last_time = time.perf_counter()
+
+        # thinking chunks
+        if thinking_text:
+            for token in self._tokenize(thinking_text):
+                last_time = await self._wait_token_interval(token_interval, last_time)
+                chunk = {
+                    "candidates": [
+                        {
+                            "content": {
+                                "parts": [{"text": token, "thought": True}],
+                                "role": "model",
+                            }
+                        }
+                    ],
+                }
+                await resp.write(
+                    f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                )
+
+        # content chunks
+        content_tokens = self._tokenize(response_text)
+        for i, token in enumerate(content_tokens):
+            last_time = await self._wait_token_interval(token_interval, last_time)
+            chunk = {
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [{"text": token}],
+                            "role": "model",
+                        }
                     }
                 ],
-                "usage": {
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "total_tokens": prompt_tokens + completion_tokens,
-                },
-                "system_fingerprint": "mock-fp-001",
             }
-            return web.json_response(response)
+            # 最后一个 chunk 附带 usage
+            if i == len(content_tokens) - 1:
+                chunk["usageMetadata"] = {
+                    "promptTokenCount": prompt_tokens,
+                    "candidatesTokenCount": output_tokens,
+                    "totalTokenCount": prompt_tokens + output_tokens,
+                }
+            await resp.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8"))
+
+        await resp.write_eof()
+        return resp
+
+    async def _handle_gemini(self, request: web.Request) -> web.Response:
+        """处理 Gemini API 请求（/models/{model}:generateContent 或 :streamGenerateContent）"""
+        await self._rps_limiter.acquire()
+        self.request_count += 1
+
+        model_action = request.match_info["model_action"]
+        is_stream = "streamGenerateContent" in model_action
+
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        contents = data.get("contents", [])
+        include_thinking = self._should_include_thinking(data)
+
+        await asyncio.sleep(self._get_delay())
+
+        if self.config.error_rate > 0 and random.random() < self.config.error_rate:
+            return web.json_response(
+                {"error": {"code": 500, "message": "Mock error", "status": "INTERNAL"}},
+                status=500,
+            )
+
+        response_text = self._generate_response_text()
+        thinking_text = self._generate_thinking_text() if include_thinking else None
+        prompt_tokens = self._count_gemini_prompt_tokens(contents)
+        completion_tokens = self._estimate_tokens(response_text)
+        if thinking_text:
+            completion_tokens += self._estimate_tokens(thinking_text)
+
+        if is_stream:
+            return await self._gemini_stream_response(
+                request, response_text, thinking_text, prompt_tokens, completion_tokens
+            )
+
+        parts = []
+        if thinking_text:
+            parts.append({"text": thinking_text, "thought": True})
+        parts.append({"text": response_text})
+
+        return web.json_response(
+            {
+                "candidates": [
+                    {
+                        "content": {"parts": parts, "role": "model"},
+                        "finishReason": "STOP",
+                        "index": 0,
+                    }
+                ],
+                "usageMetadata": {
+                    "promptTokenCount": prompt_tokens,
+                    "candidatesTokenCount": completion_tokens,
+                    "totalTokenCount": prompt_tokens + completion_tokens,
+                },
+            }
+        )
+
+    # ── 通用路由和服务器生命周期 ──
 
     async def _handle_models(self, request: web.Request) -> web.Response:
         """处理 /v1/models 请求"""
@@ -358,8 +740,13 @@ class MockLLMServer:
     def _create_app(self) -> web.Application:
         """创建 aiohttp 应用"""
         app = web.Application()
+        # OpenAI
         app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
         app.router.add_get("/v1/models", self._handle_models)
+        # Claude（共享 /v1 前缀）
+        app.router.add_post("/v1/messages", self._handle_claude_messages)
+        # Gemini（model 名称中含冒号，用正则匹配）
+        app.router.add_route("POST", r"/models/{model_action:.+}", self._handle_gemini)
         return app
 
     async def start_async(self):

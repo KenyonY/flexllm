@@ -124,6 +124,38 @@ def parse_thoughts(response_data: dict) -> dict
 
 ---
 
+### ClaudeClient
+
+Anthropic Claude 客户端。
+
+```python
+from flexllm import ClaudeClient
+
+client = ClaudeClient(
+    api_key: str,
+    model: str = "claude-sonnet-4-20250514",
+    base_url: str = "https://api.anthropic.com/v1",
+    api_version: str = "2023-06-01",
+)
+```
+
+**thinking 参数：**
+- `False`: 禁用扩展思考
+- `True`: 启用扩展思考（budget_tokens=10000）
+- `int`: 启用并指定 budget_tokens
+- `None`: 使用模型默认行为
+
+**静态方法：**
+
+```python
+@staticmethod
+def parse_thoughts(response_data: dict) -> dict
+```
+
+解析思考内容，返回 `{"thought": str, "answer": str}`。
+
+---
+
 ### GeminiClient
 
 Google Gemini 客户端。
@@ -275,6 +307,65 @@ obj = parse_to_obj(text)
 
 # 提取代码字符串
 code = parse_to_code(text)
+```
+
+---
+
+## Mock 服务器
+
+用于测试和开发的轻量级 Mock LLM 服务器，支持 OpenAI / Claude / Gemini 三种 API 格式。
+
+### 基本用法
+
+```python
+from flexllm.mock import MockLLMServer, MockServerConfig
+
+config = MockServerConfig(
+    port=8001,              # 端口号
+    delay_min=0.1,          # 最小延迟（秒）
+    delay_max=0.1,          # 最大延迟
+    model="mock-model",     # 模型名称
+    response_min_len=10,    # 响应最小长度（字符）
+    response_max_len=1000,  # 响应最大长度
+    rps=0,                  # RPS 限制，0 不限制
+    token_rate=0,           # 流式 token 速率，0 不限制
+    error_rate=0,           # 错误率 (0-1)
+    thinking=False,         # 是否返回思考内容
+)
+
+# 上下文管理器方式（后台进程）
+with MockLLMServer(config) as server:
+    # OpenAI / Claude: server.url -> "http://localhost:8001/v1"
+    # Gemini: server.gemini_url -> "http://localhost:8001"
+    pass
+```
+
+### 支持的 API 端点
+
+| 格式 | 端点 | base_url |
+|------|------|----------|
+| OpenAI | `POST /v1/chat/completions` | `server.url` |
+| Claude | `POST /v1/messages` | `server.url` |
+| Gemini | `POST /models/{model}:generateContent` | `server.gemini_url` |
+| Gemini 流式 | `POST /models/{model}:streamGenerateContent` | `server.gemini_url` |
+
+### 思考内容触发方式
+
+通过 `MockServerConfig(thinking=True)` 全局启用，或通过请求参数动态触发：
+
+| 格式 | 请求参数 |
+|------|----------|
+| OpenAI | `"think": true` |
+| Claude | `"thinking": {"type": "enabled", "budget_tokens": 10000}` |
+| Gemini | `"generationConfig": {"thinkingConfig": {"includeThoughts": true}}` |
+
+### CLI
+
+```bash
+flexllm mock                          # 默认配置
+flexllm mock --thinking               # 启用思考内容
+flexllm mock -p 8080 -d 0.1-0.5      # 自定义端口和延迟
+flexllm mock --error-rate 0.3         # 30% 错误率
 ```
 
 ---

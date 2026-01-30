@@ -1265,11 +1265,12 @@ models:
         error_rate: Annotated[
             float, Option("--error-rate", help="请求失败率 (0-1)，0 表示不失败")
         ] = 0,
+        thinking: Annotated[bool, Option("--thinking", help="响应中包含思考/推理内容")] = False,
     ):
         """启动 Mock LLM 服务器
 
         提供一个轻量级的 Mock 服务器，用于测试和开发。
-        返回符合 OpenAI API 规范的响应，支持流式和非流式。
+        支持 OpenAI / Claude / Gemini 三种 API 格式，支持流式和非流式。
 
         Examples:
             flexllm mock                          # 默认配置，端口 8001
@@ -1280,17 +1281,25 @@ models:
             flexllm mock --rps 10                 # 每秒最多 10 个请求
             flexllm mock --token-rate 50          # 流式返回每秒 50 个 token
             flexllm mock --error-rate 0.5         # 50% 请求返回错误
+            flexllm mock --thinking               # 响应包含思考内容
+
+        API 端点:
+            OpenAI: POST /v1/chat/completions
+            Claude: POST /v1/messages
+            Gemini: POST /models/{model}:generateContent
 
         测试:
-            # 非流式
+            # OpenAI
             curl http://localhost:8001/v1/chat/completions \\
-              -H "Content-Type: application/json" \\
               -d '{"model": "mock", "messages": [{"role": "user", "content": "hello"}]}'
 
-            # 流式
-            curl http://localhost:8001/v1/chat/completions \\
-              -H "Content-Type: application/json" \\
-              -d '{"model": "mock", "messages": [{"role": "user", "content": "hello"}], "stream": true}'
+            # Claude
+            curl http://localhost:8001/v1/messages \\
+              -d '{"model": "mock", "max_tokens": 1024, "messages": [{"role": "user", "content": "hello"}]}'
+
+            # Gemini
+            curl http://localhost:8001/models/mock:generateContent \\
+              -d '{"contents": [{"parts": [{"text": "hello"}]}]}'
         """
         try:
             from .mock import MockLLMServer, MockServerConfig, parse_range
@@ -1311,6 +1320,7 @@ models:
             rps=rps,
             token_rate=token_rate,
             error_rate=error_rate,
+            thinking=thinking,
         )
 
         print(f"Mock LLM Server starting on port {port}")
@@ -1323,7 +1333,11 @@ models:
             print(f"  Token rate: {token_rate}/s (streaming)")
         if error_rate > 0:
             print(f"  Error rate: {error_rate * 100:.1f}%")
-        print(f"  URL: http://localhost:{port}/v1")
+        if thinking:
+            print("  Thinking: enabled")
+        print(f"  OpenAI: http://localhost:{port}/v1/chat/completions")
+        print(f"  Claude: http://localhost:{port}/v1/messages")
+        print(f"  Gemini: http://localhost:{port}/models/{{model}}:generateContent")
         print("\nPress Ctrl+C to stop")
 
         try:

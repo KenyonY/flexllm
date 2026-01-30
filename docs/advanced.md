@@ -411,6 +411,29 @@ print("思考过程:", parsed["thought"])
 print("最终答案:", parsed["answer"])
 ```
 
+### Claude
+
+```python
+from flexllm import ClaudeClient
+
+client = ClaudeClient(
+    api_key="your-key",
+    model="claude-sonnet-4-20250514",
+)
+
+# 启用扩展思考
+result = await client.chat_completions(
+    messages,
+    thinking=True,       # 或 thinking=15000 指定 budget_tokens
+    return_raw=True,
+)
+
+# 解析思考内容
+parsed = ClaudeClient.parse_thoughts(result.data)
+print("思考过程:", parsed["thought"])
+print("最终答案:", parsed["answer"])
+```
+
 ### Gemini
 
 ```python

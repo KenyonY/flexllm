@@ -45,7 +45,8 @@ print(result)
 ```
 LLMClient (推荐，统一入口)
     ├── OpenAIClient (OpenAI 兼容 API)
-    └── GeminiClient (Google Gemini)
+    ├── GeminiClient (Google Gemini)
+    └── ClaudeClient (Anthropic Claude)
 
 LLMClientPool (多 Endpoint 负载均衡)
     └── 内部管理多个 LLMClient
@@ -121,6 +122,7 @@ results = await client.chat_completions_batch(
 | Ollama | LLMClient/OpenAIClient | 本地部署 |
 | Gemini | LLMClient/GeminiClient | Google AI |
 | Vertex AI | GeminiClient | GCP 托管 |
+| Claude | LLMClient/ClaudeClient | Anthropic Claude |
 
 ## CLI 工具
 
@@ -145,6 +147,7 @@ flexllm --install-completion
 | `pricing` | 查询模型定价信息 |
 | `test` | 测试 LLM 服务连接 |
 | `init` | 初始化配置文件 |
+| `mock` | 启动 Mock LLM 服务器（测试用） |
 | `version` | 显示版本信息 |
 
 ### 快速示例
