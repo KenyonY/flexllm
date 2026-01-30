@@ -219,10 +219,15 @@ def convert_to_messages(
         input_text = record.get("input", "")
         used_fields.update(["instruction", "input", "output"])
 
+        system = record.get("system")
+        if system:
+            used_fields.add("system")
+            messages.append({"role": "system", "content": system})
+
         content = instruction
         if input_text:
             content = f"{instruction}\n\n{input_text}"
-        messages = [{"role": "user", "content": content}]
+        messages.append({"role": "user", "content": content})
 
     elif format_type == "simple":
         prompt_field = None
