@@ -777,3 +777,208 @@ class TestCombinedScenarios:
         with LLMClient(base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY") as client:
             result = client.chat_completions_sync([{"role": "user", "content": "Hello"}])
             assert result is not None
+
+
+# ============== 8. save_input 参数测试 ==============
+
+
+class TestSaveInput:
+    """save_input 参数端到端测试"""
+
+    @pytest.mark.asyncio
+    async def test_save_input_false(self, mock_llm_server):
+        """save_input=False：输出文件不包含 input 字段"""
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            output_path = f.name
+
+        try:
+            async with LLMClient(
+                base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY"
+            ) as client:
+                messages_list = create_messages(5)
+                results = await client.chat_completions_batch(
+                    messages_list,
+                    output_jsonl=output_path,
+                    show_progress=False,
+                    save_input=False,
+                )
+
+            assert len(results) == 5
+            assert all(r is not None for r in results)
+
+            # 验证文件内容不包含 input 字段
+            with open(output_path) as f:
+                for line in f:
+                    record = json.loads(line.strip())
+                    assert "index" in record
+                    assert "output" in record
+                    assert "status" in record
+                    assert "input" not in record
+        finally:
+            os.unlink(output_path)
+
+    @pytest.mark.asyncio
+    async def test_save_input_last(self, mock_llm_server):
+        """save_input='last'：仅保存最后一个 user message 的 content"""
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            output_path = f.name
+
+        try:
+            # 使用包含 system + user 的多轮消息
+            messages_list = [
+                [
+                    {"role": "system", "content": "You are a helper."},
+                    {"role": "user", "content": f"Question {i}"},
+                ]
+                for i in range(5)
+            ]
+
+            async with LLMClient(
+                base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY"
+            ) as client:
+                results = await client.chat_completions_batch(
+                    messages_list,
+                    output_jsonl=output_path,
+                    show_progress=False,
+                    save_input="last",
+                )
+
+            assert len(results) == 5
+
+            # 验证文件中 input 只包含最后一个 user message 的 content
+            with open(output_path) as f:
+                for line in f:
+                    record = json.loads(line.strip())
+                    idx = record["index"]
+                    assert record["input"] == f"Question {idx}"
+        finally:
+            os.unlink(output_path)
+
+    @pytest.mark.asyncio
+    async def test_save_input_true_default(self, mock_llm_server):
+        """save_input=True（默认）：保存完整 messages"""
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            output_path = f.name
+
+        try:
+            async with LLMClient(
+                base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY"
+            ) as client:
+                messages_list = create_messages(3)
+                results = await client.chat_completions_batch(
+                    messages_list,
+                    output_jsonl=output_path,
+                    show_progress=False,
+                )
+
+            # 验证默认行为：包含完整 input
+            with open(output_path) as f:
+                for line in f:
+                    record = json.loads(line.strip())
+                    assert "input" in record
+                    idx = record["index"]
+                    assert record["input"] == messages_list[idx]
+        finally:
+            os.unlink(output_path)
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_resume_save_input_false(self):
+        """save_input=False 的断点续传：无 input 校验，基于 index 恢复"""
+        configs = [
+            MockServerConfig(port=19301, delay_min=0.01, delay_max=0.01),
+        ]
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            output_path = f.name
+
+        try:
+            messages_list = create_messages(10)
+
+            # 手动写入前 5 条无 input 的记录
+            with open(output_path, "w") as f:
+                for i in range(5):
+                    record = {
+                        "index": i,
+                        "output": f"Partial result {i}",
+                        "status": "success",
+                    }
+                    f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+            with MockLLMServer(configs[0]) as server:
+                async with LLMClient(
+                    base_url=server.url, model="mock-model", api_key="EMPTY"
+                ) as client:
+                    results = await client.chat_completions_batch(
+                        messages_list,
+                        output_jsonl=output_path,
+                        show_progress=False,
+                        save_input=False,
+                    )
+
+            assert len(results) == 10
+            # 后 5 条应该是新处理的
+            for i in range(5, 10):
+                assert results[i] is not None
+
+            # 验证输出文件中没有 input 字段
+            with open(output_path) as f:
+                for line in f:
+                    record = json.loads(line.strip())
+                    assert "input" not in record
+        finally:
+            os.unlink(output_path)
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_resume_save_input_last(self):
+        """save_input='last' 的断点续传：使用 Pool 多 endpoint 以支持结果还原"""
+        configs = [
+            MockServerConfig(port=19302, delay_min=0.01, delay_max=0.01),
+            MockServerConfig(port=19303, delay_min=0.01, delay_max=0.01),
+        ]
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            output_path = f.name
+
+        try:
+            messages_list = create_messages(10)
+
+            with MockLLMServerGroup(configs) as group:
+                # 第一次：全部处理
+                async with LLMClientPool(
+                    endpoints=group.endpoints,
+                    concurrency_limit=5,
+                    fallback=True,
+                ) as pool:
+                    results1 = await pool.chat_completions_batch(
+                        messages_list,
+                        output_jsonl=output_path,
+                        show_progress=False,
+                        save_input="last",
+                    )
+                assert all(r is not None for r in results1)
+
+                # 验证文件中 input 是 last user content
+                with open(output_path) as f:
+                    for line in f:
+                        record = json.loads(line.strip())
+                        idx = record["index"]
+                        assert record["input"] == f"Test message {idx}"
+
+                # 第二次：从文件恢复（Pool 的 _batch_distributed 支持结果还原）
+                async with LLMClientPool(
+                    endpoints=group.endpoints,
+                    concurrency_limit=5,
+                    fallback=True,
+                ) as pool:
+                    results2, summary = await pool.chat_completions_batch(
+                        messages_list,
+                        output_jsonl=output_path,
+                        show_progress=False,
+                        return_summary=True,
+                        save_input="last",
+                    )
+
+            assert len(results2) == 10
+            assert all(r is not None for r in results2)
+            assert summary["success"] == 10
+            assert summary["failed"] == 0
+        finally:
+            os.unlink(output_path)

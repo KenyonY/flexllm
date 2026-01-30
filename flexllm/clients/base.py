@@ -28,6 +28,28 @@ if TYPE_CHECKING:
     from ..async_api.interface import RequestResult
 
 
+def _extract_save_input(messages: list[dict], save_input: bool | str):
+    """根据 save_input 参数提取要保存的 input 内容
+
+    Args:
+        messages: 原始 messages 列表
+        save_input: True=完整保存, "last"=仅保存最后一个 user message 的 content, False=不保存
+
+    Returns:
+        - save_input=True: 原始 messages
+        - save_input="last": 最后一个 user message 的 content (str)
+        - save_input=False: None
+    """
+    if save_input is True:
+        return messages
+    elif save_input == "last":
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                return msg.get("content", "")
+        return ""
+    return None
+
+
 @dataclass
 class ToolCall:
     """工具调用信息"""
@@ -324,6 +346,7 @@ class LLMClientBase(ABC):
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
         url: str = None,
+        save_input: bool | str = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -343,6 +366,10 @@ class LLMClientBase(ABC):
             flush_interval: 文件刷新间隔（秒），默认 1 秒
             metadata_list: 元数据列表，与 messages_list 等长，每个元素保存到对应输出记录
             url: 自定义请求 URL，默认使用 _get_url() 生成
+            save_input: 控制输出 JSONL 中 input 字段的保存策略
+                - True（默认）: 保存完整 messages，断点续传时做首尾 input 校验
+                - "last": 仅保存最后一个 user message 的 content
+                - False: 不保存 input 字段，断点续传仅基于 index 恢复
 
         Returns:
             - return_usage=True: List[ChatCompletionResult] 或 (List[ChatCompletionResult], summary)
@@ -350,7 +377,8 @@ class LLMClientBase(ABC):
             - 默认: List[str] 或 (List[str], summary)
 
         Note:
-            缓存由初始化时的 cache 参数控制
+            缓存由初始化时的 cache 参数控制。
+            切换 save_input 模式可能导致断点续传校验失败，这是预期行为。
 
         Raises:
             BudgetExceededError: 当超过预算硬限制时（由 cost_tracker 配置）
@@ -414,21 +442,25 @@ class LLMClientBase(ABC):
                     for line in f:
                         try:
                             record = json.loads(line.strip())
-                            if record.get("status") == "success" and "input" in record:
+                            if record.get("status") == "success":
                                 idx = record.get("index")
                                 if 0 <= idx < len(messages_list):
                                     records.append(record)
                         except (json.JSONDecodeError, KeyError, TypeError):
                             continue
 
-                # 首尾校验：只比较第一条和最后一条的 input
+                # 首尾校验：只在记录包含 input 字段时校验
                 file_valid = True
                 if records:
                     first, last = records[0], records[-1]
-                    if first["input"] != messages_list[first["index"]]:
-                        file_valid = False
-                    elif len(records) > 1 and last["input"] != messages_list[last["index"]]:
-                        file_valid = False
+                    if "input" in first:
+                        expected = _extract_save_input(messages_list[first["index"]], save_input)
+                        if expected is not None and first["input"] != expected:
+                            file_valid = False
+                    if file_valid and len(records) > 1 and "input" in last:
+                        expected = _extract_save_input(messages_list[last["index"]], save_input)
+                        if expected is not None and last["input"] != expected:
+                            file_valid = False
 
                 if file_valid:
                     completed_indices = {r["index"] for r in records}
@@ -469,8 +501,10 @@ class LLMClientBase(ABC):
                 "index": original_idx,
                 "output": content,
                 "status": status,
-                "input": messages_list[original_idx],
             }
+            input_value = _extract_save_input(messages_list[original_idx], save_input)
+            if input_value is not None:
+                record["input"] = input_value
             if metadata_list is not None:
                 record["metadata"] = metadata_list[original_idx]
             if usage is not None:
@@ -723,6 +757,7 @@ class LLMClientBase(ABC):
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
+        save_input: bool | str = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
@@ -739,6 +774,7 @@ class LLMClientBase(ABC):
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
+                save_input=save_input,
                 **kwargs,
             )
         )
@@ -756,6 +792,7 @@ class LLMClientBase(ABC):
         metadata_list: list[dict] | None = None,
         batch_size: int = None,
         url: str = None,
+        save_input: bool | str = True,
         **kwargs,
     ):
         """
@@ -776,6 +813,7 @@ class LLMClientBase(ABC):
             metadata_list: 元数据列表，与 messages_list 等长，每个元素保存到对应输出记录
             batch_size: 每批返回的数量（传递给底层请求器）
             url: 自定义请求 URL，默认使用 _get_url() 生成
+            save_input: 控制输出 JSONL 中 input 字段的保存策略（同 chat_completions_batch）
 
         Yields:
             result: 包含以下属性的结果对象
@@ -830,21 +868,25 @@ class LLMClientBase(ABC):
                     for line in f:
                         try:
                             record = json.loads(line.strip())
-                            if record.get("status") == "success" and "input" in record:
+                            if record.get("status") == "success":
                                 idx = record.get("index")
                                 if 0 <= idx < len(messages_list):
                                     records.append(record)
                         except (json.JSONDecodeError, KeyError, TypeError):
                             continue
 
-                # 首尾校验
+                # 首尾校验：只在记录包含 input 字段时校验
                 file_valid = True
                 if records:
                     first, last = records[0], records[-1]
-                    if first["input"] != messages_list[first["index"]]:
-                        file_valid = False
-                    elif len(records) > 1 and last["input"] != messages_list[last["index"]]:
-                        file_valid = False
+                    if "input" in first:
+                        expected = _extract_save_input(messages_list[first["index"]], save_input)
+                        if expected is not None and first["input"] != expected:
+                            file_valid = False
+                    if file_valid and len(records) > 1 and "input" in last:
+                        expected = _extract_save_input(messages_list[last["index"]], save_input)
+                        if expected is not None and last["input"] != expected:
+                            file_valid = False
 
                 if file_valid:
                     completed_indices = {r["index"] for r in records}
@@ -883,8 +925,10 @@ class LLMClientBase(ABC):
                 "index": original_idx,
                 "output": content,
                 "status": status,
-                "input": messages_list[original_idx],
             }
+            input_value = _extract_save_input(messages_list[original_idx], save_input)
+            if input_value is not None:
+                record["input"] = input_value
             if metadata_list is not None:
                 record["metadata"] = metadata_list[original_idx]
             if usage is not None:

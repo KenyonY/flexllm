@@ -40,7 +40,7 @@ from ..async_api.progress import ProgressBarConfig, ProgressTracker
 from ..cache import ResponseCacheConfig
 from ..pricing import get_model_pricing
 from ..utils.core import retry_callback
-from .base import ChatCompletionResult, LLMClientBase
+from .base import ChatCompletionResult, LLMClientBase, _extract_save_input
 from .claude import ClaudeClient
 from .gemini import GeminiClient
 from .openai import OpenAIClient
@@ -617,6 +617,7 @@ class LLMClientPool:
         flush_interval: float = 1.0,
         distribute: bool = True,
         metadata_list: list[dict] | None = None,
+        save_input: bool | str = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -654,6 +655,7 @@ class LLMClientPool:
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
+                save_input=save_input,
                 **kwargs,
             )
 
@@ -685,6 +687,7 @@ class LLMClientPool:
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
+                save_input=save_input,
                 **kwargs,
             )
         else:
@@ -700,6 +703,7 @@ class LLMClientPool:
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
+                save_input=save_input,
                 **kwargs,
             )
 
@@ -715,6 +719,7 @@ class LLMClientPool:
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
+        save_input: bool | str = True,
         **kwargs,
     ):
         """使用单个 endpoint + fallback 的批量调用"""
@@ -743,6 +748,7 @@ class LLMClientPool:
                     output_jsonl=output_jsonl,
                     flush_interval=flush_interval,
                     metadata_list=metadata_list,
+                    save_input=save_input,
                     **kwargs,
                 )
                 self._router.mark_success(provider)
@@ -770,6 +776,7 @@ class LLMClientPool:
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
+        save_input: bool | str = True,
         **kwargs,
     ):
         """
@@ -814,21 +821,25 @@ class LLMClientPool:
                     for line in f:
                         try:
                             record = json.loads(line.strip())
-                            if record.get("status") == "success" and "input" in record:
+                            if record.get("status") == "success":
                                 idx = record.get("index")
                                 if 0 <= idx < n:
                                     records.append(record)
                         except (json.JSONDecodeError, KeyError, TypeError):
                             continue
 
-                # 首尾校验
+                # 首尾校验：只在记录包含 input 字段时校验
                 file_valid = True
                 if records:
                     first, last = records[0], records[-1]
-                    if first["input"] != messages_list[first["index"]]:
-                        file_valid = False
-                    elif len(records) > 1 and last["input"] != messages_list[last["index"]]:
-                        file_valid = False
+                    if "input" in first:
+                        expected = _extract_save_input(messages_list[first["index"]], save_input)
+                        if expected is not None and first["input"] != expected:
+                            file_valid = False
+                    if file_valid and len(records) > 1 and "input" in last:
+                        expected = _extract_save_input(messages_list[last["index"]], save_input)
+                        if expected is not None and last["input"] != expected:
+                            file_valid = False
 
                 if file_valid:
                     for record in records:
@@ -986,8 +997,10 @@ class LLMClientPool:
                                     "output": None,
                                     "status": "error",
                                     "error": f"All {num_endpoints} endpoints failed",
-                                    "input": msg,
                                 }
+                                input_value = _extract_save_input(msg, save_input)
+                                if input_value is not None:
+                                    record["input"] = input_value
                                 if metadata_list is not None:
                                     record["metadata"] = metadata_list[idx]
                                 file_buffer.append(record)
@@ -1078,8 +1091,10 @@ class LLMClientPool:
                                 "index": idx,
                                 "output": output_content,
                                 "status": "success",
-                                "input": msg,
                             }
+                            input_value = _extract_save_input(msg, save_input)
+                            if input_value is not None:
+                                record["input"] = input_value
                             if metadata_list is not None:
                                 record["metadata"] = metadata_list[idx]
                             if output_usage:
@@ -1128,8 +1143,10 @@ class LLMClientPool:
                                     "output": None,
                                     "status": "error",
                                     "error": str(e),
-                                    "input": msg,
                                 }
+                                input_value = _extract_save_input(msg, save_input)
+                                if input_value is not None:
+                                    record["input"] = input_value
                                 if metadata_list is not None:
                                     record["metadata"] = metadata_list[idx]
                                 file_buffer.append(record)
@@ -1187,6 +1204,7 @@ class LLMClientPool:
         flush_interval: float = 1.0,
         distribute: bool = True,
         metadata_list: list[dict] | None = None,
+        save_input: bool | str = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
@@ -1202,6 +1220,7 @@ class LLMClientPool:
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
+                save_input=save_input,
                 **kwargs,
             )
 
@@ -1219,6 +1238,7 @@ class LLMClientPool:
                 flush_interval=flush_interval,
                 distribute=distribute,
                 metadata_list=metadata_list,
+                save_input=save_input,
                 **kwargs,
             )
         )
@@ -1308,6 +1328,7 @@ class LLMClientPool:
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
         batch_size: int = None,
+        save_input: bool | str = True,
         **kwargs,
     ):
         """
@@ -1324,6 +1345,7 @@ class LLMClientPool:
             flush_interval: 文件刷新间隔（秒）
             metadata_list: 元数据列表
             batch_size: 每批返回的数量
+            save_input: 控制输出 JSONL 中 input 字段的保存策略（同 chat_completions_batch）
             **kwargs: 其他参数
 
         Yields:
@@ -1342,6 +1364,7 @@ class LLMClientPool:
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
                 batch_size=batch_size,
+                save_input=save_input,
                 **kwargs,
             ):
                 yield result
