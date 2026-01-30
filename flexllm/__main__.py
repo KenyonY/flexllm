@@ -185,12 +185,19 @@ def get_config() -> FlexLLMConfig:
 
 
 def detect_input_format(record: dict) -> tuple[str, list[str]]:
-    """检测输入记录的格式类型"""
+    """检测输入记录的格式类型
+
+    支持的格式及优先级:
+    1. openai_chat: 包含 "messages" 字段
+    2. alpaca: 包含 "instruction" 字段（可选 "input"）
+    3. simple: 包含 q/question/prompt/input/user 之一（可选 "system"）
+       注意: "input" 仅在没有 "instruction" 时作为 simple 格式的 user content
+    """
     if "messages" in record:
         return "openai_chat", ["messages"]
     if "instruction" in record:
         return "alpaca", ["instruction", "input"]
-    for field in ["q", "question", "prompt"]:
+    for field in ["q", "question", "prompt", "input", "user"]:
         if field in record:
             return "simple", [field, "system"]
     return "unknown", []
@@ -219,7 +226,7 @@ def convert_to_messages(
 
     elif format_type == "simple":
         prompt_field = None
-        for field in ["q", "question", "prompt"]:
+        for field in ["q", "question", "prompt", "input", "user"]:
             if field in record:
                 prompt_field = field
                 break
@@ -269,7 +276,7 @@ def parse_batch_input(input_path: str = None) -> tuple[list[dict], str, list[str
             f"无法识别输入格式，未找到以下字段之一：\n"
             f"  - messages (openai_chat 格式)\n"
             f"  - instruction (alpaca 格式)\n"
-            f"  - q/question/prompt (simple 格式)\n\n"
+            f"  - q/question/prompt/input/user (simple 格式)\n\n"
             f"发现的字段: {available_fields}\n"
             f"提示: 使用 dtflow 转换格式: dt transform data.jsonl --preset=openai_chat"
         )
