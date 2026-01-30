@@ -440,6 +440,10 @@ if HAS_TYPER:
                 help="输出文件中 input 字段的保存策略: true(默认,完整保存), last(仅最后user内容), false(不保存)",
             ),
         ] = None,
+        limit: Annotated[
+            int | None,
+            Option("-n", "--limit", help="只处理前 N 条记录（用于快速试跑）"),
+        ] = None,
         user_field: Annotated[
             str | None,
             Option("--user-field", "-uf", help="指定 user content 的字段名（跳过自动格式检测）"),
@@ -556,6 +560,8 @@ if HAS_TYPER:
                     raise typer.Exit(1)
             else:
                 records, format_type, message_fields = parse_batch_input(input)
+            if limit is not None:
+                records = records[:limit]
             print(f"输入格式: {format_type}", file=sys.stderr)
             print(f"记录数: {len(records)}", file=sys.stderr)
 
