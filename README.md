@@ -290,6 +290,8 @@ flexllm chat
 
 # Batch processing with cost tracking
 flexllm batch input.jsonl -o output.jsonl --track-cost
+flexllm batch input.jsonl -o output.jsonl -n 5           # First 5 records only
+flexllm batch data.jsonl -o out.jsonl -uf text -sf sys   # Custom field names
 
 # Model management
 flexllm list              # Configured models
