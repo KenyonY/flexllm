@@ -310,6 +310,8 @@ flexllm mock              # Start mock LLM server for testing
 
 Config file location: `~/.flexllm/config.yaml`
 
+See [config.example.yaml](config.example.yaml) for a comprehensive configuration example with all available options, or [config.quickstart.yaml](config.quickstart.yaml) for a minimal quick-start template.
+
 ```yaml
 # Default model
 default: "gpt-4"

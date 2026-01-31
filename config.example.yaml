@@ -1,0 +1,199 @@
+# flexllm 配置文件示例
+#
+# 配置文件搜索路径（按优先级）:
+#   1. 当前目录: ./flexllm_config.yaml
+#   2. 用户目录: ~/.flexllm/config.yaml
+#
+# 环境变量（优先级最高）:
+#   - FLEXLLM_BASE_URL / OPENAI_BASE_URL
+#   - FLEXLLM_API_KEY / OPENAI_API_KEY
+#   - FLEXLLM_MODEL / OPENAI_MODEL
+
+# ========== 全局配置 ==========
+
+# 默认模型（使用模型的 name 或 id）
+default: "gpt-4o-mini"
+
+# 全局系统提示词（应用于所有命令，除非被覆盖）
+# 优先级: CLI 参数 > batch 配置 > 模型配置 > 全局配置
+system: "You are a helpful assistant."
+
+# 全局 user content 模板（使用 {content} 作为占位符）
+# 适用于需要特定提示词格式的微调模型
+# 优先级: CLI 参数 > batch 配置 > 模型配置 > 全局配置
+# user_template: "{content}"
+
+# ========== 模型配置 ==========
+
+models:
+  # OpenAI GPT-4
+  - id: gpt-4o-mini
+    name: gpt-4o-mini
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key: sk-your-openai-api-key
+    # system: "You are GPT-4, a large language model trained by OpenAI."
+    # user_template: "{content}"
+
+  # OpenAI GPT-4o
+  - id: gpt-4o
+    name: gpt-4o
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key: sk-your-openai-api-key
+
+  # Claude via Anthropic API
+  - id: claude-3-5-sonnet-20241022
+    name: claude-sonnet
+    provider: claude
+    base_url: https://api.anthropic.com
+    api_key: sk-ant-your-anthropic-api-key
+
+  # Gemini via Google AI
+  - id: gemini-2.0-flash-exp
+    name: gemini-flash
+    provider: gemini
+    base_url: https://generativelanguage.googleapis.com
+    api_key: your-gemini-api-key
+
+  # DeepSeek
+  - id: deepseek-chat
+    name: deepseek
+    provider: openai
+    base_url: https://api.deepseek.com
+    api_key: your-deepseek-api-key
+
+  # 本地 Ollama 服务
+  - id: qwen2.5:32b
+    name: local-qwen
+    provider: openai
+    base_url: http://localhost:11434/v1
+    api_key: EMPTY  # 本地服务通常不需要 API key
+
+  # 本地 vLLM 服务
+  - id: Qwen/Qwen2.5-32B-Instruct
+    name: vllm-qwen
+    provider: openai
+    base_url: http://localhost:8000/v1
+    api_key: EMPTY
+
+  # 微调模型示例（带特殊提示词格式）
+  - id: my-finetuned-model
+    name: finetuned
+    provider: openai
+    base_url: http://gpu-server:8000/v1
+    api_key: EMPTY
+    system: "You are a specialized assistant trained on custom data."
+    user_template: "{content}/detail"  # 微调模型的特殊标识符
+
+  # SiliconFlow API（多种开源模型）
+  - id: Qwen/Qwen2.5-72B-Instruct
+    name: siliconflow-qwen
+    provider: openai
+    base_url: https://api.siliconflow.cn/v1
+    api_key: your-siliconflow-api-key
+
+  # OpenRouter（聚合多家 LLM）
+  - id: anthropic/claude-3.5-sonnet
+    name: openrouter-claude
+    provider: openai
+    base_url: https://openrouter.ai/api/v1
+    api_key: sk-or-your-openrouter-api-key
+
+# ========== Batch 命令配置 ==========
+# CLI 参数优先级高于此配置
+
+batch:
+  # --- 网络配置 ---
+  concurrency: 10           # 并发请求数
+  max_qps: 100              # 每秒最大请求数（null 表示不限制）
+  timeout: 120              # 请求超时时间（秒）
+  retry_times: 3            # 失败重试次数
+  retry_delay: 1.0          # 重试延迟（秒）
+
+  # --- 缓存配置 ---
+  cache: false              # 是否启用响应缓存
+  cache_ttl: 86400          # 缓存过期时间（秒），默认 24 小时
+
+  # --- 采样参数 ---
+  # 这些参数会传递给 API，覆盖模型默认值
+  # top_p: 0.9              # 核采样参数
+  # top_k: 50               # Top-K 采样参数
+  # temperature: 0.7        # 采样温度（也可以通过 CLI 参数指定）
+
+  # --- 思考模式 ---
+  # 适用于支持思考模式的模型（如 DeepSeek-R1, Qwen3-Thinking, Claude extended thinking）
+  # thinking: true          # 启用思考模式
+  # thinking: "medium"      # 或指定思考级别: "minimal", "low", "medium", "high"
+
+  # --- 提示词配置 ---
+  # batch 级别的 system prompt 和 user_template 优先级高于模型级别和全局配置
+  # system: "You are a batch processing assistant."
+  # user_template: "[INST]{content}[/INST]"  # 例如 Llama/Mistral 格式
+
+  # --- 处理配置 ---
+  preprocess_msg: false     # 是否预处理图片消息（将图片 URL 转换为 base64）
+  flush_interval: 1.0       # 输出文件刷新间隔（秒）
+
+  # --- 输出配置 ---
+  return_usage: false       # 是否在输出中包含 token 统计信息
+  track_cost: true          # 是否在进度条中显示实时成本
+
+  # --- 多 Endpoint 配置（高级功能）---
+  # 配置后 batch 命令自动使用 LLMClientPool 进行负载均衡
+  # 动态负载均衡：共享任务队列，快的 endpoint 自动处理更多任务
+  # endpoints:
+  #   - base_url: http://gpu1:8000/v1
+  #     api_key: EMPTY
+  #     model: Qwen/Qwen2.5-32B-Instruct
+  #     concurrency_limit: 50   # endpoint 级别并发限制（可选）
+  #     max_qps: 500            # endpoint 级别 QPS 限制（可选）
+  #
+  #   - base_url: http://gpu2:8000/v1
+  #     api_key: EMPTY
+  #     model: Qwen/Qwen2.5-32B-Instruct
+  #     concurrency_limit: 20   # 较慢的服务使用更低的并发
+  #     max_qps: 200
+  #
+  #   - base_url: http://gpu3:8000/v1
+  #     api_key: EMPTY
+  #     model: Qwen/Qwen2.5-32B-Instruct
+  #     # 不设置 concurrency_limit 和 max_qps 则使用全局默认值
+  #
+  # fallback: true          # 是否启用自动故障转移（endpoint 失败时切换到其他 endpoint）
+
+# ========== 使用示例 ==========
+#
+# 1. 快速问答
+#    flexllm ask "什么是 Python?"
+#    flexllm ask "解释代码" -s "你是代码专家"
+#    echo "长文本" | flexllm ask "总结一下"
+#
+# 2. 交互式对话
+#    flexllm chat
+#    flexllm chat -m claude-sonnet
+#
+# 3. 批量处理
+#    flexllm batch input.jsonl                           # 自动生成输出文件
+#    flexllm batch input.jsonl -o output.jsonl           # 指定输出文件
+#    flexllm batch input.jsonl -m gpt-4o -c 20           # 指定模型和并发数
+#    flexllm batch input.jsonl --cache --track-cost      # 启用缓存和成本追踪
+#    flexllm batch input.jsonl -n 5                      # 只处理前 5 条记录（测试）
+#    flexllm batch data.jsonl -uf text -sf sys_prompt    # 自定义字段名
+#
+# 4. 模型管理
+#    flexllm list              # 列出已配置的模型
+#    flexllm models            # 列出远程服务器可用模型
+#    flexllm set-model gpt-4o  # 设置默认模型
+#    flexllm test              # 测试连接
+#
+# 5. 工具命令
+#    flexllm pricing gpt-4o    # 查询模型定价
+#    flexllm credits           # 查询 API key 余额
+#    flexllm mock -p 8001      # 启动 Mock LLM 服务器
+#
+# 6. 临时使用未配置的服务（环境变量）
+#    FLEXLLM_BASE_URL="http://localhost:8000/v1" \
+#    FLEXLLM_MODEL="qwen" \
+#    FLEXLLM_API_KEY="EMPTY" \
+#    flexllm ask "你好"

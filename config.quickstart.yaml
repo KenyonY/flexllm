@@ -1,0 +1,27 @@
+# flexllm 快速开始配置
+# 将此文件复制到 ~/.flexllm/config.yaml 开始使用
+
+# 默认模型
+default: "gpt-4o-mini"
+
+# 模型列表（至少配置一个）
+models:
+  # OpenAI API
+  - id: gpt-4o-mini
+    name: gpt-4o-mini
+    provider: openai
+    base_url: https://api.openai.com/v1
+    api_key: sk-your-api-key-here
+
+  # 本地 Ollama（安装 Ollama 后可用）
+  - id: qwen2.5:7b
+    name: local-ollama
+    provider: openai
+    base_url: http://localhost:11434/v1
+    api_key: EMPTY
+
+# Batch 处理配置（可选）
+batch:
+  concurrency: 10       # 并发数
+  cache: true           # 启用缓存
+  track_cost: true      # 显示成本
