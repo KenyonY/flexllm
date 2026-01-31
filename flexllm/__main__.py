@@ -447,7 +447,7 @@ if HAS_TYPER:
     @app.command()
     def batch(
         input: Annotated[str | None, Argument(help="输入文件路径（省略则从 stdin 读取）")] = None,
-        output: Annotated[str | None, Option("-o", "--output", help="输出文件路径（必需）")] = None,
+        output: Annotated[str | None, Option("-o", "--output", help="输出文件路径（可选，默认自动生成）")] = None,
         model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
         concurrency: Annotated[int | None, Option("-c", "--concurrency", help="并发数")] = None,
         max_qps: Annotated[float | None, Option("--max-qps", help="每秒最大请求数")] = None,
@@ -490,23 +490,34 @@ if HAS_TYPER:
         CLI 参数优先级高于配置文件。
 
         Examples:
-            flexllm batch input.jsonl -o output.jsonl
-            flexllm batch input.jsonl -o output.jsonl -c 20 -m gpt-4
-            flexllm batch input.jsonl -o output.jsonl --cache --return-usage
+            flexllm batch input.jsonl                  # 自动生成 input.output.jsonl
+            flexllm batch input.jsonl -o output.jsonl  # 指定输出文件
+            flexllm batch input.jsonl -c 20 -m gpt-4   # 自动输出 + 自定义参数
+            flexllm batch input.jsonl --cache --return-usage
             flexllm batch data.jsonl -o out.jsonl --user-field text --system-field sys_prompt
-            cat input.jsonl | flexllm batch -o output.jsonl
+            cat input.jsonl | flexllm batch -o output.jsonl  # stdin 需指定 -o
         """
-        if not output:
-            print("错误: 必须指定输出文件 (-o output.jsonl)", file=sys.stderr)
-            raise typer.Exit(1)
-
-        if not output.endswith(".jsonl"):
-            print(f"错误: 输出文件必须使用 .jsonl 扩展名，当前: {output}", file=sys.stderr)
-            raise typer.Exit(1)
-
         has_stdin = not sys.stdin.isatty()
         if not input and not has_stdin:
             print("错误: 请提供输入文件或通过管道传入数据", file=sys.stderr)
+            raise typer.Exit(1)
+
+        # 自动生成输出文件名
+        auto_generated_output = False
+        if not output:
+            if not input:
+                # 从 stdin 读取时必须指定输出文件
+                print("错误: 从 stdin 读取数据时必须指定输出文件 (-o output.jsonl)", file=sys.stderr)
+                raise typer.Exit(1)
+
+            # 根据输入文件名自动生成输出文件名
+            input_path = Path(input)
+            stem = input_path.stem  # 文件名（不含扩展名）
+            output = str(input_path.parent / f"{stem}.output.jsonl")
+            auto_generated_output = True
+
+        if not output.endswith(".jsonl"):
+            print(f"错误: 输出文件必须使用 .jsonl 扩展名，当前: {output}", file=sys.stderr)
             raise typer.Exit(1)
 
         config = get_config()
@@ -595,6 +606,10 @@ if HAS_TYPER:
                 records = records[:limit]
             print(f"输入格式: {format_type}", file=sys.stderr)
             print(f"记录数: {len(records)}", file=sys.stderr)
+            if auto_generated_output:
+                print(f"输出文件: {output} (自动生成)", file=sys.stderr)
+            else:
+                print(f"输出文件: {output}", file=sys.stderr)
 
             # 显示使用的客户端类型
             if use_pool:
