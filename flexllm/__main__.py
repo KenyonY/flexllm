@@ -144,6 +144,27 @@ class FlexLLMConfig:
         # 3. 全局配置
         return self.config.get("system")
 
+    def get_user_template(self, model_name_or_id: str = None) -> str | None:
+        """
+        获取 user content 模板配置
+
+        优先级: batch 配置 > 模型配置 > 全局配置
+        模板中使用 {content} 作为占位符，例如: "{content}/detail"
+        """
+        # 1. batch 配置
+        batch_config = self.config.get("batch", {})
+        if "user_template" in batch_config:
+            return batch_config["user_template"]
+
+        # 2. 模型级别配置
+        if model_name_or_id:
+            model_config = self.get_model_config(model_name_or_id)
+            if model_config and "user_template" in model_config:
+                return model_config["user_template"]
+
+        # 3. 全局配置
+        return self.config.get("user_template")
+
     def get_batch_config(self) -> dict:
         """
         获取 batch 命令的配置
@@ -201,6 +222,21 @@ def get_config() -> FlexLLMConfig:
     return _config
 
 
+def apply_user_template(content: str, template: str | None) -> str:
+    """应用 user content 模板
+
+    Args:
+        content: 原始 user content
+        template: 模板字符串，使用 {content} 作为占位符
+
+    Returns:
+        应用模板后的内容，如果没有模板则返回原内容
+    """
+    if not template:
+        return content
+    return template.format(content=content)
+
+
 # ========== 输入格式处理 ==========
 
 
@@ -224,7 +260,7 @@ def detect_input_format(record: dict) -> tuple[str, list[str]]:
 
 
 def convert_to_messages(
-    record: dict, format_type: str, message_fields: list[str], global_system: str = None
+    record: dict, format_type: str, message_fields: list[str], global_system: str = None, user_template: str = None
 ) -> tuple[list[dict], dict]:
     """将输入记录转换为 messages 格式"""
     messages = []
@@ -233,6 +269,14 @@ def convert_to_messages(
     if format_type == "openai_chat":
         messages = record["messages"]
         used_fields.add("messages")
+        # 对于 openai_chat 格式，应用 user_template 到所有 user role 消息
+        if user_template:
+            messages = [
+                {**msg, "content": apply_user_template(msg["content"], user_template)}
+                if msg.get("role") == "user" and isinstance(msg.get("content"), str)
+                else msg
+                for msg in messages
+            ]
 
     elif format_type == "alpaca":
         instruction = record.get("instruction", "")
@@ -247,6 +291,8 @@ def convert_to_messages(
         content = instruction
         if input_text:
             content = f"{instruction}\n\n{input_text}"
+        # 应用 user_template
+        content = apply_user_template(content, user_template)
         messages.append({"role": "user", "content": content})
 
     elif format_type == "simple":
@@ -264,7 +310,9 @@ def convert_to_messages(
 
             if system:
                 messages.append({"role": "system", "content": system})
-            messages.append({"role": "user", "content": record[prompt_field]})
+            # 应用 user_template
+            user_content = apply_user_template(record[prompt_field], user_template)
+            messages.append({"role": "user", "content": user_content})
 
     elif format_type == "custom":
         # message_fields = [user_field, system_field]（由 --user-field/--system-field 指定）
@@ -278,7 +326,9 @@ def convert_to_messages(
 
         if system:
             messages.append({"role": "system", "content": system})
-        messages.append({"role": "user", "content": record[user_field]})
+        # 应用 user_template
+        user_content = apply_user_template(record[user_field], user_template)
+        messages.append({"role": "user", "content": user_content})
 
     if global_system and format_type != "openai_chat":
         messages = [m for m in messages if m.get("role") != "system"]
@@ -332,6 +382,9 @@ if HAS_TYPER:
         prompt: Annotated[str | None, Argument(help="用户问题")] = None,
         system: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
         model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        user_template: Annotated[
+            str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
+        ] = None,
     ):
         """LLM 快速问答（支持管道输入）
 
@@ -374,6 +427,10 @@ if HAS_TYPER:
         if not system:
             system = config.get_system(model)
 
+        # 获取 user_template：命令行参数 > 配置文件
+        if not user_template:
+            user_template = config.get_user_template(model)
+
         async def _ask():
             from flexllm import LLMClient
 
@@ -381,7 +438,9 @@ if HAS_TYPER:
                 messages = []
                 if system:
                     messages.append({"role": "system", "content": system})
-                messages.append({"role": "user", "content": full_prompt})
+                # 应用 user_template
+                user_content = apply_user_template(full_prompt, user_template)
+                messages.append({"role": "user", "content": user_content})
                 return await client.chat_completions(messages)
 
         try:
@@ -410,6 +469,9 @@ if HAS_TYPER:
         temperature: Annotated[float, Option("-t", "--temperature", help="采样温度")] = 0.7,
         max_tokens: Annotated[int, Option("--max-tokens", help="最大生成 token 数")] = 4096,
         no_stream: Annotated[bool, Option("--no-stream", help="禁用流式输出")] = False,
+        user_template: Annotated[
+            str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
+        ] = None,
     ):
         """交互式对话
 
@@ -433,15 +495,19 @@ if HAS_TYPER:
         if not system_prompt:
             system_prompt = config.get_system(model)
 
+        # 获取 user_template：命令行参数 > 配置文件
+        if not user_template:
+            user_template = config.get_user_template(model)
+
         stream = not no_stream
 
         if message:
             _single_chat(
-                message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream
+                message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template
             )
         else:
             _interactive_chat(
-                model, base_url, api_key, system_prompt, temperature, max_tokens, stream
+                model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template
             )
 
     @app.command()
@@ -479,6 +545,10 @@ if HAS_TYPER:
         system_field: Annotated[
             str | None,
             Option("--system-field", "-sf", help="指定 system prompt 的字段名（跳过自动格式检测）"),
+        ] = None,
+        user_template: Annotated[
+            str | None,
+            Option("--user-template", help="user content 模板 (使用 {content} 占位符)"),
         ] = None,
     ):
         """批量处理 JSONL 文件（支持断点续传）
@@ -569,6 +639,9 @@ if HAS_TYPER:
         # 系统提示词：CLI 参数 > 配置文件
         effective_system = system if system is not None else config.get_system(model)
 
+        # user_template：CLI 参数 > 配置文件
+        effective_user_template = user_template if user_template is not None else config.get_user_template(model)
+
         # 解析 save_input: CLI 字符串 -> bool | str
         effective_save_input: bool | str = True
         if save_input is not None:
@@ -625,7 +698,7 @@ if HAS_TYPER:
 
             for record in records:
                 messages, metadata = convert_to_messages(
-                    record, format_type, message_fields, effective_system
+                    record, format_type, message_fields, effective_system, effective_user_template
                 )
                 messages_list.append(messages)
                 metadata_list.append(metadata if metadata else None)
@@ -1013,6 +1086,13 @@ if HAS_TYPER:
 # 默认模型
 default: "gpt-4"
 
+# 全局系统提示词（应用于所有命令，除非被覆盖）
+# system: "You are a helpful assistant."
+
+# 全局 user content 模板（使用 {content} 作为占位符）
+# 适用于需要特定提示词格式的微调模型
+# user_template: "{content}/detail"
+
 # 模型列表
 models:
   - id: gpt-4
@@ -1020,6 +1100,8 @@ models:
     provider: openai
     base_url: https://api.openai.com/v1
     api_key: your-api-key
+    # system: "You are a GPT-4 assistant."  # 模型级别 system prompt（可选）
+    # user_template: "{content}"             # 模型级别 user template（可选）
 
   - id: local-ollama
     name: local-ollama
@@ -1047,6 +1129,10 @@ models:
 #
 #   # 思考模式（适用于支持的模型如 DeepSeek-R1）
 #   # thinking: true          # 或 "minimal"/"low"/"medium"/"high"
+#
+#   # 提示词配置
+#   # system: "You are a batch processing assistant."  # batch 级别 system prompt
+#   # user_template: "[INST]{content}[/INST]"          # batch 级别 user template
 #
 #   # 处理配置
 #   preprocess_msg: false     # 是否预处理图片消息（URL 转 base64）
@@ -1589,7 +1675,7 @@ def _query_credits(base_url: str, api_key: str) -> dict | None:
         return {"error": f"解析失败: {e}"}
 
 
-def _single_chat(message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream):
+def _single_chat(message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template=None):
     """单次对话"""
 
     async def _run():
@@ -1599,7 +1685,9 @@ def _single_chat(message, model, base_url, api_key, system_prompt, temperature, 
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
-            messages.append({"role": "user", "content": message})
+            # 应用 user_template
+            user_content = apply_user_template(message, user_template)
+            messages.append({"role": "user", "content": user_content})
 
             if stream:
                 print("Assistant: ", end="", flush=True)
@@ -1622,7 +1710,7 @@ def _single_chat(message, model, base_url, api_key, system_prompt, temperature, 
         print(f"错误: {e}", file=sys.stderr)
 
 
-def _interactive_chat(model, base_url, api_key, system_prompt, temperature, max_tokens, stream):
+def _interactive_chat(model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template=None):
     """多轮交互对话"""
 
     async def _run():
@@ -1650,7 +1738,9 @@ def _interactive_chat(model, base_url, api_key, system_prompt, temperature, max_
                     if not user_input:
                         continue
 
-                    messages.append({"role": "user", "content": user_input})
+                    # 应用 user_template
+                    user_content = apply_user_template(user_input, user_template)
+                    messages.append({"role": "user", "content": user_content})
 
                     if stream:
                         print("Assistant: ", end="", flush=True)
