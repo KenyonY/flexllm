@@ -49,7 +49,7 @@ class FlexLLMConfig:
 
     def _load_config(self) -> dict:
         """加载配置文件"""
-        default_config = {"default": None, "models": []}
+        default_config = {"default": None, "models": [], "system": None}
 
         for config_path in self._get_config_paths():
             if config_path.exists():
@@ -123,6 +123,26 @@ class FlexLLMConfig:
             if path.exists():
                 return path
         return None
+
+    def get_system(self, model_name_or_id: str = None) -> str | None:
+        """
+        获取系统提示词配置
+
+        优先级: batch 配置 > 模型配置 > 全局配置
+        """
+        # 1. batch 配置
+        batch_config = self.config.get("batch", {})
+        if "system" in batch_config:
+            return batch_config["system"]
+
+        # 2. 模型级别配置
+        if model_name_or_id:
+            model_config = self.get_model_config(model_name_or_id)
+            if model_config and "system" in model_config:
+                return model_config["system"]
+
+        # 3. 全局配置
+        return self.config.get("system")
 
     def get_batch_config(self) -> dict:
         """
@@ -350,6 +370,10 @@ if HAS_TYPER:
         base_url = model_config.get("base_url")
         api_key = model_config.get("api_key", "EMPTY")
 
+        # 获取系统提示词：命令行参数 > 配置文件
+        if not system:
+            system = config.get_system(model)
+
         async def _ask():
             from flexllm import LLMClient
 
@@ -404,6 +428,10 @@ if HAS_TYPER:
         if not base_url:
             print("错误: 未配置 base_url", file=sys.stderr)
             raise typer.Exit(1)
+
+        # 获取系统提示词：命令行参数 > 配置文件
+        if not system_prompt:
+            system_prompt = config.get_system(model)
 
         stream = not no_stream
 
@@ -527,6 +555,9 @@ if HAS_TYPER:
         )
         effective_max_qps = max_qps if max_qps is not None else batch_config["max_qps"]
 
+        # 系统提示词：CLI 参数 > 配置文件
+        effective_system = system if system is not None else config.get_system(model)
+
         # 解析 save_input: CLI 字符串 -> bool | str
         effective_save_input: bool | str = True
         if save_input is not None:
@@ -579,7 +610,7 @@ if HAS_TYPER:
 
             for record in records:
                 messages, metadata = convert_to_messages(
-                    record, format_type, message_fields, system
+                    record, format_type, message_fields, effective_system
                 )
                 messages_list.append(messages)
                 metadata_list.append(metadata if metadata else None)
