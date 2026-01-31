@@ -338,8 +338,8 @@ def convert_to_messages(
     return messages, metadata
 
 
-def parse_batch_input(input_path: str = None) -> tuple[list[dict], str, list[str]]:
-    """解析批量输入文件或 stdin"""
+def load_jsonl_records(input_path: str = None) -> list[dict]:
+    """从 JSONL 文件或 stdin 加载记录"""
     records = []
 
     if input_path:
@@ -356,6 +356,22 @@ def parse_batch_input(input_path: str = None) -> tuple[list[dict], str, list[str
 
     if not records:
         raise ValueError("输入为空")
+
+    return records
+
+
+def parse_batch_input(input_path: str = None, skip_format_detection: bool = False) -> tuple[list[dict], str, list[str]]:
+    """解析批量输入文件或 stdin
+
+    Args:
+        input_path: 输入文件路径，None 表示从 stdin 读取
+        skip_format_detection: 是否跳过格式检测（使用 --user-field 时应跳过）
+    """
+    records = load_jsonl_records(input_path)
+
+    if skip_format_detection:
+        # 跳过格式检测，返回空的 format_type 和 message_fields
+        return records, "", []
 
     format_type, message_fields = detect_input_format(records[0])
 
@@ -662,7 +678,7 @@ if HAS_TYPER:
         try:
             if user_field:
                 # 指定了 --user-field，跳过自动格式检测
-                records, _, _ = parse_batch_input(input)
+                records, _, _ = parse_batch_input(input, skip_format_detection=True)
                 format_type = "custom"
                 message_fields = [user_field, system_field]
                 # 校验首条记录是否包含指定字段
