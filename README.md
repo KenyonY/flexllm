@@ -314,6 +314,9 @@ Config file location: `~/.flexllm/config.yaml`
 # Default model
 default: "gpt-4"
 
+# Global system prompt (applied to all commands unless overridden)
+system: "You are a helpful assistant."
+
 # Model list
 models:
   - id: gpt-4
@@ -321,6 +324,7 @@ models:
     provider: openai
     base_url: https://api.openai.com/v1
     api_key: your-api-key
+    system: "You are a GPT-4 assistant."  # Model-specific system prompt (optional)
 
   - id: local-ollama
     name: local-ollama
@@ -333,7 +337,14 @@ batch:
   concurrency: 20
   cache: true
   track_cost: true
+  system: "You are a batch processing assistant."  # Batch-specific system prompt (optional)
 ```
+
+**System prompt priority** (higher priority overrides lower):
+1. CLI argument (`-s/--system`)
+2. Batch config (`batch.system`)
+3. Model config (`models[].system`)
+4. Global config (`system`)
 
 Environment variables (higher priority than config file):
 
