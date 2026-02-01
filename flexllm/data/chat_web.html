@@ -98,6 +98,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 /* Cursor blink */
 .cursor { display: inline-block; width: 2px; height: 1em; background: var(--text); animation: blink 1s step-end infinite; vertical-align: text-bottom; margin-left: 2px; }
 @keyframes blink { 50% { opacity: 0; } }
+
+/* Message actions (retry) */
+.msg-actions { max-width: 800px; margin: -8px auto 0; padding-left: 44px; display: flex; gap: 8px; }
+.msg-action-btn { background: none; border: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; cursor: pointer; padding: 3px 10px; border-radius: 6px; display: flex; align-items: center; gap: 4px; transition: all .15s; }
+.msg-action-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Context send button */
+.btn-ctx { background: none; border: 1px solid var(--accent); color: var(--accent); border-radius: 10px; height: 44px; padding: 0 14px; cursor: pointer; font-size: 13px; white-space: nowrap; transition: all .15s; flex-shrink: 0; }
+.btn-ctx:hover { background: var(--accent); color: white; }
+.btn-ctx:disabled { opacity: 0.4; cursor: not-allowed; }
 </style>
 </head>
 <body>
@@ -117,7 +127,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 <div class="input-area">
   <div class="input-wrapper">
     <textarea id="input" rows="1" placeholder="Type your message... (Enter to send, Shift+Enter for newline)" autofocus></textarea>
-    <button class="btn-send" id="sendBtn" onclick="sendMessage()">
+    <button class="btn-ctx" id="ctxBtn" onclick="sendMessage(true)" title="携带上下文发送">上下文</button>
+    <button class="btn-send" id="sendBtn" onclick="sendMessage(false)">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
     </button>
   </div>
@@ -127,6 +138,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const sendBtn = document.getElementById('sendBtn');
+const ctxBtn = document.getElementById('ctxBtn');
 const welcomeEl = document.getElementById('welcome');
 const modelNameEl = document.getElementById('modelName');
 
@@ -185,6 +197,7 @@ function newChat() {
 function setStreaming(val) {
   isStreaming = val;
   sendBtn.disabled = val;
+  ctxBtn.disabled = val;
   if (val) {
     sendBtn.classList.add('btn-stop');
     sendBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
@@ -192,7 +205,7 @@ function setStreaming(val) {
   } else {
     sendBtn.classList.remove('btn-stop');
     sendBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>';
-    sendBtn.onclick = sendMessage;
+    sendBtn.onclick = () => sendMessage(false);
     sendBtn.disabled = false;
   }
 }
@@ -248,7 +261,7 @@ function copyCode(btn) {
   });
 }
 
-async function sendMessage() {
+async function sendMessage(withContext = false) {
   const text = inputEl.value.trim();
   if (!text || isStreaming) return;
 
@@ -258,6 +271,30 @@ async function sendMessage() {
   addMessage('user', text);
   chatHistory.push({ role: 'user', content: text });
 
+  const messages = withContext ? [...chatHistory] : [{ role: 'user', content: text }];
+  await doSend(messages);
+}
+
+function retryLast() {
+  if (isStreaming || chatHistory.length === 0) return;
+  // 移除最后的 assistant 回复
+  if (chatHistory[chatHistory.length - 1].role === 'assistant') {
+    chatHistory.pop();
+  }
+  // 移除 DOM 中最后的 AI 消息和操作按钮
+  const actions = messagesEl.querySelector('.msg-actions');
+  if (actions) actions.remove();
+  const aiMsgs = messagesEl.querySelectorAll('.message.ai');
+  if (aiMsgs.length) aiMsgs[aiMsgs.length - 1].remove();
+
+  doSend([...chatHistory]);
+}
+
+async function doSend(messages) {
+  // 移除旧的操作按钮
+  const oldActions = messagesEl.querySelector('.msg-actions');
+  if (oldActions) oldActions.remove();
+
   setStreaming(true);
   abortController = new AbortController();
 
@@ -265,7 +302,6 @@ async function sendMessage() {
   aiBubble.innerHTML = '<span class="cursor"></span>';
   let fullContent = '';
   let thinkingContent = '';
-  let thinkingEl = null;
 
   function updateBubble() {
     let html = '';
@@ -286,7 +322,7 @@ async function sendMessage() {
     const resp = await fetch('/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: [...chatHistory] }),
+      body: JSON.stringify({ messages }),
       signal: abortController.signal,
     });
 
@@ -343,6 +379,12 @@ async function sendMessage() {
   if (fullContent) {
     chatHistory.push({ role: 'assistant', content: fullContent });
   }
+
+  // 添加重试按钮
+  const actionsDiv = document.createElement('div');
+  actionsDiv.className = 'msg-actions';
+  actionsDiv.innerHTML = '<button class="msg-action-btn" onclick="retryLast()">↻ 重试</button>';
+  messagesEl.appendChild(actionsDiv);
 
   setStreaming(false);
   abortController = null;
