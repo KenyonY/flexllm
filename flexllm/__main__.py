@@ -598,22 +598,7 @@ if HAS_TYPER:
             print("错误: 需要安装 aiohttp: pip install aiohttp", file=sys.stderr)
             raise typer.Exit(1)
 
-        # 解析 thinking 参数
-        thinking_value = None
-        if thinking is not None:
-            low = thinking.lower()
-            if low == "true":
-                thinking_value = True
-            elif low == "false":
-                thinking_value = False
-            elif low in ("low", "medium", "high", "minimal"):
-                thinking_value = low
-            else:
-                try:
-                    thinking_value = int(thinking)
-                except ValueError:
-                    print(f"错误: --thinking 参数无效: {thinking}", file=sys.stderr)
-                    raise typer.Exit(1)
+        thinking_value = _parse_thinking(thinking)
 
         web_config = ChatWebConfig(
             port=port,
@@ -638,6 +623,125 @@ if HAS_TYPER:
 
         try:
             server = ChatWebServer(web_config)
+            server.run()
+        except KeyboardInterrupt:
+            print("\nServer stopped")
+        except Exception as e:
+            print(f"错误: {e}", file=sys.stderr)
+            raise typer.Exit(1)
+
+    @app.command()
+    def serve(
+        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
+        system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
+        user_template: Annotated[
+            str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
+        ] = None,
+        temperature: Annotated[float | None, Option("-t", "--temperature", help="采样温度")] = None,
+        max_tokens: Annotated[int | None, Option("--max-tokens", help="最大生成 token 数")] = None,
+        thinking: Annotated[
+            str | None,
+            Option(
+                "--thinking", help="启用思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
+            ),
+        ] = None,
+        concurrency: Annotated[
+            int, Option("-c", "--concurrency", help="上游 LLM 最大并发数")
+        ] = 1000,
+        max_qps: Annotated[float | None, Option("--max-qps", help="每秒最大请求数")] = None,
+        timeout: Annotated[int, Option("--timeout", help="请求超时（秒）")] = 120,
+        port: Annotated[int, Option("-p", "--port", help="监听端口")] = 8000,
+        host: Annotated[str, Option("--host", help="监听地址")] = "0.0.0.0",
+        verbose: Annotated[bool, Option("--verbose", "-v", help="打印请求日志")] = False,
+    ):
+        """启动 HTTP API 服务，将 LLM 包装为 REST API
+
+        适用于微调模型部署：固定 system prompt 和 user template，
+        调用方只需发送 content 文本，返回解析后的 thinking 和 content。
+
+        API 端点:
+            POST /api/generate         非流式生成
+            POST /api/generate/stream  流式生成 (SSE)
+            POST /api/generate/batch   批量生成
+            GET  /health               健康检查
+            GET  /api/config           查看当前配置
+
+        Examples:
+            flexllm serve -m qwen-finetuned -s "你是助手"
+            flexllm serve --thinking true -c 20 -p 8000
+            flexllm serve --user-template "[INST]{content}[/INST]"
+        """
+        config = get_config()
+        model_config = config.get_model_config(model)
+        if model_config:
+            model = model or model_config.get("id")
+            base_url = base_url or model_config.get("base_url")
+            api_key = api_key or model_config.get("api_key", "EMPTY")
+
+        if not base_url:
+            print("错误: 未配置 base_url", file=sys.stderr)
+            raise typer.Exit(1)
+
+        if not system_prompt:
+            system_prompt = config.get_system(model)
+        if not user_template:
+            user_template = config.get_user_template(model)
+
+        try:
+            from .serve import ServeConfig, ServeServer
+        except ImportError:
+            print("错误: 需要安装 aiohttp: pip install aiohttp", file=sys.stderr)
+            raise typer.Exit(1)
+
+        thinking_value = _parse_thinking(thinking)
+
+        serve_config = ServeConfig(
+            port=port,
+            host=host,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_template=user_template,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            thinking=thinking_value,
+            concurrency=concurrency,
+            max_qps=max_qps,
+            timeout=timeout,
+            verbose=verbose,
+        )
+
+        print(f"flexllm Serve starting on http://{host}:{port}")
+        print(f"  Model: {model}")
+        print(f"  Server: {base_url}")
+        if temperature is not None:
+            print(f"  Temperature: {temperature}")
+        if max_tokens is not None:
+            print(f"  Max tokens: {max_tokens}")
+        if thinking_value is not None:
+            print(f"  Thinking: {thinking_value}")
+        if system_prompt:
+            display = system_prompt[:50] + "..." if len(system_prompt) > 50 else system_prompt
+            print(f"  System: {display}")
+        if user_template:
+            print(f"  User template: {user_template}")
+        print(f"  Concurrency: {concurrency}")
+        if max_qps is not None:
+            print(f"  Max QPS: {max_qps}")
+        print(f"\n  POST /api/generate         非流式生成")
+        print(f"  POST /api/generate/stream  流式生成")
+        print(f"  POST /api/generate/batch   批量生成")
+        print(f"  GET  /health               健康检查")
+        print(f"  GET  /api/config           查看配置")
+        if verbose:
+            print(f"  Verbose: on (请求日志已开启)")
+        print("\nPress Ctrl+C to stop")
+
+        try:
+            server = ServeServer(serve_config)
             server.run()
         except KeyboardInterrupt:
             print("\nServer stopped")
@@ -1666,6 +1770,27 @@ models:
 
 
 # ========== 辅助函数 ==========
+
+
+def _parse_thinking(value: str | None) -> bool | str | int | None:
+    """解析 --thinking 参数值
+
+    支持: true/false/low/medium/high/minimal 或整数(budget_tokens)
+    """
+    if value is None:
+        return None
+    low = value.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low in ("low", "medium", "high", "minimal"):
+        return low
+    try:
+        return int(value)
+    except ValueError:
+        print(f"错误: --thinking 参数无效: {value}", file=sys.stderr)
+        raise SystemExit(1)
 
 
 def _query_credits(base_url: str, api_key: str) -> dict | None:
