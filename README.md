@@ -300,6 +300,10 @@ flexllm set-model gpt-4   # Set default model
 flexllm test              # Test connection
 flexllm init              # Initialize config file
 
+# Serve - wrap LLM as HTTP API (for fine-tuned model deployment)
+flexllm serve -m qwen-finetuned -s "You are an assistant"
+flexllm serve --thinking true -p 8000 -v  # With thinking mode + request logging
+
 # Utilities
 flexllm pricing gpt-4     # Query model pricing
 flexllm credits           # Check API key balance
@@ -391,6 +395,7 @@ flexllm/
 ├── pricing/           # Cost estimation and tracking
 │   ├── cost_tracker.py
 │   └── token_counter.py
+├── serve.py           # HTTP API server (flexllm serve)
 ├── cache/             # Response caching with IPC
 ├── async_api/         # High-performance async engine
 └── msg_processors/    # Multi-modal message processing

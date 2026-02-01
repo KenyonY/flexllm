@@ -58,6 +58,18 @@ flexllm test                           # 测试连接
 flexllm pricing gpt-4o                 # 查询定价
 flexllm credits                        # 查询余额
 flexllm mock                           # Mock 服务器（测试用）
+flexllm serve                          # 启动 HTTP API 服务
+```
+
+### serve 命令
+
+将 LLM 包装为 HTTP API，适用于微调模型部署。固定 system prompt + user template，调用方只需发送 content。
+
+```bash
+flexllm serve -m qwen-finetuned -s "你是助手" --user-template "[INST]{content}[/INST]"
+flexllm serve --thinking true -p 8000 -v       # 思考模式 + 请求日志
+# API: POST /api/generate {"content":"文本"} → {"content":"...", "thinking":"...", "usage":{...}}
+#      POST /api/generate/stream (SSE), POST /api/generate/batch, GET /health
 ```
 
 ### batch 命令（核心）
