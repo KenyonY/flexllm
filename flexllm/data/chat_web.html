@@ -268,7 +268,9 @@ function retryLast() {
   const aiMsgs = messagesEl.querySelectorAll('.message.ai');
   if (aiMsgs.length) aiMsgs[aiMsgs.length - 1].remove();
 
-  doSend([...chatHistory]);
+  const lastUserMsg = chatHistory[chatHistory.length - 1];
+  const messages = withContext ? [...chatHistory] : [lastUserMsg];
+  doSend(messages);
 }
 
 async function doSend(messages) {
