@@ -32,6 +32,7 @@ class ChatWebConfig:
     max_tokens: int = 2048
     user_template: str | None = None
     thinking: bool | str | int | None = None
+    title: str = "flexllm"
 
 
 class ThinkTagParser:
@@ -154,6 +155,7 @@ class ChatWebServer:
             {
                 "model": self.config.model,
                 "temperature": self.config.temperature,
+                "title": self.config.title,
             }
         )
 

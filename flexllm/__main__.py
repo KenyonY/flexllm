@@ -566,6 +566,7 @@ if HAS_TYPER:
                 "--thinking", help="启用思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
             ),
         ] = None,
+        title: Annotated[str, Option("--title", help="页面 Logo 文本")] = "flexllm",
     ):
         """启动 Web 聊天界面
 
@@ -611,6 +612,7 @@ if HAS_TYPER:
             max_tokens=max_tokens,
             user_template=user_template,
             thinking=thinking_value,
+            title=title,
         )
 
         print(f"flexllm Chat Web starting on http://{host}:{port}")

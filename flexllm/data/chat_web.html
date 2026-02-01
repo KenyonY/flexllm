@@ -147,6 +147,10 @@ marked.setOptions({
 // Load config
 fetch('/api/config').then(r => r.json()).then(cfg => {
   modelNameEl.textContent = cfg.model || 'unknown';
+  if (cfg.title) {
+    document.querySelector('.logo').textContent = cfg.title;
+    document.title = cfg.title + ' Chat';
+  }
 }).catch(() => {
   modelNameEl.textContent = 'offline';
 });
