@@ -10,7 +10,7 @@ description: LLM API 客户端 - 批量处理、断点续传、响应缓存、�
 ## Python API
 
 ```python
-from flexllm import LLMClient, LLMClientPool
+from flexllm import LLMClient
 
 # 单条请求
 async with LLMClient(model="gpt-4", base_url="https://api.openai.com/v1", api_key="...") as client:
@@ -37,15 +37,15 @@ client = LLMClient(..., cache=ResponseCacheConfig(enabled=True, ttl=3600))
 LLMClient(provider="gemini", model="gemini-2.5-flash", api_key="...")
 LLMClient(provider="claude", model="claude-sonnet-4-20250514", api_key="...")
 
-# 负载均衡
-pool = LLMClientPool(
+# 负载均衡（多 endpoint，同一个 LLMClient）
+client = LLMClient(
     endpoints=[
         {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50},
         {"base_url": "http://gpu2:8000/v1", "model": "qwen"},
     ],
     fallback=True,
 )
-results = await pool.chat_completions_batch(messages_list, output_jsonl="results.jsonl")
+results = await client.chat_completions_batch(messages_list, output_jsonl="results.jsonl")
 ```
 
 ## CLI

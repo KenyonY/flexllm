@@ -41,10 +41,10 @@ results = await client.chat_completions_batch(
 **Scale out across multiple endpoints with zero code change.**
 
 ```python
-from flexllm import LLMClientPool
+from flexllm import LLMClient
 
-# Same API, multiple GPU nodes — faster endpoints automatically handle more tasks
-pool = LLMClientPool(
+# Same LLMClient API, just pass endpoints for multi-node
+client = LLMClient(
     endpoints=[
         {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50},
         {"base_url": "http://gpu2:8000/v1", "model": "qwen", "concurrency_limit": 20},
@@ -53,7 +53,7 @@ pool = LLMClientPool(
     fallback=True,  # Auto-switch on endpoint failure
 )
 
-results = await pool.chat_completions_batch(messages_list, output_jsonl="results.jsonl")
+results = await client.chat_completions_batch(messages_list, output_jsonl="results.jsonl")
 ```
 
 ---
@@ -146,12 +146,12 @@ results = await client.chat_completions_batch(
 
 Distribute batch tasks across multiple GPU nodes / API endpoints. Faster endpoints automatically handle more tasks via a shared queue model, with automatic failover and health monitoring.
 
-> `LLMClient` and `LLMClientPool` share the same API. Single endpoint → use `LLMClient`; multiple endpoints → use `LLMClientPool`.
+> Single endpoint: pass `model`/`base_url`. Multiple endpoints: pass `endpoints`. Same `LLMClient`, same API.
 
 ```python
-from flexllm import LLMClientPool
+from flexllm import LLMClient
 
-pool = LLMClientPool(
+client = LLMClient(
     endpoints=[
         # Each endpoint can have independent rate limits
         {"base_url": "http://gpu1:8000/v1", "model": "qwen", "concurrency_limit": 50, "max_qps": 100},
@@ -164,10 +164,10 @@ pool = LLMClientPool(
 )
 
 # Single request — automatic failover across endpoints
-result = await pool.chat_completions(messages)
+result = await client.chat_completions(messages)
 
 # Distributed batch — shared queue, dynamic load balancing, checkpoint recovery
-results = await pool.chat_completions_batch(
+results = await client.chat_completions_batch(
     messages_list,
     distribute=True,
     output_jsonl="results.jsonl",
@@ -175,7 +175,7 @@ results = await pool.chat_completions_batch(
 )
 
 # Streaming with failover
-async for chunk in pool.chat_completions_stream(messages):
+async for chunk in client.chat_completions_stream(messages):
     print(chunk, end="", flush=True)
 ```
 
@@ -404,7 +404,7 @@ flexllm/
 The architecture follows a simple layered design:
 
 ```
-LLMClient (single endpoint)  /  LLMClientPool (multi-endpoint)
+LLMClient (single endpoint or multi-endpoint)
     │                                  │
     │                                  ├── ProviderRouter (round_robin)
     │                                  ├── Health Monitor (failure threshold + auto recovery)
