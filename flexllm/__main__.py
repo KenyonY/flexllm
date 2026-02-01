@@ -260,7 +260,11 @@ def detect_input_format(record: dict) -> tuple[str, list[str]]:
 
 
 def convert_to_messages(
-    record: dict, format_type: str, message_fields: list[str], global_system: str = None, user_template: str = None
+    record: dict,
+    format_type: str,
+    message_fields: list[str],
+    global_system: str = None,
+    user_template: str = None,
 ) -> tuple[list[dict], dict]:
     """将输入记录转换为 messages 格式"""
     messages = []
@@ -360,7 +364,9 @@ def load_jsonl_records(input_path: str = None) -> list[dict]:
     return records
 
 
-def parse_batch_input(input_path: str = None, skip_format_detection: bool = False) -> tuple[list[dict], str, list[str]]:
+def parse_batch_input(
+    input_path: str = None, skip_format_detection: bool = False
+) -> tuple[list[dict], str, list[str]]:
     """解析批量输入文件或 stdin
 
     Args:
@@ -483,7 +489,7 @@ if HAS_TYPER:
         api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
         system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
         temperature: Annotated[float, Option("-t", "--temperature", help="采样温度")] = 0.7,
-        max_tokens: Annotated[int, Option("--max-tokens", help="最大生成 token 数")] = 4096,
+        max_tokens: Annotated[int, Option("--max-tokens", help="最大生成 token 数")] = 2048,
         no_stream: Annotated[bool, Option("--no-stream", help="禁用流式输出")] = False,
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
@@ -519,17 +525,132 @@ if HAS_TYPER:
 
         if message:
             _single_chat(
-                message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template
+                message,
+                model,
+                base_url,
+                api_key,
+                system_prompt,
+                temperature,
+                max_tokens,
+                stream,
+                user_template,
             )
         else:
             _interactive_chat(
-                model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template
+                model,
+                base_url,
+                api_key,
+                system_prompt,
+                temperature,
+                max_tokens,
+                stream,
+                user_template,
             )
+
+    @app.command(name="chat-web")
+    def chat_web(
+        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
+        system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
+        temperature: Annotated[float, Option("-t", "--temperature", help="采样温度")] = 0.7,
+        max_tokens: Annotated[int, Option("--max-tokens", help="最大生成 token 数")] = 2048,
+        user_template: Annotated[
+            str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
+        ] = None,
+        port: Annotated[int, Option("-p", "--port", help="Web 服务端口")] = 8080,
+        host: Annotated[str, Option("--host", help="监听地址")] = "localhost",
+        thinking: Annotated[
+            str | None,
+            Option(
+                "--thinking", help="启用思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
+            ),
+        ] = None,
+    ):
+        """启动 Web 聊天界面
+
+        Examples:
+            flexllm chat-web                      # 使用默认模型
+            flexllm chat-web -m gpt-4             # 指定模型
+            flexllm chat-web -p 9090              # 指定端口
+            flexllm chat-web --host 0.0.0.0       # 允许外部访问
+            flexllm chat-web --thinking true      # 启用思考模式
+        """
+        config = get_config()
+        model_config = config.get_model_config(model)
+        if model_config:
+            model = model or model_config.get("id")
+            base_url = base_url or model_config.get("base_url")
+            api_key = api_key or model_config.get("api_key", "EMPTY")
+
+        if not base_url:
+            print("错误: 未配置 base_url", file=sys.stderr)
+            raise typer.Exit(1)
+
+        if not system_prompt:
+            system_prompt = config.get_system(model)
+        if not user_template:
+            user_template = config.get_user_template(model)
+
+        try:
+            from .chat_web import ChatWebConfig, ChatWebServer
+        except ImportError:
+            print("错误: 需要安装 aiohttp: pip install aiohttp", file=sys.stderr)
+            raise typer.Exit(1)
+
+        # 解析 thinking 参数
+        thinking_value = None
+        if thinking is not None:
+            low = thinking.lower()
+            if low == "true":
+                thinking_value = True
+            elif low == "false":
+                thinking_value = False
+            elif low in ("low", "medium", "high", "minimal"):
+                thinking_value = low
+            else:
+                try:
+                    thinking_value = int(thinking)
+                except ValueError:
+                    print(f"错误: --thinking 参数无效: {thinking}", file=sys.stderr)
+                    raise typer.Exit(1)
+
+        web_config = ChatWebConfig(
+            port=port,
+            host=host,
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            system_prompt=system_prompt,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            user_template=user_template,
+            thinking=thinking_value,
+        )
+
+        print(f"flexllm Chat Web starting on http://{host}:{port}")
+        print(f"  Model: {model}")
+        print(f"  Server: {base_url}")
+        print(f"  Temperature: {temperature}")
+        if thinking_value is not None:
+            print(f"  Thinking: {thinking_value}")
+        print("\nPress Ctrl+C to stop")
+
+        try:
+            server = ChatWebServer(web_config)
+            server.run()
+        except KeyboardInterrupt:
+            print("\nServer stopped")
+        except Exception as e:
+            print(f"错误: {e}", file=sys.stderr)
+            raise typer.Exit(1)
 
     @app.command()
     def batch(
         input: Annotated[str | None, Argument(help="输入文件路径（省略则从 stdin 读取）")] = None,
-        output: Annotated[str | None, Option("-o", "--output", help="输出文件路径（可选，默认自动生成）")] = None,
+        output: Annotated[
+            str | None, Option("-o", "--output", help="输出文件路径（可选，默认自动生成）")
+        ] = None,
         model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
         concurrency: Annotated[int | None, Option("-c", "--concurrency", help="并发数")] = None,
         max_qps: Annotated[float | None, Option("--max-qps", help="每秒最大请求数")] = None,
@@ -593,7 +714,9 @@ if HAS_TYPER:
         if not output:
             if not input:
                 # 从 stdin 读取时必须指定输出文件
-                print("错误: 从 stdin 读取数据时必须指定输出文件 (-o output.jsonl)", file=sys.stderr)
+                print(
+                    "错误: 从 stdin 读取数据时必须指定输出文件 (-o output.jsonl)", file=sys.stderr
+                )
                 raise typer.Exit(1)
 
             # 根据输入文件名自动生成输出文件名
@@ -656,7 +779,9 @@ if HAS_TYPER:
         effective_system = system if system is not None else config.get_system(model)
 
         # user_template：CLI 参数 > 配置文件
-        effective_user_template = user_template if user_template is not None else config.get_user_template(model)
+        effective_user_template = (
+            user_template if user_template is not None else config.get_user_template(model)
+        )
 
         # 解析 save_input: CLI 字符串 -> bool | str
         effective_save_input: bool | str = True
@@ -1691,7 +1816,17 @@ def _query_credits(base_url: str, api_key: str) -> dict | None:
         return {"error": f"解析失败: {e}"}
 
 
-def _single_chat(message, model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template=None):
+def _single_chat(
+    message,
+    model,
+    base_url,
+    api_key,
+    system_prompt,
+    temperature,
+    max_tokens,
+    stream,
+    user_template=None,
+):
     """单次对话"""
 
     async def _run():
@@ -1726,7 +1861,9 @@ def _single_chat(message, model, base_url, api_key, system_prompt, temperature, 
         print(f"错误: {e}", file=sys.stderr)
 
 
-def _interactive_chat(model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template=None):
+def _interactive_chat(
+    model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template=None
+):
     """多轮交互对话"""
 
     async def _run():

@@ -307,6 +307,15 @@ class ClaudeClient(LLMClientBase):
                         try:
                             data = json.loads(data_str)
 
+                            # 提取思考内容
+                            if data.get("type") == "content_block_delta":
+                                delta = data.get("delta", {})
+                                if delta.get("type") == "thinking_delta":
+                                    thinking = delta.get("thinking")
+                                    if thinking and return_usage:
+                                        yield {"type": "thinking", "content": thinking}
+                                    continue
+
                             # 提取内容
                             content = self._extract_stream_content(data)
                             if content:

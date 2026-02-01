@@ -1,0 +1,353 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>flexllm Chat</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github-dark.min.css" id="hljs-dark">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css" id="hljs-light" disabled>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11"></script>
+<style>
+:root {
+  --bg: #ffffff; --bg-secondary: #f3f4f6; --bg-tertiary: #e5e7eb;
+  --text: #111827; --text-secondary: #6b7280;
+  --border: #d1d5db;
+  --user-bg: #2563eb; --user-text: #ffffff;
+  --ai-bg: #f3f4f6; --ai-text: #111827;
+  --accent: #2563eb;
+  --code-bg: #1e1e1e;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111827; --bg-secondary: #1f2937; --bg-tertiary: #374151;
+    --text: #f9fafb; --text-secondary: #9ca3af;
+    --border: #374151;
+    --user-bg: #2563eb; --user-text: #ffffff;
+    --ai-bg: #1f2937; --ai-text: #f9fafb;
+    --accent: #3b82f6;
+    --code-bg: #0d1117;
+  }
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+
+/* Header */
+.header { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); flex-shrink: 0; }
+.header-left { display: flex; align-items: center; gap: 12px; }
+.logo { font-weight: 700; font-size: 18px; color: var(--accent); }
+.model-name { font-size: 13px; color: var(--text-secondary); background: var(--bg-tertiary); padding: 3px 10px; border-radius: 12px; }
+.btn-new { background: none; border: 1px solid var(--border); color: var(--text-secondary); padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 13px; transition: all .15s; }
+.btn-new:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Messages */
+.messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 16px; }
+.message { display: flex; gap: 12px; max-width: 800px; width: 100%; margin: 0 auto; }
+.message.user { flex-direction: row-reverse; }
+.avatar { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 14px; flex-shrink: 0; }
+.message.user .avatar { background: var(--user-bg); color: var(--user-text); }
+.message.ai .avatar { background: var(--bg-tertiary); color: var(--text-secondary); }
+.bubble { padding: 10px 16px; border-radius: 12px; line-height: 1.6; font-size: 15px; max-width: calc(100% - 50px); overflow-wrap: break-word; }
+.message.user .bubble { background: var(--user-bg); color: var(--user-text); border-bottom-right-radius: 4px; }
+.message.ai .bubble { background: var(--ai-bg); color: var(--ai-text); border-bottom-left-radius: 4px; }
+
+/* Markdown in AI bubble */
+.message.ai .bubble p { margin: 0.5em 0; }
+.message.ai .bubble p:first-child { margin-top: 0; }
+.message.ai .bubble p:last-child { margin-bottom: 0; }
+.message.ai .bubble pre { margin: 0.8em 0; border-radius: 8px; overflow-x: auto; background: var(--code-bg) !important; position: relative; }
+.message.ai .bubble pre code { padding: 14px; display: block; font-size: 13px; line-height: 1.5; background: transparent !important; }
+.message.ai .bubble code { font-family: "SF Mono", "Fira Code", monospace; font-size: 0.9em; background: var(--bg-tertiary); padding: 2px 5px; border-radius: 4px; }
+.message.ai .bubble pre code { background: transparent !important; padding: 0; }
+.message.ai .bubble ul, .message.ai .bubble ol { padding-left: 1.5em; margin: 0.5em 0; }
+.message.ai .bubble blockquote { border-left: 3px solid var(--accent); padding-left: 12px; margin: 0.5em 0; color: var(--text-secondary); }
+.message.ai .bubble table { border-collapse: collapse; margin: 0.5em 0; width: 100%; }
+.message.ai .bubble th, .message.ai .bubble td { border: 1px solid var(--border); padding: 6px 12px; text-align: left; }
+.message.ai .bubble th { background: var(--bg-tertiary); }
+
+/* Copy button */
+.code-block-wrapper { position: relative; }
+.copy-btn { position: absolute; top: 6px; right: 6px; background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.2); color: #ccc; padding: 3px 8px; border-radius: 4px; cursor: pointer; font-size: 11px; opacity: 0; transition: opacity .2s; }
+.code-block-wrapper:hover .copy-btn { opacity: 1; }
+.copy-btn:hover { background: rgba(255,255,255,0.2); }
+
+/* Welcome */
+.welcome { flex: 1; display: flex; align-items: center; justify-content: center; color: var(--text-secondary); font-size: 15px; }
+
+/* Input area */
+.input-area { padding: 16px 20px; border-top: 1px solid var(--border); background: var(--bg-secondary); flex-shrink: 0; }
+.input-wrapper { max-width: 800px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
+.input-wrapper textarea { flex: 1; resize: none; border: 1px solid var(--border); border-radius: 12px; padding: 10px 14px; font-size: 15px; font-family: inherit; background: var(--bg); color: var(--text); outline: none; min-height: 44px; max-height: 200px; line-height: 1.5; transition: border-color .15s; }
+.input-wrapper textarea:focus { border-color: var(--accent); }
+.btn-send { background: var(--accent); color: white; border: none; border-radius: 10px; width: 44px; height: 44px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: opacity .15s; flex-shrink: 0; }
+.btn-send:hover { opacity: 0.85; }
+.btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-stop { background: #ef4444; }
+
+/* Thinking block */
+.thinking-block { margin-bottom: 8px; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.thinking-toggle { display: flex; align-items: center; gap: 6px; padding: 6px 12px; background: var(--bg-tertiary); cursor: pointer; font-size: 13px; color: var(--text-secondary); user-select: none; border: none; width: 100%; text-align: left; }
+.thinking-toggle:hover { opacity: 0.8; }
+.thinking-toggle .arrow { transition: transform .2s; display: inline-block; }
+.thinking-toggle.open .arrow { transform: rotate(90deg); }
+.thinking-content { padding: 8px 12px; font-size: 13px; color: var(--text-secondary); line-height: 1.5; white-space: pre-wrap; display: none; max-height: 300px; overflow-y: auto; }
+.thinking-content.open { display: block; }
+.thinking-label { animation: pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+/* Cursor blink */
+.cursor { display: inline-block; width: 2px; height: 1em; background: var(--text); animation: blink 1s step-end infinite; vertical-align: text-bottom; margin-left: 2px; }
+@keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="header-left">
+    <span class="logo">flexllm</span>
+    <span class="model-name" id="modelName">loading...</span>
+  </div>
+  <button class="btn-new" onclick="newChat()">New Chat</button>
+</div>
+
+<div class="messages" id="messages">
+  <div class="welcome" id="welcome">Send a message to start chatting</div>
+</div>
+
+<div class="input-area">
+  <div class="input-wrapper">
+    <textarea id="input" rows="1" placeholder="Type your message... (Enter to send, Shift+Enter for newline)" autofocus></textarea>
+    <button class="btn-send" id="sendBtn" onclick="sendMessage()">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
+    </button>
+  </div>
+</div>
+
+<script>
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+const welcomeEl = document.getElementById('welcome');
+const modelNameEl = document.getElementById('modelName');
+
+let chatHistory = [];
+let isStreaming = false;
+let abortController = null;
+
+// Configure marked
+marked.setOptions({
+  highlight: (code, lang) => {
+    if (lang && hljs.getLanguage(lang)) {
+      return hljs.highlight(code, { language: lang }).value;
+    }
+    return hljs.highlightAuto(code).value;
+  },
+  breaks: true,
+});
+
+// Load config
+fetch('/api/config').then(r => r.json()).then(cfg => {
+  modelNameEl.textContent = cfg.model || 'unknown';
+}).catch(() => {
+  modelNameEl.textContent = 'offline';
+});
+
+// Apply theme to highlight.js
+function applyHljsTheme() {
+  const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.getElementById('hljs-dark').disabled = !dark;
+  document.getElementById('hljs-light').disabled = dark;
+}
+applyHljsTheme();
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyHljsTheme);
+
+// Auto-resize textarea
+inputEl.addEventListener('input', () => {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 200) + 'px';
+});
+
+inputEl.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+
+function newChat() {
+  chatHistory = [];
+  messagesEl.innerHTML = '<div class="welcome" id="welcome">Send a message to start chatting</div>';
+  if (abortController) { abortController.abort(); abortController = null; }
+  setStreaming(false);
+  inputEl.focus();
+}
+
+function setStreaming(val) {
+  isStreaming = val;
+  sendBtn.disabled = val;
+  if (val) {
+    sendBtn.classList.add('btn-stop');
+    sendBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
+    sendBtn.onclick = stopStreaming;
+  } else {
+    sendBtn.classList.remove('btn-stop');
+    sendBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>';
+    sendBtn.onclick = sendMessage;
+    sendBtn.disabled = false;
+  }
+}
+
+function stopStreaming() {
+  if (abortController) { abortController.abort(); abortController = null; }
+  setStreaming(false);
+  // Remove cursor
+  const cursor = document.querySelector('.cursor');
+  if (cursor) cursor.remove();
+}
+
+function addMessage(role, content) {
+  const welcomeDiv = document.getElementById('welcome');
+  if (welcomeDiv) welcomeDiv.remove();
+
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+  const avatar = role === 'user' ? 'U' : 'AI';
+  div.innerHTML = `<div class="avatar">${avatar}</div><div class="bubble"></div>`;
+
+  const bubble = div.querySelector('.bubble');
+  if (role === 'user') {
+    bubble.textContent = content;
+  } else {
+    bubble.innerHTML = renderMarkdown(content);
+  }
+
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return bubble;
+}
+
+function renderMarkdown(text) {
+  let html = marked.parse(text);
+  // Wrap pre blocks for copy button
+  html = html.replace(/<pre><code(.*?)>([\s\S]*?)<\/code><\/pre>/g,
+    '<div class="code-block-wrapper"><button class="copy-btn" onclick="copyCode(this)">Copy</button><pre><code$1>$2</code></pre></div>');
+  return html;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function copyCode(btn) {
+  const code = btn.nextElementSibling.querySelector('code');
+  navigator.clipboard.writeText(code.textContent).then(() => {
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 1500);
+  });
+}
+
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || isStreaming) return;
+
+  inputEl.value = '';
+  inputEl.style.height = 'auto';
+
+  addMessage('user', text);
+  chatHistory.push({ role: 'user', content: text });
+
+  setStreaming(true);
+  abortController = new AbortController();
+
+  const aiBubble = addMessage('ai', '');
+  aiBubble.innerHTML = '<span class="cursor"></span>';
+  let fullContent = '';
+  let thinkingContent = '';
+  let thinkingEl = null;
+
+  function updateBubble() {
+    let html = '';
+    if (thinkingContent) {
+      html += `<div class="thinking-block">
+        <button class="thinking-toggle open" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+          <span class="arrow">&#9654;</span> <span class="thinking-label">Thinking...</span>
+        </button>
+        <div class="thinking-content open">${escapeHtml(thinkingContent)}</div>
+      </div>`;
+    }
+    html += renderMarkdown(fullContent) + '<span class="cursor"></span>';
+    aiBubble.innerHTML = html;
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  try {
+    const resp = await fetch('/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [...chatHistory] }),
+      signal: abortController.signal,
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const jsonStr = line.slice(6);
+        try {
+          const event = JSON.parse(jsonStr);
+          if (event.type === 'thinking') {
+            thinkingContent += event.content;
+            updateBubble();
+          } else if (event.type === 'content') {
+            fullContent += event.content;
+            updateBubble();
+          } else if (event.type === 'done') {
+            // done
+          } else if (event.type === 'error') {
+            fullContent += `\n\n**Error:** ${event.message}`;
+            updateBubble();
+          }
+        } catch {}
+      }
+    }
+  } catch (e) {
+    if (e.name !== 'AbortError') {
+      fullContent += fullContent ? `\n\n**Error:** ${e.message}` : `**Error:** ${e.message}`;
+    }
+  }
+
+  // Finalize
+  let finalHtml = '';
+  if (thinkingContent) {
+    finalHtml += `<div class="thinking-block">
+      <button class="thinking-toggle" onclick="this.classList.toggle('open');this.nextElementSibling.classList.toggle('open')">
+        <span class="arrow">&#9654;</span> Thought for a moment
+      </button>
+      <div class="thinking-content">${escapeHtml(thinkingContent)}</div>
+    </div>`;
+  }
+  finalHtml += renderMarkdown(fullContent || '*(empty response)*');
+  aiBubble.innerHTML = finalHtml;
+  if (fullContent) {
+    chatHistory.push({ role: 'assistant', content: fullContent });
+  }
+
+  setStreaming(false);
+  abortController = null;
+  inputEl.focus();
+}
+</script>
+</body>
+</html>

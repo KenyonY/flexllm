@@ -199,6 +199,10 @@ class LLMClientBase(ABC):
     def _extract_stream_content(self, data: dict) -> str | None:
         return self._extract_content(data)
 
+    def _extract_stream_thinking(self, data: dict) -> str | None:
+        """从流式响应中提取思考内容，子类按需重写"""
+        return None
+
     def _get_stream_url(self, model: str) -> str:
         return self._get_url(model, stream=True)
 
@@ -1148,6 +1152,13 @@ class LLMClientBase(ABC):
                             # 检查是否包含 usage（流式响应的最后一个 chunk）
                             if return_usage and "usage" in data and data["usage"]:
                                 yield {"type": "usage", "usage": data["usage"]}
+                                continue
+
+                            # 提取思考内容
+                            thinking = self._extract_stream_thinking(data)
+                            if thinking:
+                                if return_usage:
+                                    yield {"type": "thinking", "content": thinking}
                                 continue
 
                             content = self._extract_stream_content(data)

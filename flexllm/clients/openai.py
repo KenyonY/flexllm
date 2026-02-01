@@ -158,6 +158,15 @@ class OpenAIClient(LLMClientBase):
             pass
         return None
 
+    def _extract_stream_thinking(self, data: dict) -> str | None:
+        try:
+            if "choices" in data and len(data["choices"]) > 0:
+                delta = data["choices"][0].get("delta", {})
+                return delta.get("reasoning") or delta.get("reasoning_content")
+        except Exception:
+            pass
+        return None
+
     def _extract_tool_calls(self, response_data: dict):
         """提取 OpenAI 格式的 tool_calls"""
         from .base import ToolCall

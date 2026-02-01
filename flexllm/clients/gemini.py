@@ -344,31 +344,30 @@ class GeminiClient(LLMClientBase):
             return {"thought": "", "answer": ""}
 
     def _extract_stream_content(self, data: dict) -> str | None:
-        """
-        从 Gemini 流式响应中提取文本内容
-
-        Gemini 流式响应格式：
-        {
-            "candidates": [{
-                "content": {
-                    "parts": [{"text": "部分文本"}],
-                    "role": "model"
-                }
-            }]
-        }
-        """
+        """从 Gemini 流式响应中提取文本内容（跳过 thought parts）"""
         try:
             candidates = data.get("candidates", [])
             if not candidates:
                 return None
-
-            # 获取第一个候选的内容
             content = candidates[0].get("content", {})
             parts = content.get("parts", [])
-
-            # 提取所有文本部分
             for part in parts:
-                if "text" in part:
+                if "text" in part and not part.get("thought"):
+                    return part["text"]
+            return None
+        except Exception:
+            return None
+
+    def _extract_stream_thinking(self, data: dict) -> str | None:
+        """从 Gemini 流式响应中提取思考内容（thought: true 的 parts）"""
+        try:
+            candidates = data.get("candidates", [])
+            if not candidates:
+                return None
+            content = candidates[0].get("content", {})
+            parts = content.get("parts", [])
+            for part in parts:
+                if part.get("thought") and "text" in part:
                     return part["text"]
             return None
         except Exception:
@@ -433,6 +432,13 @@ class GeminiClient(LLMClientBase):
                             break
                         try:
                             data = json.loads(data_str)
+
+                            # 提取思考内容
+                            thinking = self._extract_stream_thinking(data)
+                            if thinking:
+                                if return_usage:
+                                    yield {"type": "thinking", "content": thinking}
+                                # thinking 和 content 可能在同一个 chunk 中，不 continue
 
                             # 提取内容
                             content = self._extract_stream_content(data)
