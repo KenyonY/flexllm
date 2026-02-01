@@ -104,10 +104,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 .msg-action-btn { background: none; border: 1px solid var(--border); color: var(--text-secondary); font-size: 12px; cursor: pointer; padding: 3px 10px; border-radius: 6px; display: flex; align-items: center; gap: 4px; transition: all .15s; }
 .msg-action-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-/* Context send button */
-.btn-ctx { background: none; border: 1px solid var(--accent); color: var(--accent); border-radius: 10px; height: 44px; padding: 0 14px; cursor: pointer; font-size: 13px; white-space: nowrap; transition: all .15s; flex-shrink: 0; }
-.btn-ctx:hover { background: var(--accent); color: white; }
-.btn-ctx:disabled { opacity: 0.4; cursor: not-allowed; }
+/* Context toggle button */
+.btn-ctx { border: 1px solid var(--border); color: var(--text-secondary); background: none; border-radius: 10px; height: 36px; padding: 0 10px; cursor: pointer; font-size: 12px; white-space: nowrap; transition: all .15s; flex-shrink: 0; align-self: center; }
+.btn-ctx:hover { border-color: var(--accent); color: var(--accent); }
+.btn-ctx.active { background: var(--accent); color: white; border-color: var(--accent); }
+.btn-ctx.active:hover { opacity: 0.85; }
 </style>
 </head>
 <body>
@@ -127,8 +128,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 <div class="input-area">
   <div class="input-wrapper">
     <textarea id="input" rows="1" placeholder="Type your message... (Enter to send, Shift+Enter for newline)" autofocus></textarea>
-    <button class="btn-ctx" id="ctxBtn" onclick="sendMessage(true)" title="携带上下文发送">上下文</button>
-    <button class="btn-send" id="sendBtn" onclick="sendMessage(false)">
+    <button class="btn-ctx" id="ctxBtn" onclick="toggleContext()" title="切换是否携带对话上下文">上下文</button>
+    <button class="btn-send" id="sendBtn" onclick="sendMessage()">
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
     </button>
   </div>
@@ -145,6 +146,7 @@ const modelNameEl = document.getElementById('modelName');
 let chatHistory = [];
 let isStreaming = false;
 let abortController = null;
+let withContext = false;
 
 // Configure marked
 marked.setOptions({
@@ -197,7 +199,6 @@ function newChat() {
 function setStreaming(val) {
   isStreaming = val;
   sendBtn.disabled = val;
-  ctxBtn.disabled = val;
   if (val) {
     sendBtn.classList.add('btn-stop');
     sendBtn.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>';
@@ -205,7 +206,7 @@ function setStreaming(val) {
   } else {
     sendBtn.classList.remove('btn-stop');
     sendBtn.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>';
-    sendBtn.onclick = () => sendMessage(false);
+    sendBtn.onclick = sendMessage;
     sendBtn.disabled = false;
   }
 }
@@ -261,7 +262,12 @@ function copyCode(btn) {
   });
 }
 
-async function sendMessage(withContext = false) {
+function toggleContext() {
+  withContext = !withContext;
+  ctxBtn.classList.toggle('active', withContext);
+}
+
+async function sendMessage() {
   const text = inputEl.value.trim();
   if (!text || isStreaming) return;
 
