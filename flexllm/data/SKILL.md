@@ -93,7 +93,8 @@ agent.on_tool_result = lambda name, result: print(f"结果: {result[:100]}")
 flexllm ask "问题"                     # 快速问答
 flexllm chat                           # 交互式聊天
 flexllm chat --tools shell             # Agent 模式（带 shell 工具）
-flexllm agent --tools shell "查CPU使用率" # Agent 非交互式执行
+flexllm agent "查CPU使用率"              # Agent 非交互式（默认 shell）
+flexllm agent --tools shell,dtflow "清洗数据" # 多工具 Agent（shell/dtflow/maque/flexllm）
 flexllm list                           # 已配置模型
 flexllm test                           # 测试连接
 flexllm pricing gpt-4o                 # 查询定价

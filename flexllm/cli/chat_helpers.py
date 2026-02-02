@@ -10,33 +10,43 @@ from .utils import apply_user_template
 
 # ========== Agent 工具定义 ==========
 
-SHELL_TOOL_DEFINITION = [
-    {
-        "type": "function",
-        "function": {
-            "name": "shell",
-            "description": "Execute a shell command and return its output (stdout + stderr).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "The shell command to execute"},
-                },
-                "required": ["command"],
-            },
-        },
-    }
-]
+BUILTIN_TOOLS = {
+    "shell": {
+        "description": "Execute a shell command and return its output.",
+        "prefix": "",
+    },
+    "dtflow": {
+        "description": "数据文件处理(JSONL/CSV/Parquet): stats/sample/head/tail/clean/dedupe/transform/validate/concat/diff",
+        "prefix": "dt",
+    },
+    "maque": {
+        "description": "ML工具: 文本嵌入(embed)/向量检索/聚类分析/模型部署(serve)/多模态批处理(mllm)",
+        "prefix": "maque",
+    },
+    "flexllm": {
+        "description": "LLM API: ask/batch/chat/pricing/credits/models/mock/serve",
+        "prefix": "flexllm",
+    },
+}
 
 
-def _shell_tool_executor(name: str, arguments: str) -> str:
-    """内置 shell 工具执行器"""
+def _cli_tool_executor(name: str, arguments: str) -> str:
+    """通用 CLI 工具执行器，根据注册表的 prefix 拼命令执行"""
     import subprocess
+
+    tool = BUILTIN_TOOLS.get(name)
+    if not tool:
+        return f"[error: unknown tool '{name}']"
 
     args = json.loads(arguments)
     command = args.get("command", "")
-    print(f"  [tool] shell: {command}", flush=True)
+    prefix = tool["prefix"]
+    full_command = f"{prefix} {command}".strip() if prefix else command
+    print(f"  [tool] {name}: {full_command}", flush=True)
     try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(
+            full_command, shell=True, capture_output=True, text=True, timeout=60
+        )
         output = result.stdout
         if result.stderr:
             output += ("\n" if output else "") + result.stderr
@@ -49,11 +59,40 @@ def _shell_tool_executor(name: str, arguments: str) -> str:
         return f"[error: {e}]"
 
 
-def get_builtin_tools(tools_name: str):
-    """获取内置工具定义和执行器"""
-    if tools_name == "shell":
-        return SHELL_TOOL_DEFINITION, _shell_tool_executor
-    raise ValueError(f"未知的内置工具集: {tools_name}，可用: shell")
+def get_builtin_tools(tools_str: str):
+    """获取内置工具定义和执行器，支持逗号分隔多工具（如 'shell,dtflow'）"""
+    names = [t.strip() for t in tools_str.split(",") if t.strip()]
+    available = ", ".join(BUILTIN_TOOLS)
+    for name in names:
+        if name not in BUILTIN_TOOLS:
+            raise ValueError(f"未知的内置工具: {name}，可用: {available}")
+
+    tool_defs = []
+    for name in names:
+        tool = BUILTIN_TOOLS[name]
+        desc = tool["description"]
+        if tool["prefix"]:
+            desc += f" (命令会自动添加 '{tool['prefix']}' 前缀)"
+        tool_defs.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": name,
+                    "description": desc,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "The command to execute",
+                            },
+                        },
+                        "required": ["command"],
+                    },
+                },
+            }
+        )
+    return tool_defs, _cli_tool_executor
 
 
 # ========== Chat 辅助函数 ==========

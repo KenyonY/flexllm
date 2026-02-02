@@ -341,9 +341,10 @@ flexllm init              # Initialize config file
 flexllm serve -m qwen-finetuned -s "You are an assistant"
 flexllm serve --thinking true -p 8000 -v  # With thinking mode + request logging
 
-# Agent mode (tool-use loop with built-in shell tool)
-flexllm chat --tools shell                          # Interactive agent chat
-echo "Check CPU usage" | flexllm agent --tools shell # Non-interactive agent
+# Agent mode (tool-use loop with built-in tools: shell/dtflow/maque/flexllm)
+flexllm chat --tools shell                              # Interactive agent chat
+flexllm agent "查一下 cpu 使用率"                         # Non-interactive (default: shell)
+flexllm agent --tools shell,dtflow "清洗data.jsonl"      # Multi-tool agent
 
 # Utilities
 flexllm pricing gpt-4     # Query model pricing

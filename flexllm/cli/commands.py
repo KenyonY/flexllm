@@ -115,7 +115,9 @@ def register_commands(app):
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
-        tools: Annotated[str | None, Option("--tools", help="内置工具集（shell）")] = None,
+        tools: Annotated[
+            str | None, Option("--tools", help="内置工具集，逗号分隔（shell/dtflow/maque/flexllm）")
+        ] = None,
     ):
         """交互式对话
 
@@ -1313,7 +1315,9 @@ models:
         base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
         api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
         system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
-        tools: Annotated[str, Option("--tools", help="内置工具集（shell）")] = "shell",
+        tools: Annotated[
+            str, Option("--tools", help="内置工具集，逗号分隔（shell/dtflow/maque/flexllm）")
+        ] = "shell",
         max_rounds: Annotated[int, Option("--max-rounds", help="最大 tool 调用轮数")] = 10,
     ):
         """Agent 模式（非交互式，执行任务后返回）
