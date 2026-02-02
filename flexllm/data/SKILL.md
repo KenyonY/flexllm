@@ -123,10 +123,18 @@ models:
     provider: openai
     base_url: https://api.openai.com/v1
     api_key: your-api-key
+    # 模型调用参数（除 id/name/provider/base_url/api_key/system/user_template 外
+    # 的所有字段都会自动透传给 LLM API）
+    # max_tokens: 512
+    # temperature: 0.3
+    # top_p: 0.9
+    # thinking: true
 batch:
   concurrency: 20
   cache: true
   track_cost: true
 ```
+
+模型调用参数优先级：CLI 参数 > batch 配置 > 模型配置 > 命令默认值
 
 环境变量：`FLEXLLM_BASE_URL`/`OPENAI_BASE_URL`, `FLEXLLM_API_KEY`/`OPENAI_API_KEY`, `FLEXLLM_MODEL`/`OPENAI_MODEL`

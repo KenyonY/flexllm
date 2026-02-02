@@ -342,6 +342,10 @@ models:
     base_url: http://localhost:8000/v1
     api_key: EMPTY
     user_template: "{content}/detail"  # Model-specific user template for fine-tuned models (optional)
+    # Model params: any field beyond meta fields (id/name/provider/base_url/api_key/system/user_template)
+    # is automatically passed through to the LLM API
+    max_tokens: 512
+    temperature: 0.3
 
   - id: local-ollama
     name: local-ollama
@@ -357,6 +361,14 @@ batch:
   system: "You are a batch processing assistant."  # Batch-specific system prompt (optional)
   # user_template: "[INST]{content}[/INST]"  # Batch-specific user template (optional)
 ```
+
+**Model params priority** (higher priority overrides lower):
+1. CLI argument (e.g., `-t 0.5`, `--max-tokens 100`)
+2. Batch config (batch command only, e.g., `batch.temperature`)
+3. Model config (e.g., `models[].temperature`, `models[].max_tokens`)
+4. Command defaults (e.g., chat/chat-web defaults: temperature=0.7, max_tokens=2048)
+
+Any field in model config beyond the meta fields (`id`, `name`, `provider`, `base_url`, `api_key`, `system`, `user_template`) is treated as a model call parameter and automatically passed through to the LLM API.
 
 **System prompt priority** (higher priority overrides lower):
 1. CLI argument (`-s/--system`)

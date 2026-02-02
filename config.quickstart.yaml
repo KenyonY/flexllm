@@ -5,6 +5,8 @@
 default: "gpt-4o-mini"
 
 # 模型列表（至少配置一个）
+# 除 id/name/provider/base_url/api_key/system/user_template 外的字段
+# 都会作为模型调用参数自动透传给 LLM API（如 max_tokens, temperature 等）
 models:
   # OpenAI API
   - id: gpt-4o-mini

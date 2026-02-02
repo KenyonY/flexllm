@@ -237,6 +237,17 @@ models:
     base_url: http://localhost:11434/v1
     api_key: EMPTY
 
+  # 模型调用参数示例（除 id/name/provider/base_url/api_key/system/user_template
+  # 外的所有字段都会自动透传给 LLM API）
+  - id: my-finetuned-model
+    name: finetuned
+    provider: openai
+    base_url: http://gpu-server:8000/v1
+    api_key: EMPTY
+    max_tokens: 512       # 模型调用参数，自动透传
+    temperature: 0.3      # 模型调用参数，自动透传
+    # top_p: 0.9          # 更多参数同理
+
 # batch 命令配置（可选）
 batch:
   concurrency: 10       # 并发数（全局默认，可被 endpoint 级别配置覆盖）
@@ -260,6 +271,12 @@ batch:
       max_qps: 50
   fallback: true              # 失败时自动切换到其他 endpoint
 ```
+
+**模型调用参数优先级**（从高到低）：
+1. CLI 参数（如 `-t 0.5`、`--max-tokens 100`）
+2. Batch 配置（仅 batch 命令，`batch.temperature` 等）
+3. 模型配置（`models[].temperature` 等）
+4. 各命令硬编码默认值（chat/chat-web 的 temperature=0.7、max_tokens=2048）
 
 也支持环境变量配置：`FLEXLLM_BASE_URL`、`FLEXLLM_API_KEY`、`FLEXLLM_MODEL`
 

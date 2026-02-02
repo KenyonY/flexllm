@@ -37,6 +37,9 @@ except ImportError:
 class FlexLLMConfig:
     """配置管理"""
 
+    # 元信息字段，不作为模型调用参数传递
+    _META_FIELDS = {"id", "name", "provider", "base_url", "api_key", "system", "user_template"}
+
     def __init__(self):
         self.config = self._load_config()
 
@@ -165,6 +168,17 @@ class FlexLLMConfig:
         # 3. 全局配置
         return self.config.get("user_template")
 
+    def get_model_params(self, model_name_or_id: str = None) -> dict:
+        """获取模型调用参数（排除元信息字段后的所有字段）
+
+        模型配置中除了元信息字段（id, name, provider, base_url, api_key, system, user_template）
+        外的所有字段都视为模型调用参数，自动透传给 LLM API。
+        """
+        model_config = self.get_model_config(model_name_or_id)
+        if not model_config:
+            return {}
+        return {k: v for k, v in model_config.items() if k not in self._META_FIELDS}
+
     def get_batch_config(self) -> dict:
         """
         获取 batch 命令的配置
@@ -184,6 +198,8 @@ class FlexLLMConfig:
             "retry_times": 3,
             "retry_delay": 1.0,
             # 采样参数
+            "temperature": None,
+            "max_tokens": None,
             "top_p": None,
             "top_k": None,
             # 思考模式
@@ -441,7 +457,7 @@ if HAS_TYPER:
             )
             raise typer.Exit(1)
 
-        model_id = model_config.get("id")
+        model_id = model_config.get("id", model)
         base_url = model_config.get("base_url")
         api_key = model_config.get("api_key", "EMPTY")
 
@@ -453,6 +469,9 @@ if HAS_TYPER:
         if not user_template:
             user_template = config.get_user_template(model)
 
+        # 获取模型调用参数
+        model_params = config.get_model_params(model)
+
         async def _ask():
             from flexllm import LLMClient
 
@@ -463,7 +482,7 @@ if HAS_TYPER:
                 # 应用 user_template
                 user_content = apply_user_template(full_prompt, user_template)
                 messages.append({"role": "user", "content": user_content})
-                return await client.chat_completions(messages)
+                return await client.chat_completions(messages, **model_params)
 
         try:
             result = asyncio.run(_ask())
@@ -488,8 +507,8 @@ if HAS_TYPER:
         base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
         api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
         system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
-        temperature: Annotated[float, Option("-t", "--temperature", help="采样温度")] = 0.7,
-        max_tokens: Annotated[int, Option("--max-tokens", help="最大生成 token 数")] = 2048,
+        temperature: Annotated[float | None, Option("-t", "--temperature", help="采样温度")] = None,
+        max_tokens: Annotated[int | None, Option("--max-tokens", help="最大生成 token 数")] = None,
         no_stream: Annotated[bool, Option("--no-stream", help="禁用流式输出")] = False,
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
@@ -505,7 +524,7 @@ if HAS_TYPER:
         config = get_config()
         model_config = config.get_model_config(model)
         if model_config:
-            model = model or model_config.get("id")
+            model = model_config.get("id", model)
             base_url = base_url or model_config.get("base_url")
             api_key = api_key or model_config.get("api_key", "EMPTY")
 
@@ -521,6 +540,15 @@ if HAS_TYPER:
         if not user_template:
             user_template = config.get_user_template(model)
 
+        # 合并模型调用参数：CLI > model_params > fallback
+        model_params = config.get_model_params(model)
+        if temperature is not None:
+            model_params["temperature"] = temperature
+        if max_tokens is not None:
+            model_params["max_tokens"] = max_tokens
+        model_params.setdefault("temperature", 0.7)
+        model_params.setdefault("max_tokens", 2048)
+
         stream = not no_stream
 
         if message:
@@ -530,8 +558,8 @@ if HAS_TYPER:
                 base_url,
                 api_key,
                 system_prompt,
-                temperature,
-                max_tokens,
+                model_params["temperature"],
+                model_params["max_tokens"],
                 stream,
                 user_template,
             )
@@ -541,8 +569,8 @@ if HAS_TYPER:
                 base_url,
                 api_key,
                 system_prompt,
-                temperature,
-                max_tokens,
+                model_params["temperature"],
+                model_params["max_tokens"],
                 stream,
                 user_template,
             )
@@ -553,8 +581,8 @@ if HAS_TYPER:
         base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
         api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
         system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
-        temperature: Annotated[float, Option("-t", "--temperature", help="采样温度")] = 0.7,
-        max_tokens: Annotated[int, Option("--max-tokens", help="最大生成 token 数")] = 2048,
+        temperature: Annotated[float | None, Option("-t", "--temperature", help="采样温度")] = None,
+        max_tokens: Annotated[int | None, Option("--max-tokens", help="最大生成 token 数")] = None,
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
@@ -580,7 +608,7 @@ if HAS_TYPER:
         config = get_config()
         model_config = config.get_model_config(model)
         if model_config:
-            model = model or model_config.get("id")
+            model = model_config.get("id", model)
             base_url = base_url or model_config.get("base_url")
             api_key = api_key or model_config.get("api_key", "EMPTY")
 
@@ -593,6 +621,15 @@ if HAS_TYPER:
         if not user_template:
             user_template = config.get_user_template(model)
 
+        # 合并模型调用参数：CLI > model_params > fallback
+        model_params = config.get_model_params(model)
+        if temperature is not None:
+            model_params["temperature"] = temperature
+        if max_tokens is not None:
+            model_params["max_tokens"] = max_tokens
+        model_params.setdefault("temperature", 0.7)
+        model_params.setdefault("max_tokens", 2048)
+
         try:
             from .chat_web import ChatWebConfig, ChatWebServer
         except ImportError:
@@ -600,6 +637,9 @@ if HAS_TYPER:
             raise typer.Exit(1)
 
         thinking_value = _parse_thinking(thinking)
+        # CLI --thinking 覆盖 model_params 中的 thinking
+        if thinking_value is None:
+            thinking_value = model_params.get("thinking")
 
         web_config = ChatWebConfig(
             port=port,
@@ -608,8 +648,8 @@ if HAS_TYPER:
             base_url=base_url,
             api_key=api_key,
             system_prompt=system_prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=model_params["temperature"],
+            max_tokens=model_params["max_tokens"],
             user_template=user_template,
             thinking=thinking_value,
             title=title,
@@ -618,7 +658,7 @@ if HAS_TYPER:
         print(f"flexllm Chat Web starting on http://{host}:{port}")
         print(f"  Model: {model}")
         print(f"  Server: {base_url}")
-        print(f"  Temperature: {temperature}")
+        print(f"  Temperature: {model_params['temperature']}")
         if thinking_value is not None:
             print(f"  Thinking: {thinking_value}")
         print("\nPress Ctrl+C to stop")
@@ -678,7 +718,7 @@ if HAS_TYPER:
         config = get_config()
         model_config = config.get_model_config(model)
         if model_config:
-            model = model or model_config.get("id")
+            model = model_config.get("id", model)
             base_url = base_url or model_config.get("base_url")
             api_key = api_key or model_config.get("api_key", "EMPTY")
 
@@ -691,6 +731,13 @@ if HAS_TYPER:
         if not user_template:
             user_template = config.get_user_template(model)
 
+        # 合并模型调用参数：CLI > model_params
+        model_params = config.get_model_params(model)
+        if temperature is not None:
+            model_params["temperature"] = temperature
+        if max_tokens is not None:
+            model_params["max_tokens"] = max_tokens
+
         try:
             from .serve import ServeConfig, ServeServer
         except ImportError:
@@ -698,6 +745,9 @@ if HAS_TYPER:
             raise typer.Exit(1)
 
         thinking_value = _parse_thinking(thinking)
+        # CLI --thinking 覆盖 model_params 中的 thinking
+        if thinking_value is None:
+            thinking_value = model_params.get("thinking")
 
         serve_config = ServeConfig(
             port=port,
@@ -707,8 +757,8 @@ if HAS_TYPER:
             api_key=api_key,
             system_prompt=system_prompt,
             user_template=user_template,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=model_params.get("temperature"),
+            max_tokens=model_params.get("max_tokens"),
             thinking=thinking_value,
             concurrency=concurrency,
             max_qps=max_qps,
@@ -716,13 +766,16 @@ if HAS_TYPER:
             verbose=verbose,
         )
 
+        effective_temperature = model_params.get("temperature")
+        effective_max_tokens = model_params.get("max_tokens")
+
         print(f"flexllm Serve starting on http://{host}:{port}")
         print(f"  Model: {model}")
         print(f"  Server: {base_url}")
-        if temperature is not None:
-            print(f"  Temperature: {temperature}")
-        if max_tokens is not None:
-            print(f"  Max tokens: {max_tokens}")
+        if effective_temperature is not None:
+            print(f"  Temperature: {effective_temperature}")
+        if effective_max_tokens is not None:
+            print(f"  Max tokens: {effective_max_tokens}")
         if thinking_value is not None:
             print(f"  Thinking: {thinking_value}")
         if system_prompt:
@@ -867,7 +920,7 @@ if HAS_TYPER:
                 )
                 raise typer.Exit(1)
 
-        model_id = model_config.get("id") if model_config else None
+        model_id = model_config.get("id", model) if model_config else None
         base_url = model_config.get("base_url") if model_config else None
         api_key = model_config.get("api_key", "EMPTY") if model_config else None
 
@@ -965,18 +1018,17 @@ if HAS_TYPER:
                     cache_config = ResponseCacheConfig.ipc(ttl=batch_config["cache_ttl"])
 
                 # 构建 chat_completions_batch 的 kwargs
-                kwargs = {}
+                # 优先级：CLI > batch_config > model_params
+                kwargs = config.get_model_params(model)
+                # batch_config 中的采样参数覆盖 model_params
+                for key in ("temperature", "max_tokens", "top_p", "top_k", "thinking"):
+                    if batch_config.get(key) is not None:
+                        kwargs[key] = batch_config[key]
+                # CLI 参数最终覆盖
                 if temperature is not None:
                     kwargs["temperature"] = temperature
                 if max_tokens is not None:
                     kwargs["max_tokens"] = max_tokens
-                # 从配置文件读取采样参数
-                if batch_config["top_p"] is not None:
-                    kwargs["top_p"] = batch_config["top_p"]
-                if batch_config["top_k"] is not None:
-                    kwargs["top_k"] = batch_config["top_k"]
-                if batch_config["thinking"] is not None:
-                    kwargs["thinking"] = batch_config["thinking"]
 
                 # 使用 batch.endpoints 配置或单 model 配置
                 if use_pool:
@@ -1237,7 +1289,7 @@ if HAS_TYPER:
         config = get_config()
         model_config = config.get_model_config(model)
         if model_config:
-            model = model or model_config.get("id")
+            model = model_config.get("id", model)
             base_url = base_url or model_config.get("base_url")
             api_key = api_key or model_config.get("api_key", "EMPTY")
 

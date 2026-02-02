@@ -77,7 +77,7 @@ models:
     base_url: http://localhost:8000/v1
     api_key: EMPTY
 
-  # 微调模型示例（带特殊提示词格式）
+  # 微调模型示例（带特殊提示词格式和模型调用参数）
   - id: my-finetuned-model
     name: finetuned
     provider: openai
@@ -85,6 +85,14 @@ models:
     api_key: EMPTY
     system: "You are a specialized assistant trained on custom data."
     user_template: "{content}/detail"  # 微调模型的特殊标识符
+    # 模型调用参数（除 id/name/provider/base_url/api_key/system/user_template 外的字段
+    # 都会自动透传给 LLM API）
+    # 优先级: CLI 参数 > batch 配置 > 模型配置 > 命令硬编码默认值
+    max_tokens: 512
+    temperature: 0.3
+    # top_p: 0.9
+    # top_k: 50
+    # thinking: true
 
   # SiliconFlow API（多种开源模型）
   - id: Qwen/Qwen2.5-72B-Instruct
