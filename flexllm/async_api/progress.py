@@ -185,7 +185,9 @@ class ProgressTracker:
             parts.append(f"💰 {self._format_cost(self.total_cost)}")
         elif self.total_input_tokens > 0 or self.total_output_tokens > 0:
             # 无定价信息但有 token 数据：显示 token 统计（使用不同图标）
-            parts.append(f"📊 {self._format_tokens(self.total_input_tokens + self.total_output_tokens)} tokens")
+            parts.append(
+                f"📊 {self._format_tokens(self.total_input_tokens + self.total_output_tokens)} tokens"
+            )
 
         # 模型名称和定价
         if self.model_name:
@@ -269,13 +271,17 @@ class ProgressTracker:
 
         # 单行模式下的成本/token 显示（向后兼容）
         if self.config.show_cost and not self._use_two_lines:
-            has_pricing = self.input_price_per_1m is not None and self.output_price_per_1m is not None
+            has_pricing = (
+                self.input_price_per_1m is not None and self.output_price_per_1m is not None
+            )
             if has_pricing and self.total_cost > 0:
                 cost_text = f"💰 {self._format_cost(self.total_cost)}"
                 components.append(self._get_colored_text(cost_text, "green"))
             elif self.total_input_tokens > 0 or self.total_output_tokens > 0:
                 # 无定价信息时显示 token 数量
-                token_text = f"📊 {self._format_tokens(self.total_input_tokens + self.total_output_tokens)}"
+                token_text = (
+                    f"📊 {self._format_tokens(self.total_input_tokens + self.total_output_tokens)}"
+                )
                 components.append(self._get_colored_text(token_text, "green"))
 
         progress_line = " ".join(components)

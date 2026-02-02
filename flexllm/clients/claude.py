@@ -103,6 +103,7 @@ class ClaudeClient(LLMClientBase):
         top_p: float = None,
         top_k: int = None,
         thinking: bool | int | None = None,
+        response_format: dict = None,
         **kwargs,
     ) -> dict:
         """
@@ -114,6 +115,11 @@ class ClaudeClient(LLMClientBase):
                 - True: 启用扩展思考（默认 budget_tokens=10000）
                 - int: 启用扩展思考并指定 budget_tokens
                 - None: 使用模型默认行为
+            response_format: 响应格式控制
+                - {"type": "json_object"}: 输出 JSON
+                - {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}:
+                  按 JSON schema 输出
+                Claude 不原生支持 response_format，通过 system prompt 注入 JSON 指令实现
         """
         # 分离 system message
         system_content = None
@@ -130,6 +136,16 @@ class ClaudeClient(LLMClientBase):
                 system_content = (system_content + "\n" + content) if system_content else content
             else:
                 user_messages.append(self._convert_message(msg))
+
+        # response_format: 通过 system prompt 注入 JSON 指令
+        if response_format:
+            json_instruction = self._build_json_instruction(response_format)
+            if json_instruction:
+                system_content = (
+                    (system_content + "\n\n" + json_instruction)
+                    if system_content
+                    else json_instruction
+                )
 
         body = {
             "model": model,
@@ -156,9 +172,27 @@ class ClaudeClient(LLMClientBase):
         elif thinking is False:
             body["thinking"] = {"type": "disabled"}
 
-        # 透传其他参数（如 tools）
+        # 透传其他参数（如 tools），但排除 response_format（已通过 prompt 注入）
+        kwargs.pop("response_format", None)
         body.update(kwargs)
         return body
+
+    @staticmethod
+    def _build_json_instruction(response_format: dict) -> str | None:
+        """将 response_format 转换为 system prompt 中的 JSON 输出指令"""
+        fmt_type = response_format.get("type", "")
+        if fmt_type == "json_object":
+            return "You must respond with valid JSON only. No other text or explanation."
+        elif fmt_type == "json_schema":
+            schema = response_format.get("json_schema", {}).get("schema")
+            if schema:
+                schema_str = json.dumps(schema, ensure_ascii=False)
+                return (
+                    f"You must respond with valid JSON that conforms to this schema:\n"
+                    f"{schema_str}\n"
+                    f"Output only the JSON object, no other text."
+                )
+        return None
 
     def _convert_message(self, msg: dict) -> dict:
         """转换消息格式（处理多模态内容）"""

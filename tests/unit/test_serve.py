@@ -135,18 +135,18 @@ class TestParseResult:
 
 class TestParseThinking:
     def test_true(self):
-        from flexllm.__main__ import _parse_thinking
+        from flexllm.cli.utils import parse_thinking as _parse_thinking
 
         assert _parse_thinking("true") is True
         assert _parse_thinking("True") is True
 
     def test_false(self):
-        from flexllm.__main__ import _parse_thinking
+        from flexllm.cli.utils import parse_thinking as _parse_thinking
 
         assert _parse_thinking("false") is False
 
     def test_levels(self):
-        from flexllm.__main__ import _parse_thinking
+        from flexllm.cli.utils import parse_thinking as _parse_thinking
 
         assert _parse_thinking("low") == "low"
         assert _parse_thinking("medium") == "medium"
@@ -154,17 +154,17 @@ class TestParseThinking:
         assert _parse_thinking("minimal") == "minimal"
 
     def test_integer(self):
-        from flexllm.__main__ import _parse_thinking
+        from flexllm.cli.utils import parse_thinking as _parse_thinking
 
         assert _parse_thinking("1024") == 1024
 
     def test_none(self):
-        from flexllm.__main__ import _parse_thinking
+        from flexllm.cli.utils import parse_thinking as _parse_thinking
 
         assert _parse_thinking(None) is None
 
     def test_invalid(self):
-        from flexllm.__main__ import _parse_thinking
+        from flexllm.cli.utils import parse_thinking as _parse_thinking
 
         with pytest.raises(SystemExit):
             _parse_thinking("invalid_value")

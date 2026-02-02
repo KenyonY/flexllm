@@ -68,6 +68,7 @@ results = await client.chat_completions_batch(messages_list, output_jsonl="resul
 | **Cost Tracking**          | Real-time cost monitoring with budget control                                   |
 | **High-Performance Async** | Fine-grained concurrency control, QPS limiting, and streaming                   |
 | **Multi-Provider**         | Supports OpenAI-compatible APIs, Gemini, Claude                                 |
+| **Agent (Tool-Use Loop)**  | AgentClient with automatic tool calling, multi-turn chat, and structured output |
 
 ---
 
@@ -277,6 +278,42 @@ if result.tool_calls:
         print(f"Call: {call.function['name']}({call.function['arguments']})")
 ```
 
+### Agent (Tool-Use Loop)
+
+`AgentClient` wraps `LLMClient` and handles the tool-calling loop automatically: LLM calls → execute tools → feed results back → repeat until done.
+
+```python
+from flexllm import AgentClient, LLMClient
+
+client = LLMClient(model="gpt-4", base_url="...", api_key="...")
+
+agent = AgentClient(
+    client=client,
+    system="You are a helpful assistant.",
+    tools=[{...}],                        # OpenAI-format tool definitions
+    tool_executor=my_tool_fn,             # (name, arguments_json) -> result
+    max_rounds=10,
+)
+
+# Stateless single task
+result = await agent.run("Check the weather in Beijing")
+# result.content, result.rounds, result.tool_calls, result.usage
+
+# Stateful multi-turn chat (auto-maintains message history)
+r1 = await agent.chat("Hello")
+r2 = await agent.chat("Check the weather")   # carries r1 context
+agent.reset()
+
+# Structured output with Pydantic
+from pydantic import BaseModel
+class Decision(BaseModel):
+    action: str
+    reason: str
+
+result = await agent.run("Analyze this", response_format=Decision)
+result.parsed  # -> Decision(action="approve", reason="...")
+```
+
 ---
 
 ## CLI
@@ -303,6 +340,10 @@ flexllm init              # Initialize config file
 # Serve - wrap LLM as HTTP API (for fine-tuned model deployment)
 flexllm serve -m qwen-finetuned -s "You are an assistant"
 flexllm serve --thinking true -p 8000 -v  # With thinking mode + request logging
+
+# Agent mode (tool-use loop with built-in shell tool)
+flexllm chat --tools shell                          # Interactive agent chat
+echo "Check CPU usage" | flexllm agent --tools shell # Non-interactive agent
 
 # Utilities
 flexllm pricing gpt-4     # Query model pricing
@@ -404,9 +445,11 @@ flexllm/
 │   ├── claude.py      # Anthropic Claude backend
 │   ├── pool.py        # Multi-endpoint load balancer
 │   └── router.py      # Provider routing strategies
+├── agent/             # Agent layer (tool-use loop)
+│   ├── client.py      # AgentClient implementation
+│   └── types.py       # AgentResult, ToolCallRecord
+├── cli/               # CLI commands and helpers
 ├── pricing/           # Cost estimation and tracking
-│   ├── cost_tracker.py
-│   └── token_counter.py
 ├── serve.py           # HTTP API server (flexllm serve)
 ├── cache/             # Response caching with IPC
 ├── async_api/         # High-performance async engine
@@ -416,22 +459,24 @@ flexllm/
 The architecture follows a simple layered design:
 
 ```
-LLMClient (single endpoint or multi-endpoint)
-    │                                  │
-    │                                  ├── ProviderRouter (round_robin)
-    │                                  ├── Health Monitor (failure threshold + auto recovery)
-    │                                  └── Shared Task Queue (dynamic load balancing)
-    │                                  │
-    └──────────── Backend Clients ─────┘
-                    ├── OpenAIClient
-                    ├── GeminiClient
-                    └── ClaudeClient
-                            │
-                            └── LLMClientBase (Abstract - 4 methods to implement)
+AgentClient (tool-use loop, multi-turn chat, structured output)
+    │
+    └── LLMClient (single endpoint or multi-endpoint)
+            │                                  │
+            │                                  ├── ProviderRouter (round_robin)
+            │                                  ├── Health Monitor (failure threshold + auto recovery)
+            │                                  └── Shared Task Queue (dynamic load balancing)
+            │                                  │
+            └──────────── Backend Clients ─────┘
+                            ├── OpenAIClient
+                            ├── GeminiClient
+                            └── ClaudeClient
                                     │
-                                    ├── ConcurrentRequester (Async engine)
-                                    ├── ResponseCache (Caching layer)
-                                    └── CostTracker (Cost monitoring)
+                                    └── LLMClientBase (Abstract - 4 methods to implement)
+                                            │
+                                            ├── ConcurrentRequester (Async engine)
+                                            ├── ResponseCache (Caching layer)
+                                            └── CostTracker (Cost monitoring)
 ```
 
 ---
@@ -463,6 +508,27 @@ LLMClient(
 | `chat_completions_batch(messages_list)`      | Batch async with checkpoint |
 | `iter_chat_completions_batch(messages_list)` | Streaming batch results     |
 | `chat_completions_stream(messages)`          | Token-by-token streaming    |
+
+### AgentClient
+
+```python
+AgentClient(
+    client: LLMClient,                # LLMClient instance (composition, not inheritance)
+    system: str = None,                # System prompt
+    tools: list[dict] = None,          # OpenAI-format tool definitions
+    tool_executor: Callable = None,    # (name, arguments_json) -> result (sync or async)
+    max_rounds: int = 10,              # Max tool-calling rounds per run
+    max_context_tokens: int = None,    # Optional context window limit
+)
+```
+
+| Method               | Description                                           |
+| -------------------- | ----------------------------------------------------- |
+| `run(user_input)`    | Stateless single task with tool-use loop              |
+| `chat(user_input)`   | Stateful multi-turn chat (auto-maintains history)     |
+| `reset()`            | Clear conversation history                            |
+
+Returns `AgentResult` with `.content`, `.rounds`, `.tool_calls`, `.usage`, `.parsed`.
 
 ---
 

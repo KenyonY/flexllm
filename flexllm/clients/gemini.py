@@ -140,6 +140,7 @@ class GeminiClient(LLMClientBase):
         stop_sequences: list[str] = None,
         safety_settings: list[dict] = None,
         thinking: bool | str | None = None,
+        response_format: dict = None,
         **kwargs,
     ) -> dict:
         """
@@ -151,6 +152,10 @@ class GeminiClient(LLMClientBase):
                 - True: 启用思考并返回思考内容（includeThoughts=True）
                 - "minimal"/"low"/"medium"/"high": 设置思考深度
                 - None: 使用模型默认行为
+            response_format: 响应格式控制
+                - {"type": "json_object"}: 输出 JSON
+                - {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}:
+                  按 JSON schema 输出（转换为 Gemini 的 responseSchema）
         """
         contents, system_obj = self._convert_messages_to_contents(messages)
         body = {"contents": contents}
@@ -169,6 +174,17 @@ class GeminiClient(LLMClientBase):
             gen_config["topK"] = top_k
         if stop_sequences:
             gen_config["stopSequences"] = stop_sequences
+
+        # response_format 转换为 Gemini 格式
+        if response_format:
+            fmt_type = response_format.get("type", "")
+            if fmt_type == "json_object":
+                gen_config["responseMimeType"] = "application/json"
+            elif fmt_type == "json_schema":
+                gen_config["responseMimeType"] = "application/json"
+                schema = response_format.get("json_schema", {}).get("schema")
+                if schema:
+                    gen_config["responseSchema"] = schema
 
         # 构建 thinkingConfig
         thinking_config = {}

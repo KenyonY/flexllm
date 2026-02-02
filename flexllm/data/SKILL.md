@@ -1,6 +1,6 @@
 ---
 name: flexllm
-description: LLM API 客户端 - 批量处理、断点续传、响应缓存、负载均衡、成本追踪
+description: LLM API 客户端 - 批量处理、断点续传、响应缓存、负载均衡、成本追踪、Agent tool-use
 ---
 
 # flexllm
@@ -19,6 +19,7 @@ async with LLMClient(model="gpt-4", base_url="https://api.openai.com/v1", api_ke
     # 流式: async for chunk in client.chat_completions_stream(messages)
     # usage: await client.chat_completions(messages, return_usage=True) → ChatCompletionResult
     # thinking: await client.chat_completions(messages, thinking=True, return_raw=True)
+    # response_format: await client.chat_completions(messages, response_format={"type":"json_object"})
 
 # 批处理（支持断点续传、成本追踪）
 results = await client.chat_completions_batch(
@@ -48,11 +49,51 @@ client = LLMClient(
 results = await client.chat_completions_batch(messages_list, output_jsonl="results.jsonl")
 ```
 
+### AgentClient（tool-use 循环）
+
+组合 LLMClient，自动执行 tool-calling 循环：LLM 调用 → 执行工具 → 回传结果 → 循环直到完成。
+
+```python
+from flexllm import AgentClient, LLMClient
+
+client = LLMClient(model="gpt-4", base_url="...", api_key="...")
+agent = AgentClient(
+    client=client,
+    system="你是一个助手",
+    tools=[{"type":"function","function":{"name":"get_weather","parameters":{...}}}],
+    tool_executor=my_fn,    # (name, arguments_json) -> result（同步/异步均可）
+    max_rounds=10,
+)
+
+# 单次任务（无状态）
+result = await agent.run("查北京天气")
+# result.content, result.rounds, result.tool_calls, result.usage
+
+# 多轮对话（有状态，自动维护历史）
+r1 = await agent.chat("你好")
+r2 = await agent.chat("帮我查天气")  # 带 r1 上下文
+agent.reset()
+
+# Structured output（Pydantic 绑定）
+from pydantic import BaseModel
+class Decision(BaseModel):
+    action: str
+    reason: str
+result = await agent.run("分析需求", response_format=Decision)
+result.parsed  # Decision(action="approve", reason="...")
+
+# 事件回调
+agent.on_tool_call = lambda name, args: print(f"调用: {name}")
+agent.on_tool_result = lambda name, result: print(f"结果: {result[:100]}")
+```
+
 ## CLI
 
 ```bash
 flexllm ask "问题"                     # 快速问答
 flexllm chat                           # 交互式聊天
+flexllm chat --tools shell             # Agent 模式（带 shell 工具）
+flexllm agent --tools shell "查CPU使用率" # Agent 非交互式执行
 flexllm list                           # 已配置模型
 flexllm test                           # 测试连接
 flexllm pricing gpt-4o                 # 查询定价
