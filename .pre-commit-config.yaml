@@ -23,7 +23,7 @@ repos:
     hooks:
       - id: pytest
         name: pytest
-        entry: pytest tests/unit/ -q --tb=short
+        entry: pytest tests/unit/ -q --tb=short -m "not slow"
         language: system
         pass_filenames: false
         always_run: true

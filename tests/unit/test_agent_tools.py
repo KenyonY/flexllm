@@ -277,6 +277,7 @@ class TestBashExec:
         result = bash_exec("echo error >&2")
         assert "error" in result
 
+    @pytest.mark.slow
     def test_bash_timeout(self):
         """超时"""
         result = bash_exec("sleep 10", timeout=1)

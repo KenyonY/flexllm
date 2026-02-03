@@ -120,7 +120,7 @@ class TestChatCompletions:
         cfg = MockServerConfig(port=19401, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
-                base_url=server.url, model="mock-model", api_key="EMPTY"
+                base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
                 with pytest.raises(RuntimeError, match="LLM 请求失败"):
                     await client.chat_completions_or_raise(_msgs())
@@ -715,6 +715,7 @@ class TestOpenAIThinking:
 # ============== 8. LLMClientPool 方法测试 ==============
 
 
+@pytest.mark.slow
 class TestPoolMethods:
     """LLMClientPool 各方法测试"""
 
@@ -895,6 +896,7 @@ class TestTypeSystem:
 # ============== 10. 断点续传 ==============
 
 
+@pytest.mark.slow
 class TestCheckpointResume:
     """断点续传测试"""
 
@@ -1142,7 +1144,7 @@ class TestErrorHandling:
         cfg = MockServerConfig(port=19461, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
-                base_url=server.url, model="mock-model", api_key="EMPTY"
+                base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
                 results = await client.chat_completions_batch(_batch_msgs(3), show_progress=False)
                 assert len(results) == 3
@@ -1154,7 +1156,7 @@ class TestErrorHandling:
         cfg = MockServerConfig(port=19462, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
-                base_url=server.url, model="mock-model", api_key="EMPTY"
+                base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
                 results, summary = await client.chat_completions_batch(
                     _batch_msgs(3), show_progress=True, return_summary=True
@@ -1174,6 +1176,7 @@ class TestErrorHandling:
                 model="mock-model",
                 api_key="EMPTY",
                 retry_times=5,  # 多次重试
+                retry_delay=0.01,  # 加快重试速度
             ) as client:
                 results = await client.chat_completions_batch(_batch_msgs(10), show_progress=False)
                 # 有重试的情况下大部分应该成功
@@ -1186,7 +1189,7 @@ class TestErrorHandling:
         cfg = MockServerConfig(port=19464, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
-                base_url=server.url, model="mock-model", api_key="EMPTY"
+                base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
                 result = await client.chat_completions(_msgs())
                 # 失败时返回 RequestResult
