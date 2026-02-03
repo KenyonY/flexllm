@@ -1,4 +1,5 @@
 import statistics
+import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -83,6 +84,11 @@ class ProgressTracker:
         # 节流控制：限制刷新频率，避免高并发时过多终端 I/O
         self._last_refresh_time = 0.0
         self._min_refresh_interval = 0.05  # 最小刷新间隔 50ms
+
+        # TTY 检测：非 TTY 环境使用里程碑输出
+        self._is_tty = sys.stdout.isatty()
+        self._milestones = set(range(10, 101, 10))  # 10%, 20%, ..., 100%
+        self._reported_milestones: set[int] = set()
 
         # 如果提供了模型信息，直接启用双行显示
         if model_name is not None:
@@ -173,6 +179,38 @@ class ProgressTracker:
             return f"{tokens / 1_000:.1f}K"
         return str(tokens)
 
+    def _print_milestone(self, milestone: int) -> None:
+        """输出里程碑进度（非 TTY 环境）
+
+        格式: [10%] 100/1000, 2.3 req/s, elapsed: 43s, eta: 6m
+        """
+        now = time.time()
+        elapsed = now - self.start_time
+        speed = self._calculate_speed()
+        avg_latency = statistics.mean(self.latencies) if self.latencies else 0
+        remaining_requests = self.total_requests - self.completed_requests
+        eta = avg_latency * remaining_requests / self.concurrency if avg_latency > 0 else 0
+
+        # 构建输出
+        parts = [
+            f"[{milestone}%]",
+            f"{self.completed_requests}/{self.total_requests},",
+            f"{speed:.1f} req/s,",
+        ]
+
+        # eta 仅在未完成时显示，100% 时只显示 elapsed
+        if milestone < 100:
+            parts.append(f"elapsed: {self._format_time(elapsed)},")
+            parts.append(f"eta: {self._format_time(eta)}")
+        else:
+            parts.append(f"elapsed: {self._format_time(elapsed)}")
+
+        # 错误信息
+        if self.error_count > 0:
+            parts.append(f"(errors: {self.error_count})")
+
+        print(" ".join(parts), flush=True)
+
     def _build_cost_line(self) -> str:
         """构建成本信息行（双行显示的第一行）"""
         parts = []
@@ -214,6 +252,16 @@ class ProgressTracker:
         Args:
             force: 强制刷新，忽略节流限制
         """
+        # 非 TTY 环境：使用里程碑输出
+        if not self._is_tty:
+            progress_pct = int(self.completed_requests / self.total_requests * 100)
+            # 检查是否达到新的里程碑
+            for milestone in self._milestones:
+                if progress_pct >= milestone and milestone not in self._reported_milestones:
+                    self._reported_milestones.add(milestone)
+                    self._print_milestone(milestone)
+            return
+
         now = time.time()
         # 节流：距离上次刷新不足间隔则跳过（除非强制刷新）
         if not force and self.completed_requests < self.total_requests:
