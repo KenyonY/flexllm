@@ -129,6 +129,10 @@ class FlexLLMConfig:
                 return path
         return None
 
+    def _resolve_model_name(self, model_name_or_id: str = None) -> str | None:
+        """解析模型名称，未指定时使用默认模型"""
+        return model_name_or_id or self.config.get("default")
+
     def get_system(self, model_name_or_id: str = None) -> str | None:
         """获取系统提示词
 
@@ -137,6 +141,7 @@ class FlexLLMConfig:
         2. 全局 system
         3. None
         """
+        model_name_or_id = self._resolve_model_name(model_name_or_id)
         # 模型级别
         if model_name_or_id:
             for m in self.config.get("models", []):
@@ -155,6 +160,7 @@ class FlexLLMConfig:
         2. 全局 user_template
         3. None
         """
+        model_name_or_id = self._resolve_model_name(model_name_or_id)
         # 模型级别
         if model_name_or_id:
             for m in self.config.get("models", []):
@@ -170,6 +176,7 @@ class FlexLLMConfig:
 
         返回模型配置中除元信息字段外的所有字段，作为 chat_completions 的 kwargs
         """
+        model_name_or_id = self._resolve_model_name(model_name_or_id)
         if model_name_or_id:
             for m in self.config.get("models", []):
                 if m.get("name") == model_name_or_id or m.get("id") == model_name_or_id:

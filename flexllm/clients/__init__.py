@@ -22,6 +22,11 @@ from .openai import OpenAIClient
 from .pool import EndpointConfig, LLMClientPool
 from .router import ProviderConfig, ProviderRouter, create_router_from_urls
 
+# 注册 LLMClientPool 为 LLMClientBase 的虚拟子类，
+# 使 isinstance(pool, LLMClientBase) 返回 True。
+# Pool 不直接实现抽象方法，而是通过 __getattr__ 委托给底层客户端。
+LLMClientBase.register(LLMClientPool)
+
 __all__ = [
     # 基础类
     "LLMClientBase",

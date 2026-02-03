@@ -18,6 +18,8 @@ from ..msg_processors.unified_processor import (
 )
 from .openai import OpenAIClient
 
+_DEFAULT_SAFETY = {"input_level": "none", "input_image_level": "none"}
+
 
 class MllmClientBase(ABC):
     """
@@ -33,10 +35,7 @@ class MllmClientBase(ABC):
         temperature=0.1,
         max_tokens=2000,
         top_p=0.95,
-        safety={
-            "input_level": "none",
-            "input_image_level": "none",
-        },
+        safety=None,
         **kwargs,
     ):
         """
@@ -138,10 +137,7 @@ class MllmClient(MllmClientBase):
         temperature=0.1,
         max_tokens=2000,
         top_p=0.95,
-        safety={
-            "input_level": "none",
-            "input_image_level": "none",
-        },
+        safety=None,
         **kwargs,
     ):
         return asyncio.run(
@@ -155,10 +151,7 @@ class MllmClient(MllmClientBase):
         temperature=0.1,
         max_tokens=2000,
         top_p=0.95,
-        safety={
-            "input_level": "none",
-            "input_image_level": "none",
-        },
+        safety=None,
         show_progress=True,
         **kwargs,
     ):
@@ -180,13 +173,14 @@ class MllmClient(MllmClientBase):
         """
         if model is None:
             model = self.model
+        if safety is None:
+            safety = _DEFAULT_SAFETY
 
         # 使用持有的处理器实例进行预处理，保持缓存效果
         messages_list = await self._preprocess_messages_with_instance(
             messages_list,
             show_progress=show_progress,
         )
-        # print(f"{messages_list[-1]=}")
         response_list, _ = await self.client.chat_completions_batch(
             messages_list=messages_list,
             model=model,
@@ -207,10 +201,7 @@ class MllmClient(MllmClientBase):
         temperature=0.1,
         max_tokens=2000,
         top_p=0.95,
-        safety={
-            "input_level": "none",
-            "input_image_level": "none",
-        },
+        safety=None,
         **kwargs,
     ):
         """
@@ -318,10 +309,7 @@ class MllmClient(MllmClientBase):
         temperature=0.1,
         max_tokens=2000,
         top_p=0.95,
-        safety={
-            "input_level": "none",
-            "input_image_level": "none",
-        },
+        safety=None,
         show_progress=True,
         **kwargs,
     ):
@@ -346,6 +334,8 @@ class MllmClient(MllmClientBase):
         """
         if model is None:
             model = self.model
+        if safety is None:
+            safety = _DEFAULT_SAFETY
 
         # 默认选择函数(如果未提供)，简单返回第一个响应
         if selector_fn is None:
@@ -394,10 +384,7 @@ class MllmClient(MllmClientBase):
         temperature=0.1,
         max_tokens=2000,
         top_p=0.95,
-        safety={
-            "input_level": "none",
-            "input_image_level": "none",
-        },
+        safety=None,
         **kwargs,
     ):
         """
@@ -454,10 +441,7 @@ class MllmClient(MllmClientBase):
         temperature=0.1,
         max_tokens=2000,
         top_p=0.95,
-        safety={
-            "input_level": "none",
-            "input_image_level": "none",
-        },
+        safety=None,
         **kwargs,
     ):
         """

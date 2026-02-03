@@ -615,3 +615,51 @@ class TestPrepareResponseFormat:
         fmt, model = AgentClient._prepare_response_format(None)
         assert fmt is None
         assert model is None
+
+
+class TestMergeUsage:
+    """测试 _merge_usage 累加逻辑"""
+
+    def test_none_plus_none(self):
+        """两个 None 返回 None"""
+        from flexllm.agent.client import _merge_usage
+
+        assert _merge_usage(None, None) is None
+
+    def test_none_plus_dict(self):
+        """total=None 时返回 new 的副本"""
+        from flexllm.agent.client import _merge_usage
+
+        new = {"prompt_tokens": 10, "completion_tokens": 5}
+        result = _merge_usage(None, new)
+        assert result == new
+        assert result is not new  # 是副本
+
+    def test_dict_plus_none(self):
+        """new=None 时返回 total 原值"""
+        from flexllm.agent.client import _merge_usage
+
+        total = {"prompt_tokens": 10}
+        result = _merge_usage(total, None)
+        assert result is total
+
+    def test_dict_plus_dict(self):
+        """两个 dict 累加数值字段"""
+        from flexllm.agent.client import _merge_usage
+
+        total = {"prompt_tokens": 10, "completion_tokens": 5}
+        new = {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
+        result = _merge_usage(total, new)
+        assert result["prompt_tokens"] == 30
+        assert result["completion_tokens"] == 15
+        assert result["total_tokens"] == 30
+
+    def test_non_numeric_fields_ignored(self):
+        """非数值字段不累加"""
+        from flexllm.agent.client import _merge_usage
+
+        total = {"prompt_tokens": 10}
+        new = {"prompt_tokens": 5, "model": "gpt-4"}
+        result = _merge_usage(total, new)
+        assert result["prompt_tokens"] == 15
+        assert "model" not in result

@@ -389,6 +389,16 @@ class GeminiClient(LLMClientBase):
         except Exception:
             return None
 
+    def _extract_stream_usage(self, data: dict) -> dict | None:
+        """从 Gemini 流式 chunk 中提取 usage（usageMetadata 字段）"""
+        if "usageMetadata" in data:
+            return self._extract_usage(data)
+        return None
+
+    def _prepare_stream_body(self, body: dict, return_usage: bool) -> dict:
+        """Gemini 不需要 stream_options"""
+        return body
+
     async def chat_completions_stream(
         self,
         messages: list[dict],
@@ -399,22 +409,10 @@ class GeminiClient(LLMClientBase):
         timeout: int = None,
         **kwargs,
     ):
-        """
-        流式聊天完成（Gemini 专用实现）
+        """Gemini 流式聊天完成
 
-        Gemini 流式响应中的 usage 信息在最后一个 chunk 的 usageMetadata 字段中。
-
-        Args:
-            messages: 消息列表
-            model: 模型名称
-            return_usage: 是否返回 usage 信息
-            preprocess_msg: 是否预处理消息
-            url: 自定义请求 URL
-            timeout: 超时时间（秒）
-
-        Yields:
-            - return_usage=False: str 内容片段
-            - return_usage=True: dict，包含 type 和对应数据
+        Gemini 的 thinking 和 content 可能在同一个 chunk 中（不 continue），
+        因此需要覆写基类的 stream 方法。
         """
         import json
 
@@ -424,7 +422,6 @@ class GeminiClient(LLMClientBase):
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
         body = self._build_request_body(messages, effective_model, stream=True, **kwargs)
-        # 注意：Gemini 不需要 stream_options，usage 自动包含在最后一个 chunk 中
 
         effective_url = url or self._get_stream_url(effective_model)
         headers = self._get_headers()
@@ -449,14 +446,12 @@ class GeminiClient(LLMClientBase):
                         try:
                             data = json.loads(data_str)
 
-                            # 提取思考内容
+                            # thinking 和 content 可能在同一个 chunk 中
                             thinking = self._extract_stream_thinking(data)
                             if thinking:
                                 if return_usage:
                                     yield {"type": "thinking", "content": thinking}
-                                # thinking 和 content 可能在同一个 chunk 中，不 continue
 
-                            # 提取内容
                             content = self._extract_stream_content(data)
                             if content:
                                 if return_usage:
@@ -464,9 +459,8 @@ class GeminiClient(LLMClientBase):
                                 else:
                                     yield content
 
-                            # 检查是否包含 usage（Gemini 在最后一个 chunk 中包含 usageMetadata）
-                            if return_usage and "usageMetadata" in data:
-                                usage = self._extract_usage(data)
+                            if return_usage:
+                                usage = self._extract_stream_usage(data)
                                 if usage:
                                     yield {"type": "usage", "usage": usage}
 

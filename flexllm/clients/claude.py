@@ -195,9 +195,45 @@ class ClaudeClient(LLMClientBase):
         return None
 
     def _convert_message(self, msg: dict) -> dict:
-        """转换消息格式（处理多模态内容）"""
+        """转换消息格式（处理多模态内容、tool_calls、tool result）"""
         role = msg.get("role", "user")
         content = msg.get("content", "")
+
+        # tool result 消息 → Claude tool_result content block
+        if role == "tool":
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": msg.get("tool_call_id", ""),
+                        "content": content,
+                    }
+                ],
+            }
+
+        # assistant 消息中包含 tool_calls → Claude tool_use content block
+        if role == "assistant" and msg.get("tool_calls"):
+            claude_content = []
+            if content:
+                claude_content.append({"type": "text", "text": content})
+            for tc in msg["tool_calls"]:
+                func = tc.get("function", {})
+                arguments = func.get("arguments", "{}")
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except (json.JSONDecodeError, TypeError):
+                        arguments = {}
+                claude_content.append(
+                    {
+                        "type": "tool_use",
+                        "id": tc.get("id", ""),
+                        "name": func.get("name", ""),
+                        "input": arguments,
+                    }
+                )
+            return {"role": "assistant", "content": claude_content}
 
         # Claude 格式: role 只能是 "user" 或 "assistant"
         claude_role = "assistant" if role == "assistant" else "user"
@@ -295,12 +331,19 @@ class ClaudeClient(LLMClientBase):
 
     def _extract_stream_content(self, data: dict) -> str | None:
         """从 Claude 流式响应中提取内容"""
-        # Claude 流式格式：event: content_block_delta, data: {"delta": {"text": "..."}}
         if data.get("type") == "content_block_delta":
             delta = data.get("delta", {})
             if delta.get("type") == "text_delta":
                 return delta.get("text")
         return None
+
+    def _extract_stream_usage(self, data: dict) -> dict | None:
+        """Claude 不在通用 SSE 中返回 usage，由 chat_completions_stream 单独处理"""
+        return None
+
+    def _prepare_stream_body(self, body: dict, return_usage: bool) -> dict:
+        """Claude 不需要 stream_options"""
+        return body
 
     async def chat_completions_stream(
         self,

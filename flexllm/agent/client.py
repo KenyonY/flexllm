@@ -31,9 +31,12 @@ import asyncio
 import inspect
 import json
 import logging
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from .types import AgentResult, ToolCallRecord
+
+if TYPE_CHECKING:
+    from ..clients.base import LLMClientBase
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +68,7 @@ class AgentClient:
 
     def __init__(
         self,
-        client,
+        client: "LLMClientBase",
         system: str = None,
         tools: list[dict] = None,
         tool_executor: Callable[[str, str], str] = None,

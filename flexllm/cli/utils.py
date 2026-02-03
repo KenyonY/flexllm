@@ -6,6 +6,47 @@ import json
 import sys
 
 
+def resolve_model_config(
+    model: str | None = None,
+    base_url: str | None = None,
+    api_key: str | None = None,
+    required: bool = False,
+) -> tuple[str | None, str | None, str | None]:
+    """从配置解析模型连接参数，返回 (model, base_url, api_key)
+
+    Args:
+        model: 模型名称（CLI 传入）
+        base_url: base_url（CLI 传入，优先级高于配置）
+        api_key: api_key（CLI 传入，优先级高于配置）
+        required: 为 True 时，配置不存在则打印错误并 raise typer.Exit(1)
+
+    Returns:
+        (model, base_url, api_key) 三元组，配置中的值合并 CLI 传入值
+    """
+    from .config import get_config
+
+    config = get_config()
+    model_config = config.get_model_config(model)
+
+    if not model_config:
+        if required:
+            import typer
+
+            print("错误: 未找到模型配置，使用 'flexllm list' 查看可用模型", file=sys.stderr)
+            print(
+                "提示: 设置环境变量 FLEXLLM_BASE_URL, FLEXLLM_API_KEY, FLEXLLM_MODEL"
+                " 或创建 ~/.flexllm/config.yaml",
+                file=sys.stderr,
+            )
+            raise typer.Exit(1)
+        return model, base_url, api_key
+
+    resolved_model = model_config.get("id", model)
+    resolved_base_url = base_url or model_config.get("base_url")
+    resolved_api_key = api_key or model_config.get("api_key", "EMPTY")
+    return resolved_model, resolved_base_url, resolved_api_key
+
+
 def apply_user_template(content: str, template: str | None) -> str:
     """应用 user content 模板"""
     if not template:

@@ -14,6 +14,7 @@ from .utils import (
     parse_batch_input,
     parse_thinking,
     query_credits,
+    resolve_model_config,
 )
 
 
@@ -54,20 +55,9 @@ def register_commands(app):
         else:
             full_prompt = prompt
 
+        model_id, base_url, api_key = resolve_model_config(model, required=True)
+
         config = get_config()
-        model_config = config.get_model_config(model)
-        if not model_config:
-            print("错误: 未找到模型配置，使用 'flexllm list' 查看可用模型", file=sys.stderr)
-            print(
-                "提示: 设置环境变量 FLEXLLM_BASE_URL, FLEXLLM_API_KEY, FLEXLLM_MODEL 或创建 ~/.flexllm/config.yaml",
-                file=sys.stderr,
-            )
-            raise typer.Exit(1)
-
-        model_id = model_config.get("id", model)
-        base_url = model_config.get("base_url")
-        api_key = model_config.get("api_key", "EMPTY")
-
         if not system:
             system = config.get_system(model)
         if not user_template:
@@ -127,12 +117,8 @@ def register_commands(app):
             flexllm chat --model gpt-4 "你好" # 指定模型
             flexllm chat --tools shell        # 启用 shell 工具
         """
+        model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
-        model_config = config.get_model_config(model)
-        if model_config:
-            model = model_config.get("id", model)
-            base_url = base_url or model_config.get("base_url")
-            api_key = api_key or model_config.get("api_key", "EMPTY")
 
         if not base_url:
             print("错误: 未配置 base_url", file=sys.stderr)
@@ -219,12 +205,8 @@ def register_commands(app):
             flexllm chat-web --host 0.0.0.0       # 允许外部访问
             flexllm chat-web --thinking true      # 启用思考模式
         """
+        model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
-        model_config = config.get_model_config(model)
-        if model_config:
-            model = model_config.get("id", model)
-            base_url = base_url or model_config.get("base_url")
-            api_key = api_key or model_config.get("api_key", "EMPTY")
 
         if not base_url:
             print("错误: 未配置 base_url", file=sys.stderr)
@@ -327,12 +309,8 @@ def register_commands(app):
             flexllm serve --thinking true -c 20 -p 8000
             flexllm serve --user-template "[INST]{content}[/INST]"
         """
+        model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
-        model_config = config.get_model_config(model)
-        if model_config:
-            model = model_config.get("id", model)
-            base_url = base_url or model_config.get("base_url")
-            api_key = api_key or model_config.get("api_key", "EMPTY")
 
         if not base_url:
             print("错误: 未配置 base_url", file=sys.stderr)
@@ -869,12 +847,7 @@ def register_commands(app):
 
         import requests
 
-        config = get_config()
-        model_config = config.get_model_config(model)
-        if model_config:
-            model = model_config.get("id", model)
-            base_url = base_url or model_config.get("base_url")
-            api_key = api_key or model_config.get("api_key", "EMPTY")
+        model, base_url, api_key = resolve_model_config(model, base_url, api_key)
 
         if not base_url:
             print("错误: 未配置 base_url", file=sys.stderr)
@@ -1326,12 +1299,8 @@ models:
             flexllm agent "查一下 cpu 使用率" --tools shell
             echo "列出当前目录文件" | flexllm agent --tools shell
         """
+        model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
-        model_config = config.get_model_config(model)
-        if model_config:
-            model = model_config.get("id", model)
-            base_url = base_url or model_config.get("base_url")
-            api_key = api_key or model_config.get("api_key", "EMPTY")
 
         if not base_url:
             print("错误: 未配置 base_url", file=sys.stderr)

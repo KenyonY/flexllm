@@ -40,7 +40,8 @@ from ..async_api.progress import ProgressBarConfig, ProgressTracker
 from ..cache import ResponseCacheConfig
 from ..pricing import get_model_pricing
 from ..utils.core import retry_callback
-from .base import ChatCompletionResult, LLMClientBase, _extract_save_input
+from .base import ChatCompletionResult, LLMClientBase
+from .batch_helpers import JsonlWriter, extract_save_input, validate_batch_params
 from .claude import ClaudeClient
 from .gemini import GeminiClient
 from .openai import OpenAIClient
@@ -611,6 +612,7 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        return_cost_report: bool = False,
         track_cost: bool = False,
         preprocess_msg: bool = False,
         output_jsonl: str | None = None,
@@ -651,6 +653,8 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                return_cost_report=return_cost_report,
+                track_cost=track_cost,
                 preprocess_msg=preprocess_msg,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
@@ -664,15 +668,7 @@ class LLMClientPool:
         if track_cost:
             return_usage = True
 
-        # metadata_list 长度校验
-        if metadata_list is not None and len(metadata_list) != len(messages_list):
-            raise ValueError(
-                f"metadata_list 长度 ({len(metadata_list)}) 必须与 messages_list 长度 ({len(messages_list)}) 一致"
-            )
-
-        # output_jsonl 扩展名校验
-        if output_jsonl and not output_jsonl.endswith(".jsonl"):
-            raise ValueError(f"output_jsonl 必须使用 .jsonl 扩展名，当前: {output_jsonl}")
+        validate_batch_params(messages_list, metadata_list, output_jsonl)
 
         if not distribute or len(self._clients) == 1:
             # 单 endpoint 模式：使用 fallback
@@ -683,6 +679,7 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                return_cost_report=return_cost_report,
                 track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
@@ -715,6 +712,7 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        return_cost_report: bool = False,
         track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
@@ -744,6 +742,7 @@ class LLMClientPool:
                     return_usage=return_usage,
                     show_progress=show_progress,
                     return_summary=return_summary,
+                    return_cost_report=return_cost_report,
                     track_cost=track_cost,
                     output_jsonl=output_jsonl,
                     flush_interval=flush_interval,
@@ -789,13 +788,9 @@ class LLMClientPool:
         - Fallback 重试：任务失败时自动尝试其他 endpoint
         - 响应缓存：复用 LLMClient 的缓存能力
         """
-        import json
-        from pathlib import Path
-
         n = len(messages_list)
         results = [None] * n
         cached_count = 0
-        file_restored_count = 0
         start_time = time.time()
 
         # 获取所有 endpoint 的 base_url 集合（用于 fallback 判断）
@@ -803,57 +798,25 @@ class LLMClientPool:
         num_endpoints = len(all_endpoints)
 
         # 获取响应缓存（如果有的话，使用第一个 client 的缓存）
-        # 缓存已支持存储 usage 信息，return_usage 时也可使用缓存
         response_cache = None
         for client in self._clients:
-            cache = getattr(client._client, "_response_cache", None)
+            cache = getattr(client, "_response_cache", None)
             if cache is not None:
                 response_cache = cache
                 break
 
-        # 断点续传：读取已完成的记录
-        completed_indices = set()
-        if output_jsonl:
-            output_path = Path(output_jsonl)
-            if output_path.exists():
-                records = []
-                with open(output_path, encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            record = json.loads(line.strip())
-                            if record.get("status") == "success":
-                                idx = record.get("index")
-                                if 0 <= idx < n:
-                                    records.append(record)
-                        except (json.JSONDecodeError, KeyError, TypeError):
-                            continue
+        # 使用 JsonlWriter 管理文件输出和断点续传
+        writer = JsonlWriter(output_jsonl, messages_list, save_input, metadata_list, flush_interval)
+        completed_indices = set(writer.completed_indices)
 
-                # 首尾校验：只在记录包含 input 字段时校验
-                file_valid = True
-                if records:
-                    first, last = records[0], records[-1]
-                    if "input" in first:
-                        expected = _extract_save_input(messages_list[first["index"]], save_input)
-                        if expected is not None and first["input"] != expected:
-                            file_valid = False
-                    if file_valid and len(records) > 1 and "input" in last:
-                        expected = _extract_save_input(messages_list[last["index"]], save_input)
-                        if expected is not None and last["input"] != expected:
-                            file_valid = False
+        # 恢复已完成的记录到 results（断点续传）
+        file_restored_count = len(completed_indices)
+        if output_jsonl and completed_indices:
+            from .batch_helpers import resume_from_jsonl
 
-                if file_valid:
-                    for record in records:
-                        idx = record["index"]
-                        completed_indices.add(idx)
-                        results[idx] = record["output"]
-                    if completed_indices:
-                        logger.info(f"从文件恢复: 已完成 {len(completed_indices)}/{n}")
-                        file_restored_count = len(completed_indices)
-                else:
-                    raise ValueError(
-                        f"文件校验失败: {output_jsonl} 中的 input 与当前 messages_list 不匹配。"
-                        f"请删除或重命名该文件后重试。"
-                    )
+            _, records = resume_from_jsonl(output_jsonl, messages_list, save_input)
+            for record in records:
+                results[record["index"]] = record["output"]
 
         # 检查缓存命中（如果启用了缓存）
         effective_model = model or self._endpoints[0].model
@@ -877,7 +840,6 @@ class LLMClientPool:
                 logger.info(f"缓存命中: {cached_count}/{n}")
 
         # 共享任务队列（跳过已完成的）
-        # 队列元素: (idx, msg, tried_endpoints: set)
         queue = asyncio.Queue()
         for idx, msg in enumerate(messages_list):
             if idx not in completed_indices:
@@ -886,6 +848,7 @@ class LLMClientPool:
         pending_count = queue.qsize()
         if pending_count == 0:
             logger.info("所有任务已完成，无需执行")
+            writer.close()
             if return_summary:
                 return results, {
                     "total": n,
@@ -900,7 +863,7 @@ class LLMClientPool:
 
         # 计算总并发数
         total_concurrency = sum(
-            getattr(client._client, "_concurrency_limit", 10) for client in self._clients
+            getattr(client, "_concurrency_limit", 10) for client in self._clients
         )
 
         # 进度条配置（支持成本显示）
@@ -926,33 +889,14 @@ class LLMClientPool:
             else None
         )
 
-        # 文件写入相关
-        file_writer = None
-        file_buffer = []
-        last_flush_time = time.time()
-
-        if output_jsonl:
-            file_writer = open(output_jsonl, "a", encoding="utf-8")
-
         # 用于统计和线程安全更新
         lock = asyncio.Lock()
-        # 活跃任务计数（用于判断 worker 是否应该退出）
         active_tasks = 0
         all_done = asyncio.Event()
 
-        def flush_to_file():
-            """刷新缓冲区到文件"""
-            nonlocal file_buffer, last_flush_time
-            if file_writer and file_buffer:
-                for record in file_buffer:
-                    file_writer.write(json.dumps(record, ensure_ascii=False) + "\n")
-                file_writer.flush()
-                file_buffer = []
-                last_flush_time = time.time()
-
         async def worker(client_idx: int):
             """单个 worker：循环从队列取任务并执行，支持 fallback 重试"""
-            nonlocal last_flush_time, active_tasks
+            nonlocal active_tasks
 
             client = self._clients[client_idx]
             provider = self._router._providers[client_idx].config
@@ -963,24 +907,20 @@ class LLMClientPool:
                 try:
                     idx, msg, tried_endpoints = queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    # 队列为空，检查是否还有活跃任务
                     async with lock:
                         if active_tasks == 0 and queue.empty():
                             all_done.set()
                             break
-                    # 等待一小段时间后重试（可能有任务被放回队列）
                     await asyncio.sleep(0.05)
                     continue
 
-                # 增加活跃任务计数
                 async with lock:
                     active_tasks += 1
 
                 # 如果已尝试过当前 endpoint，放回队列让其他 worker 处理
                 if my_endpoint in tried_endpoints:
-                    # 检查是否所有 endpoint 都已尝试
                     if len(tried_endpoints) >= num_endpoints:
-                        # 所有 endpoint 都失败了，标记最终失败
+                        # 所有 endpoint 都失败了
                         async with lock:
                             active_tasks -= 1
                             if tracker:
@@ -991,30 +931,21 @@ class LLMClientPool:
                                     latency=0,
                                 )
                                 tracker.update(req_result)
-                            if file_writer:
-                                record = {
-                                    "index": idx,
-                                    "output": None,
-                                    "status": "error",
-                                    "error": f"All {num_endpoints} endpoints failed",
-                                }
-                                input_value = _extract_save_input(msg, save_input)
-                                if input_value is not None:
-                                    record["input"] = input_value
-                                if metadata_list is not None:
-                                    record["metadata"] = metadata_list[idx]
-                                file_buffer.append(record)
+                            writer.write_result(
+                                idx,
+                                None,
+                                "error",
+                                f"All {num_endpoints} endpoints failed",
+                            )
                         continue
-                    # 放回队列，让其他 endpoint 的 worker 处理
                     await queue.put((idx, msg, tried_endpoints))
                     async with lock:
                         active_tasks -= 1
-                    await asyncio.sleep(0.01)  # 短暂让出，避免死循环
+                    await asyncio.sleep(0.01)
                     continue
 
                 task_start = time.time()
                 try:
-                    # 设置重试回调，让 async_retry 重试时更新进度条
                     if tracker:
                         retry_callback.set(tracker.increment_retry)
                     result = await client.chat_completions(
@@ -1027,13 +958,11 @@ class LLMClientPool:
 
                     # 检查是否返回了 RequestResult（表示失败）
                     if hasattr(result, "status") and result.status != "success":
-                        # 从 result.data 中提取错误信息
                         error_type = "unknown"
                         error_detail = ""
                         if hasattr(result, "data") and isinstance(result.data, dict):
                             error_type = result.data.get("error", "unknown")
                             error_detail = result.data.get("detail", "")
-                        # 构造包含类型和详情的错误消息
                         error_msg = f"{error_type}: {error_detail}" if error_detail else error_type
                         raise RuntimeError(error_msg)
 
@@ -1041,7 +970,7 @@ class LLMClientPool:
                     results[idx] = result
                     self._router.mark_success(provider)
 
-                    # 写入缓存（存储 content 和 usage）
+                    # 写入缓存
                     if response_cache is not None:
                         if hasattr(result, "content"):
                             cache_data = {
@@ -1054,7 +983,6 @@ class LLMClientPool:
 
                     async with lock:
                         active_tasks -= 1
-                        # 更新进度条
                         if tracker:
                             req_result = RequestResult(
                                 request_id=idx,
@@ -1064,7 +992,6 @@ class LLMClientPool:
                             )
                             tracker.update(req_result)
 
-                            # 更新成本信息
                             if track_cost and hasattr(result, "usage") and result.usage:
                                 usage = result.usage
                                 input_tokens = usage.get("prompt_tokens", 0)
@@ -1078,56 +1005,31 @@ class LLMClientPool:
                                 tracker.update_cost(input_tokens, output_tokens, cost)
 
                         # 写入文件
-                        if file_writer:
-                            # 处理 ChatCompletionResult 对象的序列化
-                            if hasattr(result, "content"):
-                                output_content = result.content
-                                output_usage = getattr(result, "usage", None)
-                            else:
-                                output_content = result
-                                output_usage = None
-
-                            record = {
-                                "index": idx,
-                                "output": output_content,
-                                "status": "success",
-                            }
-                            input_value = _extract_save_input(msg, save_input)
-                            if input_value is not None:
-                                record["input"] = input_value
-                            if metadata_list is not None:
-                                record["metadata"] = metadata_list[idx]
-                            if output_usage:
-                                record["usage"] = output_usage
-                            file_buffer.append(record)
-                            if time.time() - last_flush_time >= flush_interval:
-                                flush_to_file()
+                        if hasattr(result, "content"):
+                            output_content = result.content
+                            output_usage = getattr(result, "usage", None)
+                        else:
+                            output_content = result
+                            output_usage = None
+                        writer.write_result(idx, output_content, usage=output_usage)
 
                 except Exception as e:
                     latency = time.time() - task_start
                     self._router.mark_failed(provider)
 
-                    # 记录已尝试的 endpoint
                     tried_endpoints = tried_endpoints | {my_endpoint}
 
-                    # 检查是否还有其他 endpoint 可以重试
                     if self._fallback and len(tried_endpoints) < num_endpoints:
-                        # 放回队列，让其他 endpoint 重试（进度条会显示 retry 计数）
                         await queue.put((idx, msg, tried_endpoints))
                         async with lock:
                             active_tasks -= 1
-                            # 更新进度条的 retry 计数
                             if tracker:
                                 tracker.increment_retry()
                     else:
-                        # 所有 endpoint 都失败了，或者未启用 fallback
                         results[idx] = None
-
                         async with lock:
                             active_tasks -= 1
-                            # 更新进度条
                             if tracker:
-                                # 直接使用异常消息作为错误信息
                                 req_result = RequestResult(
                                     request_id=idx,
                                     data={"error": str(e)},
@@ -1135,46 +1037,18 @@ class LLMClientPool:
                                     latency=latency,
                                 )
                                 tracker.update(req_result)
-
-                            # 写入失败记录
-                            if file_writer:
-                                record = {
-                                    "index": idx,
-                                    "output": None,
-                                    "status": "error",
-                                    "error": str(e),
-                                }
-                                input_value = _extract_save_input(msg, save_input)
-                                if input_value is not None:
-                                    record["input"] = input_value
-                                if metadata_list is not None:
-                                    record["metadata"] = metadata_list[idx]
-                                file_buffer.append(record)
-                                if time.time() - last_flush_time >= flush_interval:
-                                    flush_to_file()
+                            writer.write_result(idx, None, "error", str(e))
 
         try:
-            # 启动所有 worker
-            # 每个 client 启动 concurrency_limit 个 worker
             workers = []
             for client_idx, client in enumerate(self._clients):
-                # 获取 client 的并发限制
-                concurrency = getattr(client._client, "_concurrency_limit", 10)
+                concurrency = getattr(client, "_concurrency_limit", 10)
                 for _ in range(concurrency):
                     workers.append(worker(client_idx))
-
-            # 并发执行所有 worker
             await asyncio.gather(*workers)
 
         finally:
-            # 确保最后的数据写入
-            flush_to_file()
-            if file_writer:
-                file_writer.close()
-                # 自动 compact：去重并按 index 排序
-                if output_jsonl:
-                    self._clients[0]._compact_output_file(output_jsonl)
-            # 打印最终统计
+            writer.close()
             if tracker:
                 tracker.summary(print_to_console=True)
 
@@ -1199,6 +1073,7 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        return_cost_report: bool = False,
         track_cost: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
@@ -1217,6 +1092,8 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                return_cost_report=return_cost_report,
+                track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
@@ -1233,6 +1110,7 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                return_cost_report=return_cost_report,
                 track_cost=track_cost,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,

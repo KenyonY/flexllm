@@ -5,12 +5,10 @@ LLMClientBase - LLM 客户端抽象基类
 """
 
 import asyncio
-import json
 import logging
 import time
-from abc import ABC
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Union
 
 logger = logging.getLogger(__name__)
@@ -23,31 +21,21 @@ from ..msg_processors.messages_processor import messages_preprocess
 from ..msg_processors.unified_processor import batch_process_messages as optimized_batch_preprocess
 from ..pricing import estimate_cost, get_model_pricing
 from ..pricing.cost_tracker import BudgetExceededError, CostReport, CostTracker, CostTrackerConfig
+from .batch_helpers import (
+    JsonlWriter,
+    compact_output_file,
+    extract_save_input,
+    resume_from_jsonl,
+    validate_batch_params,
+)
 
 if TYPE_CHECKING:
     from ..async_api.interface import RequestResult
 
 
-def _extract_save_input(messages: list[dict], save_input: bool | str):
-    """根据 save_input 参数提取要保存的 input 内容
-
-    Args:
-        messages: 原始 messages 列表
-        save_input: True=完整保存, "last"=仅保存最后一个 user message 的 content, False=不保存
-
-    Returns:
-        - save_input=True: 原始 messages
-        - save_input="last": 最后一个 user message 的 content (str)
-        - save_input=False: None
-    """
-    if save_input is True:
-        return messages
-    elif save_input == "last":
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                return msg.get("content", "")
-        return ""
-    return None
+# 向后兼容的别名（pool.py 和 test_resume_jsonl.py 都 import 这些）
+_extract_save_input = extract_save_input
+_resume_from_jsonl = resume_from_jsonl
 
 
 @dataclass
@@ -170,19 +158,19 @@ class LLMClientBase(ABC):
 
     # ========== 核心抽象方法（子类必须实现）==========
 
-    def _get_url(self, model: str, stream: bool = False) -> str:
-        raise NotImplementedError
+    @abstractmethod
+    def _get_url(self, model: str, stream: bool = False) -> str: ...
 
-    def _get_headers(self) -> dict:
-        raise NotImplementedError
+    @abstractmethod
+    def _get_headers(self) -> dict: ...
 
+    @abstractmethod
     def _build_request_body(
         self, messages: list[dict], model: str, stream: bool = False, **kwargs
-    ) -> dict:
-        raise NotImplementedError
+    ) -> dict: ...
 
-    def _extract_content(self, response_data: dict) -> str | None:
-        raise NotImplementedError
+    @abstractmethod
+    def _extract_content(self, response_data: dict) -> str | None: ...
 
     def _extract_usage(self, response_data: dict) -> dict | None:
         """提取 usage 信息（子类可覆盖）"""
@@ -202,6 +190,25 @@ class LLMClientBase(ABC):
     def _extract_stream_thinking(self, data: dict) -> str | None:
         """从流式响应中提取思考内容，子类按需重写"""
         return None
+
+    def _extract_stream_usage(self, data: dict) -> dict | None:
+        """从流式 chunk 中提取 usage 信息，子类可覆盖
+
+        Returns:
+            usage dict 或 None（表示此 chunk 不含 usage）
+        """
+        if "usage" in data and data["usage"]:
+            return data["usage"]
+        return None
+
+    def _prepare_stream_body(self, body: dict, return_usage: bool) -> dict:
+        """流式请求体的额外处理，子类可覆盖
+
+        OpenAI 格式需要添加 stream_options，其他 API 不需要。
+        """
+        if return_usage:
+            body["stream_options"] = {"include_usage": True}
+        return body
 
     def _get_stream_url(self, model: str) -> str:
         return self._get_url(model, stream=True)
@@ -265,6 +272,8 @@ class LLMClientBase(ABC):
             - return_raw=True: RequestResult 原始响应
             - return_usage=True: ChatCompletionResult(content, usage, reasoning_content)
             - 默认: str 内容文本
+            - 请求失败时: 返回 RequestResult（status="error"），不会抛异常。
+              如果需要失败时抛异常，请使用 chat_completions_or_raise()。
 
         Note:
             缓存由初始化时的 cache 参数控制，return_raw 时自动跳过缓存
@@ -315,6 +324,34 @@ class LLMClientBase(ABC):
                 return ChatCompletionResult(content=content, usage=usage, tool_calls=tool_calls)
             return content
         return data
+
+    async def chat_completions_or_raise(
+        self,
+        messages: list[dict],
+        model: str = None,
+        return_usage: bool = False,
+        **kwargs,
+    ) -> Union[str, ChatCompletionResult]:
+        """
+        单条聊天完成（失败时抛异常）
+
+        与 chat_completions() 行为相同，但请求失败时抛出异常而非返回 RequestResult。
+
+        Raises:
+            RuntimeError: 请求失败时，包含错误信息
+        """
+        result = await self.chat_completions(
+            messages=messages,
+            model=model,
+            return_usage=return_usage,
+            **kwargs,
+        )
+        # 导入放在这里避免循环引用
+        from ..async_api.interface import RequestResult
+
+        if isinstance(result, RequestResult):
+            raise RuntimeError(f"LLM 请求失败: status={result.status}, data={result.data}")
+        return result
 
     def chat_completions_sync(
         self,
@@ -394,16 +431,7 @@ class LLMClientBase(ABC):
         effective_url = url or self._get_url(effective_model, stream=False)
         headers = self._get_headers()
 
-        # metadata_list 长度校验
-        if metadata_list is not None and len(metadata_list) != len(messages_list):
-            raise ValueError(
-                f"metadata_list 长度 ({len(metadata_list)}) 必须与 messages_list 长度 ({len(messages_list)}) 一致"
-            )
-
-        # output_jsonl 扩展名校验
-        if output_jsonl and not output_jsonl.endswith(".jsonl"):
-            raise ValueError(f"output_jsonl 必须使用 .jsonl 扩展名，当前: {output_jsonl}")
-
+        validate_batch_params(messages_list, metadata_list, output_jsonl)
         messages_list = await self._preprocess_messages_batch(messages_list, preprocess_msg)
 
         use_cache = self._response_cache is not None
@@ -430,102 +458,14 @@ class LLMClientBase(ABC):
         input_price = pricing["input"] * 1e6 if pricing else None
         output_price = pricing["output"] * 1e6 if pricing else None
 
-        # 文件输出相关状态
-        file_writer = None
-        file_buffer = []
-        last_flush_time = time.time()
-        completed_indices = set()
-
-        # 如果指定了输出文件，读取已完成的索引（断点续传）
-        if output_jsonl:
-            output_path = Path(output_jsonl)
-            if output_path.exists():
-                # 读取所有有效记录
-                records = []
-                with open(output_path, encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            record = json.loads(line.strip())
-                            if record.get("status") == "success":
-                                idx = record.get("index")
-                                if 0 <= idx < len(messages_list):
-                                    records.append(record)
-                        except (json.JSONDecodeError, KeyError, TypeError):
-                            continue
-
-                # 首尾校验：只在记录包含 input 字段时校验
-                file_valid = True
-                if records:
-                    first, last = records[0], records[-1]
-                    if "input" in first:
-                        expected = _extract_save_input(messages_list[first["index"]], save_input)
-                        if expected is not None and first["input"] != expected:
-                            file_valid = False
-                    if file_valid and len(records) > 1 and "input" in last:
-                        expected = _extract_save_input(messages_list[last["index"]], save_input)
-                        if expected is not None and last["input"] != expected:
-                            file_valid = False
-
-                if file_valid:
-                    completed_indices = {r["index"] for r in records}
-                    if completed_indices:
-                        logger.info(
-                            f"从文件恢复: 已完成 {len(completed_indices)}/{len(messages_list)}"
-                        )
-                else:
-                    raise ValueError(
-                        f"文件校验失败: {output_jsonl} 中的 input 与当前 messages_list 不匹配。"
-                        f"请删除或重命名该文件后重试。"
-                    )
-
-            file_writer = open(output_path, "a", encoding="utf-8")
-
-        def flush_to_file():
-            """刷新缓冲区到文件"""
-            nonlocal file_buffer, last_flush_time
-            if file_writer and file_buffer:
-                for record in file_buffer:
-                    file_writer.write(json.dumps(record, ensure_ascii=False) + "\n")
-                file_writer.flush()
-                file_buffer = []
-                last_flush_time = time.time()
-
-        def on_file_result(
-            original_idx: int,
-            content: Any,
-            status: str = "success",
-            error: str = None,
-            usage: dict = None,
-        ):
-            """文件输出回调"""
-            nonlocal last_flush_time
-            if file_writer is None:
-                return
-            record = {
-                "index": original_idx,
-                "output": content,
-                "status": status,
-            }
-            input_value = _extract_save_input(messages_list[original_idx], save_input)
-            if input_value is not None:
-                record["input"] = input_value
-            if metadata_list is not None:
-                record["metadata"] = metadata_list[original_idx]
-            if usage is not None:
-                record["usage"] = usage
-            if error:
-                record["error"] = error
-            file_buffer.append(record)
-            # 基于时间刷新
-            if time.time() - last_flush_time >= flush_interval:
-                flush_to_file()
+        # 使用 JsonlWriter 管理文件输出
+        writer = JsonlWriter(output_jsonl, messages_list, save_input, metadata_list, flush_interval)
+        completed_indices = writer.completed_indices
 
         try:
             # 计算实际需要执行的索引（排除文件中已完成的）
-            all_indices = set(range(len(messages_list)))
-            indices_to_skip = completed_indices & all_indices
-            if indices_to_skip:
-                logger.info(f"从文件恢复跳过: {len(indices_to_skip)}/{len(messages_list)}")
+            if completed_indices:
+                logger.info(f"从文件恢复跳过: {len(completed_indices)}/{len(messages_list)}")
 
             # 带缓存执行
             if use_cache and self._response_cache:
@@ -537,7 +477,7 @@ class LLMClientBase(ABC):
                 # 将缓存命中的写入文件（如果文件中没有）
                 for i, resp in enumerate(cached_responses):
                     if resp is not None and i not in completed_indices:
-                        on_file_result(i, resp["content"], usage=resp.get("usage"))
+                        writer.write_result(i, resp["content"], usage=resp.get("usage"))
 
                 # 过滤掉文件中已完成的
                 actual_uncached = [i for i in uncached_indices if i not in completed_indices]
@@ -579,7 +519,7 @@ class LLMClientBase(ABC):
                                 )
                                 logger.debug(f"请求失败: {error_msg}")
                                 cached_responses[original_idx] = None
-                                on_file_result(original_idx, None, "error", error_msg)
+                                writer.write_result(original_idx, None, "error", error_msg)
                                 continue
                             try:
                                 extracted = extractor(result)
@@ -592,8 +532,10 @@ class LLMClientBase(ABC):
                                     **kwargs,
                                 )
                                 # 文件输出
-                                on_file_result(
-                                    original_idx, extracted["content"], usage=extracted.get("usage")
+                                writer.write_result(
+                                    original_idx,
+                                    extracted["content"],
+                                    usage=extracted.get("usage"),
                                 )
                                 # 记录成本
                                 if self._cost_tracker and extracted.get("usage"):
@@ -613,7 +555,7 @@ class LLMClientBase(ABC):
                             except Exception as e:
                                 logger.warning(f"提取结果失败: {e}")
                                 cached_responses[original_idx] = None
-                                on_file_result(original_idx, None, "error", str(e))
+                                writer.write_result(original_idx, None, "error", str(e))
                         if batch.is_final:
                             progress = batch.progress
 
@@ -656,13 +598,15 @@ class LLMClientBase(ABC):
                                 )
                                 logger.debug(f"请求失败: {error_msg}")
                                 responses[original_idx] = None
-                                on_file_result(original_idx, None, "error", error_msg)
+                                writer.write_result(original_idx, None, "error", error_msg)
                                 continue
                             try:
                                 extracted = extractor(result)
                                 responses[original_idx] = extracted
-                                on_file_result(
-                                    original_idx, extracted["content"], usage=extracted.get("usage")
+                                writer.write_result(
+                                    original_idx,
+                                    extracted["content"],
+                                    usage=extracted.get("usage"),
                                 )
                                 if self._cost_tracker and extracted.get("usage"):
                                     self._cost_tracker.record(extracted["usage"], effective_model)
@@ -680,7 +624,7 @@ class LLMClientBase(ABC):
                             except Exception as e:
                                 logger.warning(f"Error: {e}, set content to None")
                                 responses[original_idx] = None
-                                on_file_result(original_idx, None, "error", str(e))
+                                writer.write_result(original_idx, None, "error", str(e))
                         if batch.is_final:
                             progress = batch.progress
 
@@ -689,12 +633,7 @@ class LLMClientBase(ABC):
             pass
 
         finally:
-            # 确保最后的数据写入
-            flush_to_file()
-            if file_writer:
-                file_writer.close()
-                # 自动 compact：去重，保留每个 index 的最新成功记录
-                self._compact_output_file(output_jsonl)
+            writer.close()
 
         summary = progress.summary(print_to_console=False) if progress else None
 
@@ -717,36 +656,8 @@ class LLMClientBase(ABC):
         return result
 
     def _compact_output_file(self, file_path: str):
-        """去重输出文件，保留每个 index 的最新成功记录"""
-        import os
-
-        tmp_path = file_path + ".tmp"
-        try:
-            records = {}
-            with open(file_path, encoding="utf-8") as f:
-                for line in f:
-                    if not line.strip():
-                        continue
-                    r = json.loads(line)
-                    idx = r.get("index")
-                    if idx is None:
-                        continue
-                    # 成功记录优先，或者该 index 还没有记录
-                    if r.get("status") == "success" or idx not in records:
-                        records[idx] = r
-
-            # 先写入临时文件
-            with open(tmp_path, "w", encoding="utf-8") as f:
-                for r in sorted(records.values(), key=lambda x: x["index"]):
-                    f.write(json.dumps(r, ensure_ascii=False) + "\n")
-
-            # 原子替换（同一文件系统上 replace 是原子操作）
-            os.replace(tmp_path, file_path)
-        except Exception as e:
-            logger.warning(f"Compact 输出文件失败: {e}")
-            # 清理可能残留的临时文件
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
+        """去重输出文件，保留每个 index 的最新成功记录（委托给 batch_helpers）"""
+        compact_output_file(file_path)
 
     def chat_completions_batch_sync(
         self,
@@ -843,105 +754,14 @@ class LLMClientBase(ABC):
         effective_url = url or self._get_url(effective_model, stream=False)
         headers = self._get_headers()
 
-        # metadata_list 长度校验
-        if metadata_list is not None and len(metadata_list) != len(messages_list):
-            raise ValueError(
-                f"metadata_list 长度 ({len(metadata_list)}) 必须与 messages_list 长度 ({len(messages_list)}) 一致"
-            )
-
-        # output_jsonl 扩展名校验
-        if output_jsonl and not output_jsonl.endswith(".jsonl"):
-            raise ValueError(f"output_jsonl 必须使用 .jsonl 扩展名，当前: {output_jsonl}")
-
+        validate_batch_params(messages_list, metadata_list, output_jsonl)
         messages_list = await self._preprocess_messages_batch(messages_list, preprocess_msg)
 
         use_cache = self._response_cache is not None and not return_raw
 
-        # 文件输出相关状态
-        file_writer = None
-        file_buffer = []
-        last_flush_time = time.time()
-        completed_indices = set()
-
-        # 如果指定了输出文件，读取已完成的索引（断点续传）
-        if output_jsonl:
-            output_path = Path(output_jsonl)
-            if output_path.exists():
-                records = []
-                with open(output_path, encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            record = json.loads(line.strip())
-                            if record.get("status") == "success":
-                                idx = record.get("index")
-                                if 0 <= idx < len(messages_list):
-                                    records.append(record)
-                        except (json.JSONDecodeError, KeyError, TypeError):
-                            continue
-
-                # 首尾校验：只在记录包含 input 字段时校验
-                file_valid = True
-                if records:
-                    first, last = records[0], records[-1]
-                    if "input" in first:
-                        expected = _extract_save_input(messages_list[first["index"]], save_input)
-                        if expected is not None and first["input"] != expected:
-                            file_valid = False
-                    if file_valid and len(records) > 1 and "input" in last:
-                        expected = _extract_save_input(messages_list[last["index"]], save_input)
-                        if expected is not None and last["input"] != expected:
-                            file_valid = False
-
-                if file_valid:
-                    completed_indices = {r["index"] for r in records}
-                    if completed_indices:
-                        logger.info(
-                            f"从文件恢复: 已完成 {len(completed_indices)}/{len(messages_list)}"
-                        )
-                else:
-                    raise ValueError(
-                        f"文件校验失败: {output_jsonl} 中的 input 与当前 messages_list 不匹配。"
-                        f"请删除或重命名该文件后重试。"
-                    )
-
-            file_writer = open(output_path, "a", encoding="utf-8")
-
-        def flush_to_file():
-            nonlocal file_buffer, last_flush_time
-            if file_writer and file_buffer:
-                for record in file_buffer:
-                    file_writer.write(json.dumps(record, ensure_ascii=False) + "\n")
-                file_writer.flush()
-                file_buffer = []
-                last_flush_time = time.time()
-
-        def on_file_result(
-            original_idx: int,
-            content: Any,
-            status: str = "success",
-            error: str = None,
-            usage: dict = None,
-        ):
-            nonlocal last_flush_time
-            if file_writer is None:
-                return
-            record = {
-                "index": original_idx,
-                "output": content,
-                "status": status,
-            }
-            input_value = _extract_save_input(messages_list[original_idx], save_input)
-            if input_value is not None:
-                record["input"] = input_value
-            if metadata_list is not None:
-                record["metadata"] = metadata_list[original_idx]
-            if usage is not None:
-                record["usage"] = usage
-            if error:
-                record["error"] = error
-            file_buffer.append(record)
-            if time.time() - last_flush_time >= flush_interval:
-                flush_to_file()
+        # 使用 JsonlWriter 管理文件输出
+        writer = JsonlWriter(output_jsonl, messages_list, save_input, metadata_list, flush_interval)
+        completed_indices = writer.completed_indices
 
         try:
             # 统计信息
@@ -951,7 +771,6 @@ class LLMClientBase(ABC):
             cached_count = 0
             start_time = time.time()
             total_latency = 0.0
-            last_progress = None
 
             # 查询缓存
             cached_responses = [None] * len(messages_list)
@@ -966,7 +785,7 @@ class LLMClientBase(ABC):
                 for i, resp in enumerate(cached_responses):
                     if resp is not None:
                         if i not in completed_indices:
-                            on_file_result(i, resp["content"], usage=resp.get("usage"))
+                            writer.write_result(i, resp["content"], usage=resp.get("usage"))
                         from types import SimpleNamespace
 
                         yielded_count += 1
@@ -1031,7 +850,7 @@ class LLMClientBase(ABC):
                                 else str(result.data)
                             )
                             logger.debug(f"请求失败: {error_msg}")
-                            on_file_result(original_idx, None, "error", error_msg)
+                            writer.write_result(original_idx, None, "error", error_msg)
                             result.content = None
                             result.usage = None
                             result.original_idx = original_idx
@@ -1050,7 +869,7 @@ class LLMClientBase(ABC):
                                         model=effective_model,
                                         **kwargs,
                                     )
-                                on_file_result(original_idx, content, usage=usage)
+                                writer.write_result(original_idx, content, usage=usage)
                                 result.content = content
                                 result.usage = usage if return_usage else None
                                 result.original_idx = original_idx
@@ -1058,7 +877,7 @@ class LLMClientBase(ABC):
                                 total_latency += result.latency
                             except Exception as e:
                                 logger.warning(f"提取结果失败: {e}")
-                                on_file_result(original_idx, None, "error", str(e))
+                                writer.write_result(original_idx, None, "error", str(e))
                                 result.content = None
                                 result.usage = None
                                 result.original_idx = original_idx
@@ -1075,15 +894,9 @@ class LLMClientBase(ABC):
                                 "avg_latency": total_latency / max(yielded_count - cached_count, 1),
                             }
                         yield result
-                    if batch.is_final:
-                        last_progress = batch.progress
 
         finally:
-            flush_to_file()
-            if file_writer:
-                file_writer.close()
-                # 自动 compact：去重，保留每个 index 的最新成功记录
-                self._compact_output_file(output_jsonl)
+            writer.close()
 
     async def chat_completions_stream(
         self,
@@ -1121,10 +934,7 @@ class LLMClientBase(ABC):
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
         body = self._build_request_body(messages, effective_model, stream=True, **kwargs)
-
-        # 当需要 usage 时，添加 stream_options（OpenAI 格式）
-        if return_usage:
-            body["stream_options"] = {"include_usage": True}
+        body = self._prepare_stream_body(body, return_usage)
 
         effective_url = url or self._get_stream_url(effective_model)
         headers = self._get_headers()
@@ -1149,10 +959,12 @@ class LLMClientBase(ABC):
                         try:
                             data = json.loads(data_str)
 
-                            # 检查是否包含 usage（流式响应的最后一个 chunk）
-                            if return_usage and "usage" in data and data["usage"]:
-                                yield {"type": "usage", "usage": data["usage"]}
-                                continue
+                            # 检查是否包含 usage
+                            if return_usage:
+                                usage = self._extract_stream_usage(data)
+                                if usage:
+                                    yield {"type": "usage", "usage": usage}
+                                    continue
 
                             # 提取思考内容
                             thinking = self._extract_stream_thinking(data)
