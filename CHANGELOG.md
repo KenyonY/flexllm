@@ -1,5 +1,171 @@
 # Changelog
 
+## [0.5.8] - 2026-02-03
+
+### Bug Fixes
+
+- **ci**: 添加 ruff 到 test 依赖
+- **cli**: 修复 credits 命令因 API 返回 None 导致格式化失败
+
+### Features
+
+- **agent**: 新增代码验证闭环，支持修改后自动检查和修复
+- **progress**: Batch 进度条适配非 TTY 环境
+- **agent**: 新增细粒度文件工具和并行执行支持
+
+### Miscellaneous
+
+- Bump version to 0.5.8
+
+### Performance
+
+- **test**: 将 mock 相关测试标记为 slow，pre-push 从 40s 降到 0.7s
+- **test**: 优化单元测试速度，pre-push 跳过慢测试
+
+### Refactor
+
+- **clients**: 提取批量处理公共逻辑到 batch_helpers 模块
+
+### Testing
+
+- **async_api**: 新增 async_api 模块核心功能单元测试
+
+## [0.5.7] - 2026-02-02
+
+### Features
+
+- **agent**: 注册式内置工具扩展，支持多工具组合(shell/dtflow/maque/flexllm)
+- 新增 AgentClient（tool-use 循环）+ CLI 模块拆分
+- 支持模型调用参数(model_params)自动透传，修复 -m 参数取 id 逻辑
+
+### Miscellaneous
+
+- Bump version to 0.5.7, 更新模型定价数据
+
+## [0.5.6] - 2026-02-01
+
+### Bug Fixes
+
+- **chat-web**: 重试时遵循上下文开关状态
+
+### Documentation
+
+- 统一对外接口为 LLMClient，移除 LLMClientPool 引用
+- 更新 SKILL.md 和 README.md，添加 serve 命令文档
+
+### Features
+
+- **chat-web**: 支持 --title 参数自定义页面 Logo 文本
+
+## [0.5.5] - 2026-02-01
+
+### Bug Fixes
+
+- **chat-web**: 修复多轮对话时输入框被挤出视口
+
+### Features
+
+- **serve**: 新增 flexllm serve 命令，将 LLM 包装为 HTTP API 服务
+- **chat-web**: 添加重试和上下文发送按钮
+- 添加 Web 聊天界面和流式思考内容支持
+
+### Refactor
+
+- **chat-web**: 上下文按钮改为状态切换，默认不携带
+
+### Styling
+
+- **chat-web**: 按钮移入输入框内部，对齐主流聊天界面
+- **chat-web**: 停止按钮改为黑白配色
+- **chat-web**: 对齐 nanochat/claude.ai 视觉风格
+
+## [0.5.4] - 2026-01-31
+
+### Bug Fixes
+
+- **progress**: 无定价信息时显示 token 数量而非成本
+
+### Miscellaneous
+
+- Bump version to 0.5.4
+
+## [0.5.3] - 2026-01-31
+
+### Bug Fixes
+
+- **cli**: 修复 --user-field 参数导致格式检测错误的问题
+
+### Miscellaneous
+
+- Bump version to 0.5.3
+
+## [0.5.2] - 2026-01-31
+
+### Documentation
+
+- 添加配置文件示例
+- **readme**: 补充 system 字段配置说明
+
+### Features
+
+- **config**: 支持 user_template 配置
+- **cli**: Batch 命令的 --output 参数改为可选
+
+### Miscellaneous
+
+- Bump version to 0.5.2
+
+## [0.5.1] - 2026-01-31
+
+### Features
+
+- **config**: 添加系统提示词配置支持
+
+### Miscellaneous
+
+- Bump version to 0.5.1
+
+## [0.5.0] - 2026-01-30
+
+### Documentation
+
+- 移除中文 README
+- README 补充 batch -n 和 -uf/-sf 示例
+- 精简 SKILL.md 并补充 batch 命令文档
+- 修正 Claude Code 集成说明
+- 完善 Claude Code 集成说明
+- 在安装部分添加 Claude Code 集成说明
+- 添加 roadmap 规划文档
+- 重构文档，突出核心功能定位
+
+### Features
+
+- **mock**: 支持 Claude/Gemini API 格式和思考内容返回
+- **cli**: Batch 命令添加 -n/--limit 参数，只处理前 N 条记录
+- **cli**: Batch 命令添加 --user-field/-uf 和 --system-field/-sf 参数
+- **cli**: Alpaca 格式支持记录级 system 字段
+- **cli**: Batch 输入格式支持 input/user 字段
+- **cli**: Batch 命令添加 --save-input 参数
+- **batch**: 添加 save_input 参数控制输出 JSONL 的 input 保存策略
+- **cli**: 添加 install-skill 命令
+- **pool**: 健康检查默认阈值设为无限大
+- **progress**: 优化进度条显示重试和错误信息
+
+### Miscellaneous
+
+- Bump version to 0.5.0 & 修复 test_mock_e2e 中残留的 load_balance 参数
+- **skill**: 移除多余的安装说明
+- 补充版权信息并升级版本至 0.4.6
+
+### Performance
+
+- **progress**: 添加进度条刷新节流控制
+
+### Refactor
+
+- **router**: 移除 load_balance 参数，简化为 round_robin 策略
+- **clients**: 统一 LLMClient/LLMClientPool 架构 & 修复 async event loop 绑定问题
+
 ## [0.4.5] - 2026-01-23
 
 ### Features
