@@ -244,11 +244,11 @@ def query_credits(base_url: str, api_key: str) -> dict | None:
             return {
                 "provider": "OpenRouter",
                 "data": {
-                    "剩余额度": f"${data.get('limit_remaining', 0):.2f}",
-                    "总额度上限": f"${data.get('limit', 0):.2f}",
-                    "已使用": f"${data.get('usage', 0):.2f}",
-                    "今日消费": f"${data.get('usage_daily', 0):.4f}",
-                    "本月消费": f"${data.get('usage_monthly', 0):.2f}",
+                    "剩余额度": f"${data.get('limit_remaining') or 0:.2f}",
+                    "总额度上限": f"${data.get('limit') or 0:.2f}",
+                    "已使用": f"${data.get('usage') or 0:.2f}",
+                    "今日消费": f"${data.get('usage_daily') or 0:.4f}",
+                    "本月消费": f"${data.get('usage_monthly') or 0:.2f}",
                 },
             }
 
@@ -266,11 +266,11 @@ def query_credits(base_url: str, api_key: str) -> dict | None:
             return {
                 "provider": "SiliconFlow",
                 "data": {
-                    "总余额": f"¥{data.get('totalBalance', '0')}",
-                    "充值余额": f"¥{data.get('chargeBalance', '0')}",
-                    "赠送余额": f"¥{data.get('balance', '0')}",
-                    "用户名": data.get("name", "N/A"),
-                    "账户状态": data.get("status", "N/A"),
+                    "总余额": f"¥{data.get('totalBalance') or '0'}",
+                    "充值余额": f"¥{data.get('chargeBalance') or '0'}",
+                    "赠送余额": f"¥{data.get('balance') or '0'}",
+                    "用户名": data.get("name") or "N/A",
+                    "账户状态": data.get("status") or "N/A",
                 },
             }
 
@@ -285,15 +285,15 @@ def query_credits(base_url: str, api_key: str) -> dict | None:
                 return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
 
             data = resp.json()
-            balance_infos = data.get("balance_infos", [])
+            balance_infos = data.get("balance_infos") or []
             if balance_infos:
                 info = balance_infos[0]
                 return {
                     "provider": "DeepSeek",
                     "data": {
-                        "总余额": f"{info.get('currency', 'CNY')} {info.get('total_balance', '0')}",
-                        "赠送余额": f"{info.get('currency', 'CNY')} {info.get('granted_balance', '0')}",
-                        "充值余额": f"{info.get('currency', 'CNY')} {info.get('topped_up_balance', '0')}",
+                        "总余额": f"{info.get('currency') or 'CNY'} {info.get('total_balance') or '0'}",
+                        "赠送余额": f"{info.get('currency') or 'CNY'} {info.get('granted_balance') or '0'}",
+                        "充值余额": f"{info.get('currency') or 'CNY'} {info.get('topped_up_balance') or '0'}",
                         "余额充足": "是" if data.get("is_available") else "否",
                     },
                 }
@@ -313,7 +313,7 @@ def query_credits(base_url: str, api_key: str) -> dict | None:
                 return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
 
             data = resp.json()
-            credits = data.get("balance", 0)
+            credits = data.get("balance") or 0
             usd_value = credits / 2_000_000
             return {
                 "provider": "AI/ML API",
@@ -336,11 +336,11 @@ def query_credits(base_url: str, api_key: str) -> dict | None:
                 return {"error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
 
             data = resp.json()
-            grants = data.get("grants", {}).get("data", [])
-            total_granted = sum(g.get("grant_amount", 0) for g in grants) / 100
-            total_used = sum(g.get("used_amount", 0) for g in grants) / 100
-            total_available = data.get("total_available", 0) / 100
-            total_used_all = data.get("total_used", 0) / 100
+            grants = (data.get("grants") or {}).get("data") or []
+            total_granted = sum((g.get("grant_amount") or 0) for g in grants) / 100
+            total_used = sum((g.get("used_amount") or 0) for g in grants) / 100
+            total_available = (data.get("total_available") or 0) / 100
+            total_used_all = (data.get("total_used") or 0) / 100
 
             return {
                 "provider": "OpenAI",
