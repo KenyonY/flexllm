@@ -23,6 +23,9 @@ import tempfile
 
 import pytest
 
+# 整个文件标记为 slow（Mock Server 启动开销大）
+pytestmark = pytest.mark.slow
+
 from flexllm import LLMClient, LLMClientPool
 from flexllm.clients import ClaudeClient, GeminiClient, LLMClientBase, OpenAIClient
 from flexllm.clients.base import ChatCompletionResult
@@ -715,7 +718,6 @@ class TestOpenAIThinking:
 # ============== 8. LLMClientPool 方法测试 ==============
 
 
-@pytest.mark.slow
 class TestPoolMethods:
     """LLMClientPool 各方法测试"""
 
@@ -896,7 +898,6 @@ class TestTypeSystem:
 # ============== 10. 断点续传 ==============
 
 
-@pytest.mark.slow
 class TestCheckpointResume:
     """断点续传测试"""
 

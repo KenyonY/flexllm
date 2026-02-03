@@ -8,6 +8,9 @@ import json
 import aiohttp
 import pytest
 
+# 整个文件标记为 slow（Mock Server 启动开销大）
+pytestmark = pytest.mark.slow
+
 from flexllm.mock import MockLLMServer, MockServerConfig
 
 # 使用高端口避免与其他测试冲突
