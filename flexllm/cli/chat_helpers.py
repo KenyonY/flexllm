@@ -139,6 +139,61 @@ def get_builtin_tools(tools_str: str):
     return tool_defs, combined_executor
 
 
+def _parse_validators(validate_str: str) -> list:
+    """解析验证器字符串
+
+    Args:
+        validate_str: 验证器名称，如 "python" 或 "python,pytest" 或 "syntax,lint,type"
+
+    Returns:
+        验证器实例列表
+    """
+    from flexllm.agent.validators import (
+        PytestValidator,
+        PythonLintValidator,
+        PythonSyntaxValidator,
+        PythonTypeValidator,
+    )
+
+    # 预设组合
+    VALIDATOR_PRESETS = {
+        "python": [
+            PythonSyntaxValidator(),
+            PythonLintValidator(),
+            PythonTypeValidator(),
+        ],
+    }
+
+    # 单个验证器映射
+    VALIDATOR_MAP = {
+        "syntax": PythonSyntaxValidator,
+        "lint": PythonLintValidator,
+        "type": PythonTypeValidator,
+        "pytest": PytestValidator,
+        # 别名
+        "ruff": PythonLintValidator,
+        "pyright": PythonTypeValidator,
+    }
+
+    # 检查是否是预设
+    if validate_str in VALIDATOR_PRESETS:
+        return VALIDATOR_PRESETS[validate_str]
+
+    # 解析逗号分隔的验证器列表
+    validators = []
+    for name in validate_str.split(","):
+        name = name.strip()
+        if name in VALIDATOR_MAP:
+            validators.append(VALIDATOR_MAP[name]())
+        elif name in VALIDATOR_PRESETS:
+            validators.extend(VALIDATOR_PRESETS[name])
+        else:
+            available = list(VALIDATOR_MAP.keys()) + list(VALIDATOR_PRESETS.keys())
+            raise ValueError(f"未知验证器: {name}，可用: {', '.join(available)}")
+
+    return validators
+
+
 # ========== Chat 辅助函数 ==========
 
 
@@ -379,22 +434,32 @@ def agent_run(
     tools_name,
     max_rounds,
     verbose=False,
+    validate=None,
+    max_fix_attempts=3,
 ):
-    """Agent 非交互式执行"""
+    """Agent 非交互式执行
+
+    Args:
+        validate: 验证器名称，如 "python" 或 "python,pytest"，None 表示不验证
+        max_fix_attempts: 验证失败时最大修复尝试次数
+    """
 
     async def _run():
         from flexllm import AgentClient, LLMClient
 
         tool_defs, tool_executor = get_builtin_tools(tools_name)
 
+        # 解析验证器
+        validators = _parse_validators(validate) if validate else None
+
         # verbose 模式下的回调
         round_counter = [0]  # 用列表来在闭包中修改
 
         def on_tool_call(name, arguments):
             if verbose:
-                print(f"\n{'─'*60}")
+                print(f"\n{'─' * 60}")
                 print(f"🔧 Tool Call: {name}")
-                print(f"{'─'*60}")
+                print(f"{'─' * 60}")
                 try:
                     args = json.loads(arguments) if arguments else {}
                     for k, v in args.items():
@@ -423,9 +488,9 @@ def agent_run(
         def on_llm_response(response):
             if verbose:
                 round_counter[0] += 1
-                print(f"\n{'═'*60}")
+                print(f"\n{'═' * 60}")
                 print(f"🤖 LLM Response (Round {round_counter[0]})")
-                print(f"{'═'*60}")
+                print(f"{'═' * 60}")
                 if response.content:
                     content = response.content
                     if len(content) > 500:
@@ -464,33 +529,63 @@ def agent_run(
                 max_rounds=max_rounds,
             )
 
+            # 验证回调
+            def on_validation(files, results):
+                print(f"\n{'─' * 60}")
+                print(f"🔍 Validation")
+                print(f"{'─' * 60}")
+                print(f"Files: {files}")
+                for r in results:
+                    status = "✅" if r.success else "❌"
+                    print(f"  {status} [{r.validator_name}]", end="")
+                    if not r.success:
+                        print(f" - {len(r.errors)} error(s)")
+                        for e in r.errors[:3]:
+                            print(f"      {e}")
+                        if len(r.errors) > 3:
+                            print(f"      ... and {len(r.errors) - 3} more")
+                    else:
+                        print()
+
             # 设置回调
             agent.on_tool_call = on_tool_call
             agent.on_tool_result = on_tool_result
             agent.on_llm_response = on_llm_response
+            if validators:
+                agent.on_validation = on_validation
 
             if verbose:
-                print(f"{'═'*60}")
+                print(f"{'═' * 60}")
                 print(f"🚀 Agent Start")
-                print(f"{'═'*60}")
+                print(f"{'═' * 60}")
                 print(f"Model: {model}")
                 print(f"Tools: {tools_name}")
+                if validators:
+                    print(f"Validators: {[v.name for v in validators]}")
                 print(f"Task: {message[:100]}{'...' if len(message) > 100 else ''}")
 
-            result = await agent.run(message, **model_params)
+            if validators:
+                result = await agent.run_with_validation(
+                    message,
+                    validators=validators,
+                    max_fix_attempts=max_fix_attempts,
+                    **model_params,
+                )
+            else:
+                result = await agent.run(message, **model_params)
 
             if verbose:
-                print(f"\n{'═'*60}")
+                print(f"\n{'═' * 60}")
                 print(f"✅ Agent Complete")
-                print(f"{'═'*60}")
+                print(f"{'═' * 60}")
                 print(f"Rounds: {result.rounds}")
                 print(f"Tool calls: {len(result.tool_calls)}")
                 if result.usage:
                     total = result.usage.get("total_tokens", "?")
                     print(f"Total tokens: {total}")
-                print(f"\n{'─'*60}")
+                print(f"\n{'─' * 60}")
                 print("Final Response:")
-                print(f"{'─'*60}")
+                print(f"{'─' * 60}")
 
             print(result.content)
 

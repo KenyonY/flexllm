@@ -1,7 +1,7 @@
 """
 AgentClient - 基于 LLMClient 的 Agent 客户端
 
-支持 tool-use 循环、多轮对话、structured output 和事件回调。
+支持 tool-use 循环、多轮对话、structured output、事件回调和代码验证闭环。
 组合 LLMClient，不继承，不修改现有客户端。
 
 Example:
@@ -25,6 +25,13 @@ Example:
     r1 = await agent.chat("你好")
     r2 = await agent.chat("帮我查天气")
     agent.reset()
+
+    # 带验证的任务（自动修复错误）
+    from flexllm.agent.validators import PythonSyntaxValidator, PythonLintValidator
+    result = await agent.run_with_validation(
+        "帮我修复这个 bug",
+        validators=[PythonSyntaxValidator(), PythonLintValidator()],
+    )
 """
 
 import asyncio
@@ -37,6 +44,7 @@ from .types import AgentResult, ToolCallRecord
 
 if TYPE_CHECKING:
     from ..clients.base import LLMClientBase
+    from .validators.base import ValidationResult, Validator
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +97,7 @@ class AgentClient:
         self.on_tool_call: Callable[[str, str], Any] | None = None
         self.on_tool_result: Callable[[str, str], Any] | None = None
         self.on_llm_response: Callable[[Any], Any] | None = None
+        self.on_validation: Callable[[list[str], list], Any] | None = None  # (files, results)
 
     def reset(self):
         """清空对话历史"""
@@ -344,3 +353,104 @@ class AgentClient:
                 asyncio.ensure_future(result)
         except Exception as e:
             logger.warning(f"Callback 执行失败: {e}")
+
+    # ========== 验证闭环 ==========
+
+    async def run_with_validation(
+        self,
+        user_input: str,
+        validators: list["Validator"] | None = None,
+        max_fix_attempts: int = 3,
+        **kwargs,
+    ) -> AgentResult:
+        """
+        带验证闭环的任务执行。
+
+        修改代码后自动运行验证器，如果验证失败则让 LLM 修复并重试。
+
+        Args:
+            user_input: 用户输入
+            validators: 验证器列表，如 [PythonSyntaxValidator(), PythonLintValidator()]
+            max_fix_attempts: 最大修复尝试次数
+            **kwargs: 传递给 run() 的额外参数
+
+        Returns:
+            AgentResult（最后一次执行的结果）
+        """
+        if not validators:
+            # 无验证器，直接执行
+            return await self.run(user_input, **kwargs)
+
+        # 首次执行
+        result = await self.run(user_input, **kwargs)
+
+        for attempt in range(max_fix_attempts):
+            # 收集本轮修改的文件
+            changed_files = self._get_changed_files(result.tool_calls)
+            if not changed_files:
+                logger.debug("No files changed, skipping validation")
+                break
+
+            # 运行所有验证器
+            validation_results = await self._run_validators(validators, changed_files)
+
+            # 触发验证回调
+            if self.on_validation:
+                self._fire_callback(self.on_validation, changed_files, validation_results)
+
+            # 检查是否全部通过
+            failed_results = [r for r in validation_results if not r.success]
+            if not failed_results:
+                logger.debug(f"All {len(validators)} validators passed")
+                break
+
+            logger.info(
+                f"Validation failed ({len(failed_results)}/{len(validators)}), "
+                f"attempt {attempt + 1}/{max_fix_attempts}"
+            )
+
+            # 构建修复提示
+            fix_prompt = self._build_fix_prompt(failed_results)
+
+            # 让 LLM 修复
+            result = await self.run(fix_prompt, **kwargs)
+
+        return result
+
+    def _get_changed_files(self, tool_calls: list[ToolCallRecord]) -> list[str]:
+        """从工具调用记录中提取被修改的文件路径"""
+        changed = set()
+        write_tools = {"write", "edit"}
+
+        for tc in tool_calls:
+            if tc.name in write_tools:
+                try:
+                    args = json.loads(tc.arguments)
+                    file_path = args.get("file_path") or args.get("path")
+                    if file_path:
+                        changed.add(file_path)
+                except json.JSONDecodeError:
+                    pass
+
+        return list(changed)
+
+    async def _run_validators(
+        self,
+        validators: list["Validator"],
+        changed_files: list[str],
+    ) -> list["ValidationResult"]:
+        """并行运行所有验证器"""
+        tasks = [v.validate(changed_files) for v in validators]
+        return await asyncio.gather(*tasks)
+
+    def _build_fix_prompt(self, failed_results: list["ValidationResult"]) -> str:
+        """构建修复提示"""
+        error_sections = []
+        for result in failed_results:
+            error_sections.append(str(result))
+
+        return f"""代码修改后验证失败，请修复以下错误：
+
+{chr(10).join(error_sections)}
+
+请直接修复代码，不需要解释。"""

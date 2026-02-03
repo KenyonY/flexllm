@@ -1308,12 +1308,23 @@ models:
         ] = "shell",
         max_rounds: Annotated[int, Option("--max-rounds", help="最大 tool 调用轮数")] = 10,
         verbose: Annotated[bool, Option("-v", "--verbose", help="显示详细执行过程")] = False,
+        validate: Annotated[
+            str | None,
+            Option(
+                "--validate",
+                help="代码验证器（python/syntax,lint,type,pytest），验证失败自动修复",
+            ),
+        ] = None,
+        max_fix_attempts: Annotated[
+            int, Option("--max-fix-attempts", help="验证失败时最大修复尝试次数")
+        ] = 3,
     ):
         """Agent 模式（非交互式，执行任务后返回）
 
         Examples:
             flexllm agent "查一下 cpu 使用率" --tools shell
             flexllm agent "读取 main.py" --tools code -v
+            flexllm agent "修复这个 bug" --tools code --validate=python
             echo "列出当前目录文件" | flexllm agent --tools shell
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
@@ -1344,4 +1355,6 @@ models:
             tools_name=tools,
             max_rounds=max_rounds,
             verbose=verbose,
+            validate=validate,
+            max_fix_attempts=max_fix_attempts,
         )
