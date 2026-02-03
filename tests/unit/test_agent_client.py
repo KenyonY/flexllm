@@ -36,7 +36,7 @@ class TestAgentRunNoTools:
     async def test_run_simple(self):
         """LLM 直接返回内容，不调用工具"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(
                 content="你好！",
                 usage={"prompt_tokens": 10, "completion_tokens": 5},
@@ -56,14 +56,14 @@ class TestAgentRunNoTools:
     async def test_run_passes_kwargs(self):
         """验证 kwargs 被传递给 client.chat_completions"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(content="ok", tool_calls=None)
         )
 
         agent = AgentClient(client=mock_client)
         await agent.run("test", temperature=0.5)
 
-        call_kwargs = mock_client.chat_completions.call_args
+        call_kwargs = mock_client.chat_completions_or_raise.call_args
         assert call_kwargs.kwargs["temperature"] == 0.5
 
 
@@ -93,7 +93,9 @@ class TestAgentRunWithTools:
             usage={"prompt_tokens": 20, "completion_tokens": 10},
             tool_calls=None,
         )
-        mock_client.chat_completions = AsyncMock(side_effect=[tool_call_result, final_result])
+        mock_client.chat_completions_or_raise = AsyncMock(
+            side_effect=[tool_call_result, final_result]
+        )
 
         def my_tool(name, arguments):
             args = json.loads(arguments)
@@ -148,7 +150,7 @@ class TestAgentRunWithTools:
                 tool_calls=None,
             ),
         ]
-        mock_client.chat_completions = AsyncMock(side_effect=results)
+        mock_client.chat_completions_or_raise = AsyncMock(side_effect=results)
 
         agent = AgentClient(
             client=mock_client,
@@ -171,7 +173,7 @@ class TestAgentRunWithTools:
         """达到 max_rounds 限制时停止"""
         mock_client = AsyncMock()
         # 永远返回 tool_call
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(
                 content=None,
                 usage={"prompt_tokens": 10, "completion_tokens": 5},
@@ -198,7 +200,7 @@ class TestAgentRunWithTools:
     async def test_async_tool_executor(self):
         """异步 tool_executor 支持"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             side_effect=[
                 ChatCompletionResult(
                     content=None,
@@ -229,7 +231,7 @@ class TestAgentRunWithTools:
     async def test_tool_executor_error(self):
         """tool_executor 抛出异常时返回错误信息"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             side_effect=[
                 ChatCompletionResult(
                     content=None,
@@ -260,7 +262,7 @@ class TestAgentRunWithTools:
     async def test_no_tool_executor(self):
         """未配置 tool_executor 时返回错误"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             side_effect=[
                 ChatCompletionResult(
                     content=None,
@@ -292,7 +294,7 @@ class TestAgentChat:
     async def test_chat_maintains_history(self):
         """chat() 自动维护对话历史"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(content="回复", tool_calls=None)
         )
 
@@ -305,7 +307,7 @@ class TestAgentChat:
         assert len(agent._history) == 4  # 2 轮 * (user + assistant)
 
         # 验证第二次调用时 messages 包含历史
-        second_call_messages = mock_client.chat_completions.call_args_list[1].args[0]
+        second_call_messages = mock_client.chat_completions_or_raise.call_args_list[1].args[0]
         # system + history(user+assistant) + new user
         assert len(second_call_messages) == 4
         assert second_call_messages[0]["role"] == "system"
@@ -317,7 +319,7 @@ class TestAgentChat:
     async def test_chat_reset(self):
         """reset() 清空历史"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(content="ok", tool_calls=None)
         )
 
@@ -336,7 +338,7 @@ class TestContextTruncation:
     async def test_truncate_long_history(self):
         """超过 max_context_tokens 时裁剪旧消息"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(content="ok", tool_calls=None)
         )
 
@@ -354,7 +356,7 @@ class TestContextTruncation:
         await agent.run("new message")
 
         # 验证实际发送的 messages 被裁剪了
-        sent_messages = mock_client.chat_completions.call_args.args[0]
+        sent_messages = mock_client.chat_completions_or_raise.call_args.args[0]
         # 应该只包含 system + 少量最近消息
         assert len(sent_messages) < 42  # 远少于 40 历史 + system + new
 
@@ -387,7 +389,7 @@ class TestStructuredOutput:
             reason: str
 
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(
                 content='{"action": "approve", "reason": "符合规范"}',
                 tool_calls=None,
@@ -402,7 +404,7 @@ class TestStructuredOutput:
         assert result.parsed.reason == "符合规范"
 
         # 验证传递了 response_format 到 client
-        call_kwargs = mock_client.chat_completions.call_args.kwargs
+        call_kwargs = mock_client.chat_completions_or_raise.call_args.kwargs
         assert "response_format" in call_kwargs
         assert call_kwargs["response_format"]["type"] == "json_schema"
 
@@ -410,14 +412,14 @@ class TestStructuredOutput:
     async def test_dict_response_format_passthrough(self):
         """普通 dict response_format 直接透传"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(content='{"key": "value"}', tool_calls=None)
         )
 
         agent = AgentClient(client=mock_client)
         result = await agent.run("test", response_format={"type": "json_object"})
 
-        call_kwargs = mock_client.chat_completions.call_args.kwargs
+        call_kwargs = mock_client.chat_completions_or_raise.call_args.kwargs
         assert call_kwargs["response_format"] == {"type": "json_object"}
         assert result.parsed is None  # 没有 Pydantic model，不解析
 
@@ -433,7 +435,7 @@ class TestStructuredOutput:
             name: str
 
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(content="not json at all", tool_calls=None)
         )
 
@@ -451,7 +453,7 @@ class TestEventCallbacks:
     async def test_on_tool_call_callback(self):
         """on_tool_call 回调被触发"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             side_effect=[
                 ChatCompletionResult(
                     content=None,
@@ -484,7 +486,7 @@ class TestEventCallbacks:
     async def test_on_tool_result_callback(self):
         """on_tool_result 回调被触发"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             side_effect=[
                 ChatCompletionResult(
                     content=None,
@@ -515,7 +517,7 @@ class TestEventCallbacks:
     async def test_on_llm_response_callback(self):
         """on_llm_response 回调被触发"""
         mock_client = AsyncMock()
-        mock_client.chat_completions = AsyncMock(
+        mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(content="hello", tool_calls=None)
         )
 

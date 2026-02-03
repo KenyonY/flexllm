@@ -92,9 +92,6 @@ agent.on_tool_result = lambda name, result: print(f"结果: {result[:100]}")
 ```bash
 flexllm ask "问题"                     # 快速问答
 flexllm chat                           # 交互式聊天
-flexllm chat --tools shell             # Agent 模式（带 shell 工具）
-flexllm agent "查CPU使用率"              # Agent 非交互式（默认 shell）
-flexllm agent --tools shell,dtflow "清洗数据" # 多工具 Agent（shell/dtflow/maque/flexllm）
 flexllm list                           # 已配置模型
 flexllm test                           # 测试连接
 flexllm pricing gpt-4o                 # 查询定价
@@ -102,6 +99,40 @@ flexllm credits                        # 查询余额
 flexllm mock                           # Mock 服务器（测试用）
 flexllm serve                          # 启动 HTTP API 服务
 ```
+
+### Agent 模式
+
+内置细粒度工具，支持并行执行和 verbose 模式：
+
+```bash
+# 工具集
+# - code: read, edit, glob, grep, bash（代码操作，无 write）
+# - all: read, write, edit, glob, grep, bash（所有工具）
+# - 旧版: shell, dtflow, maque, flexllm（CLI 工具）
+
+# 单次任务
+flexllm agent --tools code "读取 main.py 前 20 行"
+flexllm agent --tools all "创建 hello.py 并写入 hello world"
+flexllm agent --tools code -v "调试问题"     # -v 显示详细执行过程
+
+# 多轮交互
+flexllm chat --tools code                    # 交互式 Agent
+flexllm chat --tools code -v                 # 详细模式
+
+# 混合工具
+flexllm agent --tools "read,dtflow" "读取并处理数据"
+```
+
+**工具说明：**
+
+| 工具 | 功能 | 只读 |
+|-----|------|------|
+| read | 读取文件（带行号、分页） | ✓ |
+| write | 创建或覆盖文件 | ✗ |
+| edit | 精确字符串替换（支持 replace_all） | ✗ |
+| glob | 文件模式匹配（如 `**/*.py`） | ✓ |
+| grep | 内容搜索（支持正则，优先用 ripgrep） | ✓ |
+| bash | 执行 shell 命令 | ✗ |
 
 ### serve 命令
 

@@ -106,8 +106,17 @@ def register_commands(app):
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
         tools: Annotated[
-            str | None, Option("--tools", help="内置工具集，逗号分隔（shell/dtflow/maque/flexllm）")
+            str | None,
+            Option(
+                "--tools", help="内置工具集（all/code/read,edit,glob,grep,bash/shell,dtflow...）"
+            ),
         ] = None,
+        verbose: Annotated[
+            bool, Option("-v", "--verbose", help="显示详细执行过程（仅 --tools 模式）")
+        ] = False,
+        max_rounds: Annotated[
+            int, Option("--max-rounds", help="最大 tool 调用轮数（仅 --tools 模式）")
+        ] = 10,
     ):
         """交互式对话
 
@@ -115,7 +124,8 @@ def register_commands(app):
             flexllm chat                      # 多轮对话
             flexllm chat "你好"               # 单条对话
             flexllm chat --model gpt-4 "你好" # 指定模型
-            flexllm chat --tools shell        # 启用 shell 工具
+            flexllm chat --tools code         # 启用代码工具
+            flexllm chat --tools code -v      # 详细模式
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -148,6 +158,8 @@ def register_commands(app):
                 model_params=model_params,
                 tools_name=tools,
                 message=message,
+                verbose=verbose,
+                max_rounds=max_rounds,
             )
             return
 
@@ -1289,14 +1301,19 @@ models:
         api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
         system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
         tools: Annotated[
-            str, Option("--tools", help="内置工具集，逗号分隔（shell/dtflow/maque/flexllm）")
+            str,
+            Option(
+                "--tools", help="内置工具集（all/code/read,edit,glob,grep,bash/shell,dtflow...）"
+            ),
         ] = "shell",
         max_rounds: Annotated[int, Option("--max-rounds", help="最大 tool 调用轮数")] = 10,
+        verbose: Annotated[bool, Option("-v", "--verbose", help="显示详细执行过程")] = False,
     ):
         """Agent 模式（非交互式，执行任务后返回）
 
         Examples:
             flexllm agent "查一下 cpu 使用率" --tools shell
+            flexllm agent "读取 main.py" --tools code -v
             echo "列出当前目录文件" | flexllm agent --tools shell
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
@@ -1326,4 +1343,5 @@ models:
             model_params=model_params,
             tools_name=tools,
             max_rounds=max_rounds,
+            verbose=verbose,
         )

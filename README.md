@@ -68,7 +68,7 @@ results = await client.chat_completions_batch(messages_list, output_jsonl="resul
 | **Cost Tracking**          | Real-time cost monitoring with budget control                                   |
 | **High-Performance Async** | Fine-grained concurrency control, QPS limiting, and streaming                   |
 | **Multi-Provider**         | Supports OpenAI-compatible APIs, Gemini, Claude                                 |
-| **Agent (Tool-Use Loop)**  | AgentClient with automatic tool calling, multi-turn chat, and structured output |
+| **Agent (Tool-Use Loop)**  | AgentClient with automatic tool calling, parallel execution, multi-turn chat, and built-in tools (read/write/edit/glob/grep/bash) |
 
 ---
 
@@ -341,10 +341,12 @@ flexllm init              # Initialize config file
 flexllm serve -m qwen-finetuned -s "You are an assistant"
 flexllm serve --thinking true -p 8000 -v  # With thinking mode + request logging
 
-# Agent mode (tool-use loop with built-in tools: shell/dtflow/maque/flexllm)
-flexllm chat --tools shell                              # Interactive agent chat
-flexllm agent "查一下 cpu 使用率"                         # Non-interactive (default: shell)
-flexllm agent --tools shell,dtflow "清洗data.jsonl"      # Multi-tool agent
+# Agent mode with built-in tools
+flexllm agent --tools code "读取 main.py 并分析"          # Code tools (read/edit/glob/grep/bash)
+flexllm agent --tools all "创建并修改文件"                 # All tools (includes write)
+flexllm agent --tools code -v "调试问题"                  # Verbose mode (show execution details)
+flexllm chat --tools code                               # Interactive multi-turn agent
+flexllm agent --tools shell,dtflow "清洗data.jsonl"      # Legacy CLI tools
 
 # Utilities
 flexllm pricing gpt-4     # Query model pricing
@@ -448,7 +450,8 @@ flexllm/
 │   └── router.py      # Provider routing strategies
 ├── agent/             # Agent layer (tool-use loop)
 │   ├── client.py      # AgentClient implementation
-│   └── types.py       # AgentResult, ToolCallRecord
+│   ├── types.py       # AgentResult, ToolCallRecord
+│   └── tools/         # Built-in tools (read/write/edit/glob/grep/bash)
 ├── cli/               # CLI commands and helpers
 ├── pricing/           # Cost estimation and tracking
 ├── serve.py           # HTTP API server (flexllm serve)

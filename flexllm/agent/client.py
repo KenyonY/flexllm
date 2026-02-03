@@ -150,7 +150,9 @@ class AgentClient:
         last_content = None
 
         while rounds < self.max_rounds:
-            result = await self.client.chat_completions(messages, return_usage=True, **call_kwargs)
+            result = await self.client.chat_completions_or_raise(
+                messages, return_usage=True, **call_kwargs
+            )
 
             # 触发 on_llm_response 回调
             if self.on_llm_response:
@@ -167,16 +169,28 @@ class AgentClient:
             assistant_msg = self._build_assistant_msg(result)
             messages.append(assistant_msg)
 
-            # 执行每个 tool call
-            for tc in result.tool_calls:
-                fn_name = tc.function["name"]
-                fn_args = tc.function.get("arguments", "{}")
+            # 并行执行所有 tool calls
+            tool_calls_info = [
+                (tc, tc.function["name"], tc.function.get("arguments", "{}"))
+                for tc in result.tool_calls
+            ]
 
-                # 触发 on_tool_call 回调
+            # 触发 on_tool_call 回调（所有工具）
+            for tc, fn_name, fn_args in tool_calls_info:
                 if self.on_tool_call:
                     self._fire_callback(self.on_tool_call, fn_name, fn_args)
 
-                output = await self._execute_tool(fn_name, fn_args)
+            # 并行执行工具
+            if len(tool_calls_info) > 1:
+                tasks = [
+                    self._execute_tool(fn_name, fn_args) for _, fn_name, fn_args in tool_calls_info
+                ]
+                outputs = await asyncio.gather(*tasks)
+            else:
+                outputs = [await self._execute_tool(tool_calls_info[0][1], tool_calls_info[0][2])]
+
+            # 处理结果
+            for (tc, fn_name, fn_args), output in zip(tool_calls_info, outputs):
                 tool_history.append(ToolCallRecord(name=fn_name, arguments=fn_args, result=output))
 
                 # 触发 on_tool_result 回调
