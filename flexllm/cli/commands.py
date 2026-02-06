@@ -117,6 +117,14 @@ def register_commands(app):
         max_rounds: Annotated[
             int, Option("--max-rounds", help="最大 tool 调用轮数（仅 --tools 模式）")
         ] = 10,
+        approve: Annotated[
+            str,
+            Option("--approve", help="审批模式 (auto/manual)，仅 --tools 模式"),
+        ] = "auto",
+        mcp: Annotated[
+            list[str] | None,
+            Option("--mcp", help="MCP server 命令或 URL（可多次指定，需搭配 --tools）"),
+        ] = None,
     ):
         """交互式对话
 
@@ -126,6 +134,7 @@ def register_commands(app):
             flexllm chat --model gpt-4 "你好" # 指定模型
             flexllm chat --tools code         # 启用代码工具
             flexllm chat --tools code -v      # 详细模式
+            flexllm chat --tools code --mcp "npx @mcp/server-github"
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -160,6 +169,8 @@ def register_commands(app):
                 message=message,
                 verbose=verbose,
                 max_rounds=max_rounds,
+                approve=approve,
+                mcp_servers=mcp,
             )
             return
 
@@ -303,6 +314,11 @@ def register_commands(app):
         port: Annotated[int, Option("-p", "--port", help="监听端口")] = 8000,
         host: Annotated[str, Option("--host", help="监听地址")] = "0.0.0.0",
         verbose: Annotated[bool, Option("--verbose", "-v", help="打印请求日志")] = False,
+        tools: Annotated[
+            str | None,
+            Option("--tools", help="Agent 工具集 (all/code/read,edit,glob,grep,bash)"),
+        ] = None,
+        max_rounds: Annotated[int, Option("--max-rounds", help="Agent 最大 tool 调用轮数")] = 10,
     ):
         """启动 HTTP API 服务，将 LLM 包装为 REST API
 
@@ -310,16 +326,19 @@ def register_commands(app):
         调用方只需发送 content 文本，返回解析后的 thinking 和 content。
 
         API 端点:
-            POST /api/generate         非流式生成
-            POST /api/generate/stream  流式生成 (SSE)
-            POST /api/generate/batch   批量生成
-            GET  /health               健康检查
-            GET  /api/config           查看当前配置
+            POST /api/generate             非流式生成
+            POST /api/generate/stream      流式生成 (SSE)
+            POST /api/generate/batch       批量生成
+            POST /api/agent/run            Agent 单次执行 (需 --tools)
+            POST /api/agent/run/stream     Agent 流式执行 (需 --tools)
+            POST /api/agent/chat           Agent 多轮对话 (需 --tools)
+            GET  /health                   健康检查
+            GET  /api/config               查看当前配置
 
         Examples:
             flexllm serve -m qwen-finetuned -s "你是助手"
             flexllm serve --thinking true -c 20 -p 8000
-            flexllm serve --user-template "[INST]{content}[/INST]"
+            flexllm serve --tools code -s "你是代码助手"
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -364,6 +383,8 @@ def register_commands(app):
             max_qps=max_qps,
             timeout=timeout,
             verbose=verbose,
+            tools=tools,
+            max_rounds=max_rounds,
         )
 
         effective_temperature = model_params.get("temperature")
@@ -386,11 +407,18 @@ def register_commands(app):
         print(f"  Concurrency: {concurrency}")
         if max_qps is not None:
             print(f"  Max QPS: {max_qps}")
-        print(f"\n  POST /api/generate         非流式生成")
-        print(f"  POST /api/generate/stream  流式生成")
-        print(f"  POST /api/generate/batch   批量生成")
-        print(f"  GET  /health               健康检查")
-        print(f"  GET  /api/config           查看配置")
+        if tools:
+            print(f"  Agent tools: {tools}")
+            print(f"  Agent max rounds: {max_rounds}")
+        print(f"\n  POST /api/generate             非流式生成")
+        print(f"  POST /api/generate/stream      流式生成")
+        print(f"  POST /api/generate/batch       批量生成")
+        if tools:
+            print(f"  POST /api/agent/run            Agent 执行")
+            print(f"  POST /api/agent/run/stream     Agent 流式执行")
+            print(f"  POST /api/agent/chat           Agent 多轮对话")
+        print(f"  GET  /health                   健康检查")
+        print(f"  GET  /api/config               查看配置")
         if verbose:
             print(f"  Verbose: on (请求日志已开启)")
         print("\nPress Ctrl+C to stop")
@@ -1306,6 +1334,10 @@ models:
                 "--tools", help="内置工具集（all/code/read,edit,glob,grep,bash/shell,dtflow...）"
             ),
         ] = "shell",
+        mcp: Annotated[
+            list[str] | None,
+            Option("--mcp", help="MCP server 命令或 URL（可多次指定）"),
+        ] = None,
         max_rounds: Annotated[int, Option("--max-rounds", help="最大 tool 调用轮数")] = 10,
         verbose: Annotated[bool, Option("-v", "--verbose", help="显示详细执行过程")] = False,
         validate: Annotated[
@@ -1318,6 +1350,10 @@ models:
         max_fix_attempts: Annotated[
             int, Option("--max-fix-attempts", help="验证失败时最大修复尝试次数")
         ] = 3,
+        approve: Annotated[
+            str,
+            Option("--approve", help="审批模式 (auto/manual)"),
+        ] = "auto",
     ):
         """Agent 模式（非交互式，执行任务后返回）
 
@@ -1325,6 +1361,7 @@ models:
             flexllm agent "查一下 cpu 使用率" --tools shell
             flexllm agent "读取 main.py" --tools code -v
             flexllm agent "修复这个 bug" --tools code --validate=python
+            flexllm agent --mcp "npx @mcp/server-github" "查看最近的 PR"
             echo "列出当前目录文件" | flexllm agent --tools shell
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
@@ -1357,4 +1394,49 @@ models:
             verbose=verbose,
             validate=validate,
             max_fix_attempts=max_fix_attempts,
+            approve=approve,
+            mcp_servers=mcp,
+        )
+
+    @app.command(name="mcp-server")
+    def mcp_server(
+        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
+        system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
+        tools: Annotated[
+            str | None,
+            Option("--tools", help="暴露 Agent 工具集 (all/code/read,edit,glob,grep,bash)"),
+        ] = None,
+        max_rounds: Annotated[int, Option("--max-rounds", help="Agent 最大 tool 调用轮数")] = 10,
+    ):
+        """启动 MCP Server (stdio 模式)
+
+        将 flexllm 的 LLM 调用和 Agent 能力暴露为 MCP server，
+        让 Claude Desktop、Cursor 等 MCP client 直接调用。
+
+        Examples:
+            flexllm mcp-server                    # 基础 LLM 调用
+            flexllm mcp-server --tools code       # 包含 Agent 工具
+            flexllm mcp-server -s "你是代码助手"
+        """
+        model, base_url, api_key = resolve_model_config(model, base_url, api_key)
+
+        if not base_url:
+            print("错误: 未配置 base_url", file=sys.stderr)
+            raise typer.Exit(1)
+
+        try:
+            from ..mcp_server import run_mcp_server
+        except ImportError:
+            print("错误: 需要安装 mcp SDK: pip install flexllm[agent]", file=sys.stderr)
+            raise typer.Exit(1)
+
+        run_mcp_server(
+            model=model,
+            base_url=base_url,
+            api_key=api_key,
+            system_prompt=system_prompt,
+            tools=tools,
+            max_rounds=max_rounds,
         )

@@ -8,11 +8,14 @@
     flexllm serve --thinking true -p 8000
 
 API 端点:
-    POST /api/generate         非流式生成
-    POST /api/generate/stream  流式生成 (SSE)
-    POST /api/generate/batch   批量生成
-    GET  /health               健康检查
-    GET  /api/config           查看当前配置
+    POST /api/generate             非流式生成
+    POST /api/generate/stream      流式生成 (SSE)
+    POST /api/generate/batch       批量生成
+    POST /api/agent/run            Agent 单次执行 (需 --tools)
+    POST /api/agent/run/stream     Agent 流式执行 (需 --tools)
+    POST /api/agent/chat           Agent 多轮对话 (需 --tools)
+    GET  /health                   健康检查
+    GET  /api/config               查看当前配置
 """
 
 from __future__ import annotations
@@ -55,12 +58,59 @@ class ServeConfig:
     max_qps: float | None = None
     timeout: int = 120
     verbose: bool = False
+    # Agent 配置
+    tools: str | None = None  # "code" / "all" / "read,edit,glob,grep,bash"
+    max_rounds: int = 10
+
+
+class AgentSessionManager:
+    """Agent 多轮对话的 session 管理"""
+
+    def __init__(self, ttl: int = 3600):
+        self._sessions: dict[str, "AgentClient"] = {}
+        self._timestamps: dict[str, float] = {}
+        self._ttl = ttl
+
+    def get_or_create(
+        self,
+        session_id: str,
+        client,
+        system: str | None,
+        tool_defs: list[dict],
+        tool_executor,
+        max_rounds: int,
+    ) -> "AgentClient":
+        from .agent.client import AgentClient
+
+        self.cleanup_expired()
+        if session_id not in self._sessions:
+            self._sessions[session_id] = AgentClient(
+                client=client,
+                system=system,
+                tools=tool_defs,
+                tool_executor=tool_executor,
+                max_rounds=max_rounds,
+            )
+        self._timestamps[session_id] = time.time()
+        return self._sessions[session_id]
+
+    def cleanup_expired(self):
+        now = time.time()
+        expired = [sid for sid, ts in self._timestamps.items() if now - ts > self._ttl]
+        for sid in expired:
+            self._sessions.pop(sid, None)
+            self._timestamps.pop(sid, None)
+        if expired:
+            logger.info("清理过期 agent session: %d 个", len(expired))
 
 
 class ServeServer:
     def __init__(self, config: ServeConfig):
         self.config = config
         self._client = None
+        self._tool_defs: list[dict] | None = None
+        self._tool_executor = None
+        self._session_mgr: AgentSessionManager | None = None
 
     def _build_messages(self, content: str) -> list[dict]:
         """构造 messages：注入 system prompt + 应用 user_template"""
@@ -114,6 +164,11 @@ class ServeServer:
         app.router.add_post("/api/generate", self._handle_generate)
         app.router.add_post("/api/generate/stream", self._handle_generate_stream)
         app.router.add_post("/api/generate/batch", self._handle_generate_batch)
+        # Agent 端点（仅在配置了 tools 时启用）
+        if self.config.tools:
+            app.router.add_post("/api/agent/run", self._handle_agent_run)
+            app.router.add_post("/api/agent/run/stream", self._handle_agent_run_stream)
+            app.router.add_post("/api/agent/chat", self._handle_agent_chat)
         app.on_startup.append(self._on_startup)
         app.on_cleanup.append(self._on_cleanup)
         return app
@@ -131,6 +186,13 @@ class ServeServer:
         if self.config.max_qps is not None:
             client_kwargs["max_qps"] = self.config.max_qps
         self._client = LLMClient(**client_kwargs)
+
+        # 初始化 Agent 工具
+        if self.config.tools:
+            from .cli.chat_helpers import get_builtin_tools
+
+            self._tool_defs, self._tool_executor = get_builtin_tools(self.config.tools)
+            self._session_mgr = AgentSessionManager()
 
     async def _on_cleanup(self, app: web.Application):
         if self._client:
@@ -317,6 +379,164 @@ class ServeServer:
         except Exception as e:
             elapsed = time.perf_counter() - start
             logger.error("POST /api/generate/batch 500 %.3fs error=%s", elapsed, e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    # ========== Agent 端点 ==========
+
+    def _make_agent(self, system: str | None = None, max_rounds: int | None = None):
+        """创建临时 AgentClient"""
+        from .agent.client import AgentClient
+
+        return AgentClient(
+            client=self._client,
+            system=system or self.config.system_prompt,
+            tools=self._tool_defs,
+            tool_executor=self._tool_executor,
+            max_rounds=max_rounds or self.config.max_rounds,
+        )
+
+    @staticmethod
+    def _agent_result_to_dict(result) -> dict:
+        return {
+            "content": result.content,
+            "rounds": result.rounds,
+            "tool_calls": [
+                {"name": tc.name, "arguments": tc.arguments, "result": tc.result}
+                for tc in result.tool_calls
+            ],
+            "usage": result.usage,
+        }
+
+    async def _handle_agent_run(self, request: web.Request) -> web.Response:
+        """POST /api/agent/run — 单次 agent 执行"""
+        start = time.perf_counter()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        content = data.get("content")
+        if not content:
+            return web.json_response({"error": "content is required"}, status=400)
+
+        logger.info("POST /api/agent/run input=%s", _truncate(content))
+        agent = self._make_agent(
+            system=data.get("system"),
+            max_rounds=data.get("max_rounds"),
+        )
+
+        try:
+            result = await agent.run(content)
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "POST /api/agent/run 200 %.3fs rounds=%d output=%s",
+                elapsed,
+                result.rounds,
+                _truncate(result.content),
+            )
+            return web.json_response(self._agent_result_to_dict(result))
+        except Exception as e:
+            elapsed = time.perf_counter() - start
+            logger.error("POST /api/agent/run 500 %.3fs error=%s", elapsed, e)
+            return web.json_response({"error": str(e)}, status=500)
+
+    async def _handle_agent_run_stream(self, request: web.Request) -> web.StreamResponse:
+        """POST /api/agent/run/stream — 流式 agent 执行 (SSE)"""
+        start = time.perf_counter()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        content = data.get("content")
+        if not content:
+            return web.json_response({"error": "content is required"}, status=400)
+
+        logger.info("POST /api/agent/run/stream input=%s", _truncate(content))
+        agent = self._make_agent(
+            system=data.get("system"),
+            max_rounds=data.get("max_rounds"),
+        )
+
+        response = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+        await response.prepare(request)
+
+        async def _send_sse(event_data: dict):
+            sse = json.dumps(event_data, ensure_ascii=False)
+            await response.write(f"data: {sse}\n\n".encode("utf-8"))
+
+        # 设置回调推送 SSE 事件
+        agent.on_tool_call = lambda name, args: asyncio.ensure_future(
+            _send_sse({"type": "tool_call", "name": name, "arguments": args})
+        )
+        agent.on_tool_result = lambda name, result: asyncio.ensure_future(
+            _send_sse({"type": "tool_result", "name": name, "result": _truncate(result, 1000)})
+        )
+
+        try:
+            result = await agent.run(content)
+            await _send_sse(
+                {
+                    "type": "done",
+                    **self._agent_result_to_dict(result),
+                }
+            )
+        except Exception as e:
+            await _send_sse({"type": "error", "message": str(e)})
+            elapsed = time.perf_counter() - start
+            logger.error("POST /api/agent/run/stream error %.3fs error=%s", elapsed, e)
+
+        elapsed = time.perf_counter() - start
+        logger.info("POST /api/agent/run/stream 200 %.3fs", elapsed)
+        await response.write_eof()
+        return response
+
+    async def _handle_agent_chat(self, request: web.Request) -> web.Response:
+        """POST /api/agent/chat — 多轮 agent 对话"""
+        start = time.perf_counter()
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        content = data.get("content")
+        session_id = data.get("session_id")
+        if not content:
+            return web.json_response({"error": "content is required"}, status=400)
+        if not session_id:
+            return web.json_response({"error": "session_id is required"}, status=400)
+
+        logger.info("POST /api/agent/chat session=%s input=%s", session_id, _truncate(content))
+        agent = self._session_mgr.get_or_create(
+            session_id=session_id,
+            client=self._client,
+            system=data.get("system") or self.config.system_prompt,
+            tool_defs=self._tool_defs,
+            tool_executor=self._tool_executor,
+            max_rounds=self.config.max_rounds,
+        )
+
+        try:
+            result = await agent.chat(content)
+            elapsed = time.perf_counter() - start
+            logger.info(
+                "POST /api/agent/chat 200 %.3fs session=%s rounds=%d",
+                elapsed,
+                session_id,
+                result.rounds,
+            )
+            return web.json_response(self._agent_result_to_dict(result))
+        except Exception as e:
+            elapsed = time.perf_counter() - start
+            logger.error("POST /api/agent/chat 500 %.3fs error=%s", elapsed, e)
             return web.json_response({"error": str(e)}, status=500)
 
     def run(self):

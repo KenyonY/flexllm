@@ -9,7 +9,14 @@
 - bash: 执行 shell 命令
 """
 
-from .base import TOOL_REGISTRY, ToolDef, get_tool_defs, make_tool_executor, register_tool
+from .base import (
+    TOOL_REGISTRY,
+    ToolDef,
+    ToolRegistry,
+    get_tool_defs,
+    make_tool_executor,
+    register_tool,
+)
 from .file_tools import edit_file, read_file, write_file
 from .search_tools import glob_files, grep_content
 from .shell_tool import bash_exec
@@ -18,6 +25,7 @@ __all__ = [
     # 注册器
     "TOOL_REGISTRY",
     "ToolDef",
+    "ToolRegistry",
     "register_tool",
     "get_tool_defs",
     "make_tool_executor",

@@ -38,12 +38,15 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from .types import AgentResult, ToolCallRecord
 
 if TYPE_CHECKING:
     from ..clients.base import LLMClientBase
+    from .memory import MemoryStore
+    from .tracing import TraceExporter
     from .validators.base import ValidationResult, Validator
 
 logger = logging.getLogger(__name__)
@@ -68,10 +71,15 @@ class AgentClient:
     Args:
         client: LLMClient 实例
         system: 系统提示词
-        tools: OpenAI 格式的 tool definitions
-        tool_executor: 工具执行函数 (name, arguments) -> result
+        tools: OpenAI 格式的 tool definitions（旧接口）
+        tool_executor: 工具执行函数 (name, arguments) -> result（旧接口）
+        tool_registry: ToolRegistry 实例（新接口，与 tools+tool_executor 二选一）
         max_rounds: 单次 run 最大 tool-calling 轮数
         max_context_tokens: 可选，上下文窗口限制（粗略按字符估算）
+        approval_handler: 工具执行审批函数 (name, args, readonly) -> bool
+        trace_exporter: Trace 导出器（可观测性）
+        memory: MemoryStore 实例（持久化记忆）
+        session_id: 会话 ID，配合 memory 使用
     """
 
     def __init__(
@@ -80,24 +88,48 @@ class AgentClient:
         system: str = None,
         tools: list[dict] = None,
         tool_executor: Callable[[str, str], str] = None,
+        tool_registry: Any | None = None,
         max_rounds: int = 10,
         max_context_tokens: int | None = None,
+        approval_handler: Callable[[str, str, bool], bool] | None = None,
+        trace_exporter: "TraceExporter | None" = None,
+        memory: "MemoryStore | None" = None,
+        session_id: str | None = None,
     ):
         self.client = client
         self.system = system
-        self.tools = tools
-        self.tool_executor = tool_executor
         self.max_rounds = max_rounds
         self.max_context_tokens = max_context_tokens
+        self.approval_handler = approval_handler
+        self.trace_exporter = trace_exporter
+        self.memory = memory
+        self.session_id = session_id
 
-        # 多轮对话历史
-        self._history: list[dict] = []
+        # 工具系统：优先使用 tool_registry
+        self._tool_registry = tool_registry
+        if tool_registry is not None:
+            self.tools = tool_registry.get_tool_defs()
+            self.tool_executor = None  # 由 registry 管理执行
+        else:
+            self.tools = tools
+            self.tool_executor = tool_executor
+
+        # 多轮对话历史（如果有 memory + session_id，从记忆加载）
+        if memory and session_id:
+            self._history: list[dict] = memory.load(session_id)
+        else:
+            self._history: list[dict] = []
 
         # 事件回调（可选）
         self.on_tool_call: Callable[[str, str], Any] | None = None
         self.on_tool_result: Callable[[str, str], Any] | None = None
         self.on_llm_response: Callable[[Any], Any] | None = None
         self.on_validation: Callable[[list[str], list], Any] | None = None  # (files, results)
+
+    @property
+    def tool_registry(self) -> Any | None:
+        """获取当前工具注册表"""
+        return self._tool_registry
 
     def reset(self):
         """清空对话历史"""
@@ -135,6 +167,10 @@ class AgentClient:
         if result.content:
             self._history.append({"role": "assistant", "content": result.content})
 
+        # 持久化到 memory
+        if self.memory and self.session_id:
+            self.memory.save(self.session_id, self._history)
+
         return result
 
     async def _run_loop(self, messages: list[dict], **kwargs) -> AgentResult:
@@ -142,6 +178,22 @@ class AgentClient:
         rounds = 0
         tool_history = []
         total_usage = None
+
+        # Tracing setup (only if exporter configured)
+        root_span = None
+        trace = None
+        if self.trace_exporter:
+            from .tracing import Span, SpanContext, Trace, _new_span_id
+
+            root_span = Span(
+                span_id=_new_span_id(),
+                name="agent.run",
+                start_time=time.time(),
+            )
+            trace = Trace(
+                trace_id=_new_span_id(),
+                root_span=root_span,
+            )
 
         # 处理 structured output: Pydantic model -> response_format
         pydantic_model = None
@@ -159,9 +211,24 @@ class AgentClient:
         last_content = None
 
         while rounds < self.max_rounds:
+            # LLM 调用 tracing
+            if root_span:
+                llm_span_ctx = SpanContext("llm.call", parent=root_span)
+                llm_span = llm_span_ctx.__enter__()
+
             result = await self.client.chat_completions_or_raise(
                 messages, return_usage=True, **call_kwargs
             )
+
+            if root_span:
+                if result.usage:
+                    llm_span.attributes.update(
+                        {
+                            "input_tokens": result.usage.get("prompt_tokens", 0),
+                            "output_tokens": result.usage.get("completion_tokens", 0),
+                        }
+                    )
+                llm_span_ctx.__exit__(None, None, None)
 
             # 触发 on_llm_response 回调
             if self.on_llm_response:
@@ -200,6 +267,13 @@ class AgentClient:
 
             # 处理结果
             for (tc, fn_name, fn_args), output in zip(tool_calls_info, outputs):
+                # 工具调用 tracing
+                if root_span:
+                    tool_span_ctx = SpanContext(f"tool.{fn_name}", parent=root_span)
+                    tool_span = tool_span_ctx.__enter__()
+                    tool_span.attributes["success"] = not output.startswith("[error:")
+                    tool_span_ctx.__exit__(None, None, None)
+
                 tool_history.append(ToolCallRecord(name=fn_name, arguments=fn_args, result=output))
 
                 # 触发 on_tool_result 回调
@@ -216,6 +290,14 @@ class AgentClient:
                 )
 
             rounds += 1
+
+        # 导出 trace
+        if self.trace_exporter and trace and root_span:
+            root_span.end_time = time.time()
+            trace.total_rounds = rounds
+            if total_usage:
+                trace.total_tokens = total_usage.get("total_tokens", 0)
+            self.trace_exporter.export(trace)
 
         # Structured output 解析
         parsed = None
@@ -299,7 +381,24 @@ class AgentClient:
         return msg
 
     async def _execute_tool(self, name: str, arguments: str) -> str:
-        """执行工具调用"""
+        """执行工具调用（支持 ToolRegistry 或旧式 tool_executor）"""
+        # 审批检查
+        if self.approval_handler:
+            readonly = False
+            if self._tool_registry and name in self._tool_registry:
+                readonly = self._tool_registry.is_readonly(name)
+            else:
+                from .tools.base import TOOL_REGISTRY
+
+                tool_def = TOOL_REGISTRY.get(name)
+                readonly = tool_def.readonly if tool_def else False
+            if not self.approval_handler(name, arguments, readonly):
+                return "[denied: tool execution was denied by user]"
+
+        # 优先使用 ToolRegistry
+        if self._tool_registry:
+            return await self._tool_registry.execute_async(name, arguments)
+
         if not self.tool_executor:
             return json.dumps({"error": f"No tool_executor configured for tool '{name}'"})
 
@@ -454,3 +553,17 @@ class AgentClient:
 {chr(10).join(error_sections)}
 
 请直接修复代码，不需要解释。"""
+
+
+def console_approval(name: str, args: str, readonly: bool) -> bool:
+    """CLI 模式：在终端询问用户。只读操作自动通过。"""
+    if readonly:
+        return True
+    args_preview = args[:200] + "..." if len(args) > 200 else args
+    print(f"[Agent] 即将执行: {name}({args_preview})")
+    return input("是否允许? (y/n) ").strip().lower() in ("y", "yes")
+
+
+def auto_approve(name: str, args: str, readonly: bool) -> bool:
+    """全部自动通过（无人值守模式）"""
+    return True

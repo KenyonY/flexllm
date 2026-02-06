@@ -314,13 +314,16 @@ def agent_chat(
     message=None,
     verbose=False,
     max_rounds=10,
+    approve="auto",
+    mcp_servers=None,
 ):
     """Agent 模式的交互式对话"""
 
     async def _run():
         from flexllm import AgentClient, LLMClient
+        from flexllm.agent.tools.base import ToolRegistry
 
-        tool_defs, tool_executor = get_builtin_tools(tools_name)
+        registry = _build_registry(tools_name, mcp_servers)
 
         # verbose 模式下的回调
         def on_tool_call(name, arguments):
@@ -370,58 +373,171 @@ def agent_chat(
                     )
                     print(f"  📊 Tokens: {tokens}")
 
-        async with LLMClient(model=model, base_url=base_url, api_key=api_key) as client:
-            agent = AgentClient(
-                client=client,
-                system=system_prompt,
-                tools=tool_defs,
-                tool_executor=tool_executor,
-                max_rounds=max_rounds,
-            )
+        mcp_conns = []
+        try:
+            if mcp_servers:
+                mcp_conns = await _connect_mcp_servers(mcp_servers)
+                from flexllm.agent.mcp.converter import mcp_tools_to_registry
 
-            # 设置回调
-            agent.on_tool_call = on_tool_call
-            agent.on_tool_result = on_tool_result
-            agent.on_llm_response = on_llm_response
+                mcp_registry = await mcp_tools_to_registry(mcp_conns)
+                registry.merge(mcp_registry)
 
-            if message:
-                print("Agent 运行中...", flush=True)
-                result = await agent.run(message, **model_params)
-                print(f"Assistant: {result.content}")
-                if result.tool_calls:
-                    print(f"  (调用了 {len(result.tool_calls)} 次工具，{result.rounds} 轮)")
-                return
+            async with LLMClient(model=model, base_url=base_url, api_key=api_key) as client:
+                agent = AgentClient(
+                    client=client,
+                    system=system_prompt,
+                    tool_registry=registry,
+                    max_rounds=max_rounds,
+                )
 
-            print("\nAgent 对话模式")
-            print(f"模型: {model}")
-            print(f"工具: {tools_name}")
-            if verbose:
-                print("模式: verbose")
-            print("输入 'quit' 或 Ctrl+C 退出")
-            print("-" * 50)
+                if approve == "manual":
+                    from flexllm.agent.client import console_approval
 
-            while True:
-                try:
-                    user_input = input("\nYou: ").strip()
-                    if user_input.lower() in ["quit", "exit", "q"]:
-                        print("再见！")
-                        break
-                    if not user_input:
-                        continue
+                    agent.approval_handler = console_approval
 
-                    result = await agent.chat(user_input, **model_params)
+                # 设置回调
+                agent.on_tool_call = on_tool_call
+                agent.on_tool_result = on_tool_result
+                agent.on_llm_response = on_llm_response
+
+                if message:
+                    print("Agent 运行中...", flush=True)
+                    result = await agent.run(message, **model_params)
                     print(f"Assistant: {result.content}")
                     if result.tool_calls:
                         print(f"  (调用了 {len(result.tool_calls)} 次工具，{result.rounds} 轮)")
+                    return
 
-                except EOFError:
-                    print("\n再见！")
-                    break
+                print("\nAgent 对话模式")
+                print(f"模型: {model}")
+                print(f"工具: {tools_name}")
+                if mcp_servers:
+                    print(f"MCP: {', '.join(mcp_servers)}")
+                if verbose:
+                    print("模式: verbose")
+                print("输入 'quit' 或 Ctrl+C 退出")
+                print("-" * 50)
+
+                while True:
+                    try:
+                        user_input = input("\nYou: ").strip()
+                        if user_input.lower() in ["quit", "exit", "q"]:
+                            print("再见！")
+                            break
+                        if not user_input:
+                            continue
+
+                        result = await agent.chat(user_input, **model_params)
+                        print(f"Assistant: {result.content}")
+                        if result.tool_calls:
+                            print(f"  (调用了 {len(result.tool_calls)} 次工具，{result.rounds} 轮)")
+
+                    except EOFError:
+                        print("\n再见！")
+                        break
+        finally:
+            for conn in mcp_conns:
+                await conn.close()
 
     try:
         asyncio.run(_run())
     except KeyboardInterrupt:
         print("\n再见！")
+
+
+def _build_registry(tools_name, mcp_servers=None):
+    """构建 ToolRegistry（内置工具 + 旧版 CLI 工具）"""
+    from flexllm.agent.tools.base import TOOL_REGISTRY, ToolDef, ToolRegistry
+
+    names = [t.strip() for t in tools_name.split(",") if t.strip()]
+
+    # 处理特殊值
+    expanded_names = []
+    for name in names:
+        if name == "all":
+            expanded_names.extend(TOOL_REGISTRY.keys())
+        elif name == "code":
+            expanded_names.extend(["read", "edit", "glob", "grep", "bash"])
+        else:
+            expanded_names.append(name)
+    names = list(dict.fromkeys(expanded_names))
+
+    # 分离新版和旧版工具
+    new_tools = [n for n in names if n in TOOL_REGISTRY]
+    legacy_tools = [n for n in names if n in LEGACY_CLI_TOOLS and n not in TOOL_REGISTRY]
+
+    # 检查未知工具
+    all_known = set(TOOL_REGISTRY.keys()) | set(LEGACY_CLI_TOOLS.keys())
+    unknown = [n for n in names if n not in all_known]
+    if unknown:
+        available = ", ".join(sorted(all_known))
+        raise ValueError(f"未知的工具: {', '.join(unknown)}，可用: {available}")
+
+    # 构建 ToolRegistry
+    registry = ToolRegistry.from_global(new_tools) if new_tools else ToolRegistry()
+
+    # 注册旧版 CLI 工具
+    for name in legacy_tools:
+        tool = LEGACY_CLI_TOOLS[name]
+        desc = tool["description"]
+        if tool["prefix"]:
+            desc += f" (命令会自动添加 '{tool['prefix']}' 前缀)"
+        prefix = tool["prefix"]
+
+        def _make_executor(prefix_val):
+            def executor(command: str) -> str:
+                import subprocess
+
+                full_command = f"{prefix_val} {command}".strip() if prefix_val else command
+                try:
+                    result = subprocess.run(
+                        full_command, shell=True, capture_output=True, text=True, timeout=60
+                    )
+                    output = result.stdout
+                    if result.stderr:
+                        output += ("\n" if output else "") + result.stderr
+                    if result.returncode != 0:
+                        output += f"\n[exit code: {result.returncode}]"
+                    return output or "(no output)"
+                except subprocess.TimeoutExpired:
+                    return "[error: command timed out after 60s]"
+                except Exception as e:
+                    return f"[error: {e}]"
+
+            return executor
+
+        registry.register(
+            ToolDef(
+                name=name,
+                description=desc,
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "The command to execute"},
+                    },
+                    "required": ["command"],
+                },
+                executor=_make_executor(prefix),
+                readonly=False,
+            )
+        )
+
+    return registry
+
+
+async def _connect_mcp_servers(mcp_servers):
+    """连接 MCP servers，返回连接列表"""
+    from flexllm.agent.mcp import MCPConnection
+
+    conns = []
+    for server_spec in mcp_servers:
+        if server_spec.startswith("http://") or server_spec.startswith("https://"):
+            conn = MCPConnection(url=server_spec)
+        else:
+            conn = MCPConnection(command=server_spec)
+        await conn.connect()
+        conns.append(conn)
+    return conns
 
 
 def agent_run(
@@ -436,18 +552,21 @@ def agent_run(
     verbose=False,
     validate=None,
     max_fix_attempts=3,
+    approve="auto",
+    mcp_servers=None,
 ):
     """Agent 非交互式执行
 
     Args:
         validate: 验证器名称，如 "python" 或 "python,pytest"，None 表示不验证
         max_fix_attempts: 验证失败时最大修复尝试次数
+        mcp_servers: MCP server 命令或 URL 列表
     """
 
     async def _run():
         from flexllm import AgentClient, LLMClient
 
-        tool_defs, tool_executor = get_builtin_tools(tools_name)
+        registry = _build_registry(tools_name)
 
         # 解析验证器
         validators = _parse_validators(validate) if validate else None
@@ -520,74 +639,92 @@ def agent_run(
                     )
                     print(f"  → Tokens: {tokens}")
 
-        async with LLMClient(model=model, base_url=base_url, api_key=api_key) as client:
-            agent = AgentClient(
-                client=client,
-                system=system_prompt,
-                tools=tool_defs,
-                tool_executor=tool_executor,
-                max_rounds=max_rounds,
-            )
+        mcp_conns = []
+        try:
+            if mcp_servers:
+                mcp_conns = await _connect_mcp_servers(mcp_servers)
+                from flexllm.agent.mcp.converter import mcp_tools_to_registry
 
-            # 验证回调
-            def on_validation(files, results):
-                print(f"\n{'─' * 60}")
-                print(f"🔍 Validation")
-                print(f"{'─' * 60}")
-                print(f"Files: {files}")
-                for r in results:
-                    status = "✅" if r.success else "❌"
-                    print(f"  {status} [{r.validator_name}]", end="")
-                    if not r.success:
-                        print(f" - {len(r.errors)} error(s)")
-                        for e in r.errors[:3]:
-                            print(f"      {e}")
-                        if len(r.errors) > 3:
-                            print(f"      ... and {len(r.errors) - 3} more")
-                    else:
-                        print()
+                mcp_registry = await mcp_tools_to_registry(mcp_conns)
+                registry.merge(mcp_registry)
 
-            # 设置回调
-            agent.on_tool_call = on_tool_call
-            agent.on_tool_result = on_tool_result
-            agent.on_llm_response = on_llm_response
-            if validators:
-                agent.on_validation = on_validation
-
-            if verbose:
-                print(f"{'═' * 60}")
-                print(f"🚀 Agent Start")
-                print(f"{'═' * 60}")
-                print(f"Model: {model}")
-                print(f"Tools: {tools_name}")
-                if validators:
-                    print(f"Validators: {[v.name for v in validators]}")
-                print(f"Task: {message[:100]}{'...' if len(message) > 100 else ''}")
-
-            if validators:
-                result = await agent.run_with_validation(
-                    message,
-                    validators=validators,
-                    max_fix_attempts=max_fix_attempts,
-                    **model_params,
+            async with LLMClient(model=model, base_url=base_url, api_key=api_key) as client:
+                agent = AgentClient(
+                    client=client,
+                    system=system_prompt,
+                    tool_registry=registry,
+                    max_rounds=max_rounds,
                 )
-            else:
-                result = await agent.run(message, **model_params)
 
-            if verbose:
-                print(f"\n{'═' * 60}")
-                print(f"✅ Agent Complete")
-                print(f"{'═' * 60}")
-                print(f"Rounds: {result.rounds}")
-                print(f"Tool calls: {len(result.tool_calls)}")
-                if result.usage:
-                    total = result.usage.get("total_tokens", "?")
-                    print(f"Total tokens: {total}")
-                print(f"\n{'─' * 60}")
-                print("Final Response:")
-                print(f"{'─' * 60}")
+                if approve == "manual":
+                    from flexllm.agent.client import console_approval
 
-            print(result.content)
+                    agent.approval_handler = console_approval
+
+                # 验证回调
+                def on_validation(files, results):
+                    print(f"\n{'─' * 60}")
+                    print(f"🔍 Validation")
+                    print(f"{'─' * 60}")
+                    print(f"Files: {files}")
+                    for r in results:
+                        status = "✅" if r.success else "❌"
+                        print(f"  {status} [{r.validator_name}]", end="")
+                        if not r.success:
+                            print(f" - {len(r.errors)} error(s)")
+                            for e in r.errors[:3]:
+                                print(f"      {e}")
+                            if len(r.errors) > 3:
+                                print(f"      ... and {len(r.errors) - 3} more")
+                        else:
+                            print()
+
+                # 设置回调
+                agent.on_tool_call = on_tool_call
+                agent.on_tool_result = on_tool_result
+                agent.on_llm_response = on_llm_response
+                if validators:
+                    agent.on_validation = on_validation
+
+                if verbose:
+                    print(f"{'═' * 60}")
+                    print(f"🚀 Agent Start")
+                    print(f"{'═' * 60}")
+                    print(f"Model: {model}")
+                    print(f"Tools: {tools_name}")
+                    if mcp_servers:
+                        print(f"MCP: {', '.join(mcp_servers)}")
+                    if validators:
+                        print(f"Validators: {[v.name for v in validators]}")
+                    print(f"Task: {message[:100]}{'...' if len(message) > 100 else ''}")
+
+                if validators:
+                    result = await agent.run_with_validation(
+                        message,
+                        validators=validators,
+                        max_fix_attempts=max_fix_attempts,
+                        **model_params,
+                    )
+                else:
+                    result = await agent.run(message, **model_params)
+
+                if verbose:
+                    print(f"\n{'═' * 60}")
+                    print(f"✅ Agent Complete")
+                    print(f"{'═' * 60}")
+                    print(f"Rounds: {result.rounds}")
+                    print(f"Tool calls: {len(result.tool_calls)}")
+                    if result.usage:
+                        total = result.usage.get("total_tokens", "?")
+                        print(f"Total tokens: {total}")
+                    print(f"\n{'─' * 60}")
+                    print("Final Response:")
+                    print(f"{'─' * 60}")
+
+                print(result.content)
+        finally:
+            for conn in mcp_conns:
+                await conn.close()
 
     try:
         asyncio.run(_run())

@@ -1,6 +1,7 @@
 """工具基类和注册器
 
 支持装饰器自动生成 JSON Schema，简化工具开发。
+支持 ToolRegistry 实例级动态工具注册，为 MCP 集成奠基。
 """
 
 from __future__ import annotations
@@ -11,6 +12,115 @@ from dataclasses import dataclass
 from typing import Callable, get_type_hints
 
 TOOL_REGISTRY: dict[str, "ToolDef"] = {}
+
+
+class ToolRegistry:
+    """可变工具注册表（实例级别，每个 AgentClient 一个）
+
+    Example:
+        registry = ToolRegistry.from_global(["read", "edit", "bash"])
+        registry.register(ToolDef(name="my_tool", ...))
+        tool_defs = registry.get_tool_defs()
+        result = registry.execute("read", '{"file_path": "a.py"}')
+    """
+
+    def __init__(self):
+        self._tools: dict[str, ToolDef] = {}
+
+    @classmethod
+    def from_global(cls, names: list[str]) -> "ToolRegistry":
+        """从全局 TOOL_REGISTRY 加载指定工具"""
+        registry = cls()
+        for name in names:
+            if name not in TOOL_REGISTRY:
+                available = ", ".join(TOOL_REGISTRY.keys())
+                raise ValueError(f"未知工具: {name}，可用: {available}")
+            registry._tools[name] = TOOL_REGISTRY[name]
+        return registry
+
+    def register(self, tool_def: ToolDef):
+        """注册工具"""
+        self._tools[tool_def.name] = tool_def
+
+    def unregister(self, name: str):
+        """移除工具"""
+        self._tools.pop(name, None)
+
+    def get_tool_defs(self) -> list[dict]:
+        """输出 OpenAI 格式的 tool definitions"""
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                },
+            }
+            for tool in self._tools.values()
+        ]
+
+    def execute(self, name: str, arguments: str) -> str:
+        """同步执行工具"""
+        if name not in self._tools:
+            return f"[error: tool '{name}' not found]"
+
+        tool = self._tools[name]
+        try:
+            args = json.loads(arguments) if arguments else {}
+        except json.JSONDecodeError as e:
+            return f"[error: invalid JSON arguments: {e}]"
+
+        try:
+            result = tool.executor(**args)
+            return str(result)
+        except Exception as e:
+            return f"[error: {type(e).__name__}: {e}]"
+
+    async def execute_async(self, name: str, arguments: str) -> str:
+        """异步执行（支持 async executor）"""
+        if name not in self._tools:
+            return f"[error: tool '{name}' not found]"
+
+        tool = self._tools[name]
+        try:
+            args = json.loads(arguments) if arguments else {}
+        except json.JSONDecodeError as e:
+            return f"[error: invalid JSON arguments: {e}]"
+
+        try:
+            result = tool.executor(**args)
+            if inspect.isawaitable(result):
+                result = await result
+            return str(result)
+        except Exception as e:
+            return f"[error: {type(e).__name__}: {e}]"
+
+    def merge(self, other: "ToolRegistry"):
+        """合并另一个 registry 的工具"""
+        self._tools.update(other._tools)
+
+    def is_readonly(self, name: str) -> bool:
+        """检查工具是否只读"""
+        tool = self._tools.get(name)
+        return tool.readonly if tool else False
+
+    @property
+    def names(self) -> list[str]:
+        return list(self._tools.keys())
+
+    @property
+    def readonly_tools(self) -> list[str]:
+        return [name for name, tool in self._tools.items() if tool.readonly]
+
+    def __len__(self) -> int:
+        return len(self._tools)
+
+    def __contains__(self, name: str) -> bool:
+        return name in self._tools
+
+    def __repr__(self) -> str:
+        return f"ToolRegistry({self.names})"
 
 
 @dataclass

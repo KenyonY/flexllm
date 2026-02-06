@@ -51,6 +51,9 @@ vertex = [
 cache = [
     "flaxkv2>=0.1.5",
 ]
+memory = [
+    "flaxkv2>=0.1.5",
+]
 image = [
     "opencv-python",
 ]
@@ -61,8 +64,11 @@ cli = [
 token = [
     "tiktoken>=0.5.0",
 ]
+agent = [
+    "mcp>=1.0",
+]
 all = [
-    "flexllm[vertex,cache,image,cli,token]",
+    "flexllm[vertex,cache,memory,image,cli,token,agent]",
 ]
 dev = [
     "pytest>=7.0.0",

@@ -7,6 +7,7 @@
 ```
 docs/
 ├── index.md              # 本文档（主入口）
+├── agent.md              # Agent 模块（v0.6.0 新增）
 ├── api.md                # API 详细参考
 ├── advanced.md           # 高级用法
 └── roadmap.md            # 开发路线图
@@ -50,6 +51,14 @@ LLMClient (推荐，统一入口)
 
 LLMClientPool (多 Endpoint 负载均衡)
     └── 内部管理多个 LLMClient
+
+AgentClient (Agent 能力，v0.6.0)
+    ├── ToolRegistry (动态工具注册)
+    ├── MCP Client (连接外部 MCP Server)
+    ├── MCP Server (暴露为 MCP Server)
+    ├── Memory (持久化记忆)
+    ├── Tracing (可观测性)
+    └── Approval (操作审批)
 ```
 
 ### 2. 请求模式
