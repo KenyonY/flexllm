@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.6.0] - 2026-02-06
+
+### Features
+
+- **agent**: 新增 Agent 基础设施，从 LLM 客户端升级为 Agent 平台
+
+### Miscellaneous
+
+- Bump version to 0.6.0
+
 ## [0.5.8] - 2026-02-03
 
 ### Bug Fixes
