@@ -15,7 +15,7 @@ client = LLMClient(
     api_key: str = "EMPTY",              # API 密钥
     provider: str = "auto",              # "auto", "openai", "gemini"
     cache: ResponseCacheConfig = None,   # 缓存配置
-    concurrency_limit: int = 50,         # 最大并发数
+    concurrency_limit: int = 10,         # 最大并发数
     max_qps: float = None,               # QPS 限制
     retry_times: int = 3,                # 重试次数
     retry_delay: float = 1.0,            # 重试延迟（秒）
@@ -60,7 +60,7 @@ def chat_completions_sync(messages, **kwargs) -> str | ChatCompletionResult
 ```python
 async def chat_completions_batch(
     messages_list: List[List[dict]],
-    output_file: str = None,
+    output_jsonl: str = None,
     show_progress: bool = True,
     return_summary: bool = False,
     flush_interval: float = 1.0,
@@ -73,7 +73,7 @@ async def chat_completions_batch(
 
 **参数：**
 - `messages_list`: 消息列表的列表
-- `output_file`: 输出文件路径（启用断点续传）
+- `output_jsonl`: 输出文件路径（启用断点续传）
 - `show_progress`: 显示进度条
 - `return_summary`: 返回统计摘要
 - `flush_interval`: 写入磁盘间隔
