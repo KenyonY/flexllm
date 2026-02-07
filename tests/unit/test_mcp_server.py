@@ -4,6 +4,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+try:
+    import mcp  # noqa: F401
+
+    _has_mcp = True
+except ImportError:
+    _has_mcp = False
+
 
 class TestCreateMCPServer:
     def test_requires_mcp_sdk(self):
@@ -14,6 +21,7 @@ class TestCreateMCPServer:
 
             assert callable(create_mcp_server)
 
+    @pytest.mark.skipif(not _has_mcp, reason="mcp SDK not installed")
     def test_create_server_returns_server(self):
         """创建 server 并返回 Server 实例"""
         from flexllm.mcp_server import create_mcp_server
@@ -25,6 +33,7 @@ class TestCreateMCPServer:
         )
         assert server is not None
 
+    @pytest.mark.skipif(not _has_mcp, reason="mcp SDK not installed")
     def test_create_server_with_tools(self):
         """创建带 tools 的 server"""
         from flexllm.mcp_server import create_mcp_server
