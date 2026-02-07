@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.1] - 2026-02-07
+
+### Bug Fixes
+
+- **ci**: Test extra 添加 mcp 依赖，CI 环境可运行 MCP 测试
+- **test**: Mcp SDK 未安装时跳过 MCP server 创建测试
+
+### Performance
+
+- **cache**: IPC 缓存批量查询优化，25000 条从 ~6s 降至 ~0.26s
+
+### Refactor
+
+- **deps**: Mcp 从 agent extra 移入基础依赖
+
 ## [0.6.0] - 2026-02-06
 
 ### Features
