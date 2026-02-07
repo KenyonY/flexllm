@@ -818,24 +818,29 @@ class LLMClientPool:
             for record in records:
                 results[record["index"]] = record["output"]
 
-        # 检查缓存命中（如果启用了缓存）
+        # 检查缓存命中（如果启用了缓存）—— 批量查询，单次 IPC 往返
         effective_model = model or self._endpoints[0].model
         if response_cache is not None:
-            for idx, msg in enumerate(messages_list):
-                if idx in completed_indices:
-                    continue
-                cached_result = response_cache.get(msg, model=effective_model, **kwargs)
-                if cached_result is not None:
-                    # 缓存格式为 {"content": ..., "usage": ...}
-                    if return_usage:
-                        results[idx] = ChatCompletionResult(
-                            content=cached_result["content"],
-                            usage=cached_result.get("usage"),
-                        )
-                    else:
-                        results[idx] = cached_result["content"]
-                    completed_indices.add(idx)
-                    cached_count += 1
+            # 过滤出未完成的 messages
+            pending = [
+                (idx, msg) for idx, msg in enumerate(messages_list) if idx not in completed_indices
+            ]
+            if pending:
+                pending_indices, pending_msgs = zip(*pending)
+                cached_responses, _ = response_cache.get_batch(
+                    list(pending_msgs), model=effective_model, **kwargs
+                )
+                for idx, cached_result in zip(pending_indices, cached_responses):
+                    if cached_result is not None:
+                        if return_usage:
+                            results[idx] = ChatCompletionResult(
+                                content=cached_result["content"],
+                                usage=cached_result.get("usage"),
+                            )
+                        else:
+                            results[idx] = cached_result["content"]
+                        completed_indices.add(idx)
+                        cached_count += 1
             if cached_count > 0:
                 logger.info(f"缓存命中: {cached_count}/{n}")
 

@@ -211,29 +211,40 @@ class ResponseCache:
         self, messages_list: list[list[dict]], model: str = "", **kwargs
     ) -> tuple[list[Any | None], list[int]]:
         """
-        批量获取缓存
+        批量获取缓存（单次 IPC 往返）
 
         Returns:
             (cached_responses, uncached_indices)
         """
+        if self._db is None:
+            return [None] * len(messages_list), list(range(len(messages_list)))
+
+        cache_keys = [self._make_key(msgs, model, **kwargs) for msgs in messages_list]
+        results = self._db.batch_get(cache_keys)
+
         cached = []
         uncached_indices = []
-
-        for i, messages in enumerate(messages_list):
-            result = self.get(messages, model, **kwargs)
+        for i, result in enumerate(results):
             cached.append(result)
-            if result is None:
+            if result is not None:
+                self._stats["hits"] += 1
+            else:
+                self._stats["misses"] += 1
                 uncached_indices.append(i)
-
         return cached, uncached_indices
 
     def set_batch(
         self, messages_list: list[list[dict]], responses: list[Any], model: str = "", **kwargs
     ) -> None:
-        """批量存储缓存"""
+        """批量存储缓存（单次 IPC 往返）"""
+        if self._db is None:
+            return
+        items = {}
         for messages, response in zip(messages_list, responses):
             if response is not None:
-                self.set(messages, response, model, **kwargs)
+                items[self._make_key(messages, model, **kwargs)] = response
+        if items:
+            self._db.batch_set(items)
 
     def clear(self) -> int:
         """清空缓存"""
