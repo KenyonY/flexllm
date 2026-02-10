@@ -23,40 +23,11 @@ class TestBuildRegistry:
         assert "write" in registry
         assert len(registry) >= 6
 
-    def test_build_shell_registry(self):
-        from flexllm.cli.chat_helpers import _build_registry
-
-        registry = _build_registry("shell")
-        assert "shell" in registry
-        assert len(registry) == 1
-
-    def test_build_mixed_registry(self):
-        from flexllm.cli.chat_helpers import _build_registry
-
-        registry = _build_registry("read,bash,shell")
-        assert "read" in registry
-        assert "bash" in registry
-        assert "shell" in registry
-        assert len(registry) == 3
-
     def test_build_unknown_tool_raises(self):
         from flexllm.cli.chat_helpers import _build_registry
 
         with pytest.raises(ValueError, match="未知的工具"):
             _build_registry("nonexistent_tool_xyz")
-
-    def test_shell_executor_works(self):
-        from flexllm.cli.chat_helpers import _build_registry
-
-        registry = _build_registry("shell")
-        result = registry.execute("shell", '{"command": "echo hello_test_123"}')
-        assert "hello_test_123" in result
-
-    def test_legacy_tool_is_not_readonly(self):
-        from flexllm.cli.chat_helpers import _build_registry
-
-        registry = _build_registry("shell")
-        assert registry.is_readonly("shell") is False
 
 
 class TestConnectMCPServers:

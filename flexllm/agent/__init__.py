@@ -1,9 +1,19 @@
 """flexllm.agent - Agent 客户端"""
 
+from .agent_types import AGENT_TYPES, get_agent_type, register_agent_type
 from .client import AgentClient, auto_approve, console_approval
 from .types import AgentResult, ToolCallRecord
 
-__all__ = ["AgentClient", "AgentResult", "ToolCallRecord", "auto_approve", "console_approval"]
+__all__ = [
+    "AGENT_TYPES",
+    "AgentClient",
+    "AgentResult",
+    "ToolCallRecord",
+    "auto_approve",
+    "console_approval",
+    "get_agent_type",
+    "register_agent_type",
+]
 
 
 # 延迟导入 tools 和 validators 模块，避免循环依赖

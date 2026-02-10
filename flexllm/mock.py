@@ -10,6 +10,7 @@
 - 支持 OpenAI / Claude / Gemini 三种 API 格式
 - 支持流式和非流式响应
 - 可选的思考/推理内容返回
+- Tool Call 支持：请求含 tools 时自动返回 tool_call 响应（OpenAI tool_calls / Claude tool_use / Gemini functionCall）
 
 用法:
     # CLI
@@ -275,6 +276,87 @@ class MockLLMServer:
                 await asyncio.sleep(wait_time)
         return time.perf_counter()
 
+    # ── Tool Call 辅助方法 ──
+
+    def _should_respond_with_tool_call(
+        self, tools: list | None, messages: list[dict], api_format: str = "openai"
+    ) -> bool:
+        """判断是否应该以 tool_call 形式响应
+
+        逻辑：有 tools 且最后一条消息不是 tool result 时，返回 tool call
+        """
+        if not tools:
+            return False
+        if not messages:
+            return True
+
+        last_msg = messages[-1]
+
+        if api_format == "openai":
+            return last_msg.get("role") != "tool"
+        elif api_format == "claude":
+            content = last_msg.get("content", [])
+            if isinstance(content, list):
+                return not any(
+                    isinstance(item, dict) and item.get("type") == "tool_result" for item in content
+                )
+            return True
+        elif api_format == "gemini":
+            parts = messages[-1].get("parts", []) if messages else []
+            return not any(isinstance(p, dict) and "functionResponse" in p for p in parts)
+        return True
+
+    def _pick_tool(self, tools: list[dict], api_format: str = "openai") -> tuple[str, dict]:
+        """从工具列表中随机选择一个工具，返回 (tool_name, mock_args)"""
+        if api_format == "openai":
+            tool = random.choice(tools)
+            func = tool.get("function", {})
+            name = func.get("name", "mock_tool")
+            params = func.get("parameters", {})
+        elif api_format == "claude":
+            tool = random.choice(tools)
+            name = tool.get("name", "mock_tool")
+            params = tool.get("input_schema", {})
+        elif api_format == "gemini":
+            all_funcs = []
+            for t in tools:
+                all_funcs.extend(t.get("functionDeclarations", []))
+            if not all_funcs:
+                return "mock_tool", {}
+            func = random.choice(all_funcs)
+            name = func.get("name", "mock_tool")
+            params = func.get("parameters", {})
+        else:
+            return "mock_tool", {}
+
+        return name, self._generate_mock_args(params)
+
+    def _generate_mock_args(self, params_schema: dict) -> dict:
+        """根据参数 schema 生成 mock 参数值"""
+        properties = params_schema.get("properties", {})
+        required = params_schema.get("required", list(properties.keys()))
+
+        args = {}
+        for name in required:
+            prop = properties.get(name, {})
+            prop_type = prop.get("type", "string")
+            if prop_type == "string":
+                enum = prop.get("enum")
+                args[name] = random.choice(enum) if enum else f"mock_{name}"
+            elif prop_type == "integer":
+                args[name] = 42
+            elif prop_type == "number":
+                args[name] = 3.14
+            elif prop_type == "boolean":
+                args[name] = True
+            elif prop_type == "array":
+                args[name] = []
+            elif prop_type == "object":
+                args[name] = {}
+            else:
+                args[name] = f"mock_{name}"
+        return args
+
     # ── OpenAI 格式 ──
 
     async def _stream_response(
@@ -344,6 +426,93 @@ class MockLLMServer:
         yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
+    async def _stream_openai_tool_call(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        tool_call_id: str,
+        model: str,
+        prompt_tokens: int,
+        request_id: str,
+    ):
+        """生成 OpenAI 格式的流式 tool_call 响应"""
+        token_interval = 1.0 / self.config.token_rate if self.config.token_rate > 0 else 0
+        last_time = time.perf_counter()
+        args_str = json.dumps(tool_args, ensure_ascii=False)
+        completion_tokens = 1
+
+        # 第一个 chunk：tool call 开始（含 name）
+        first_chunk = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": tool_call_id,
+                                "type": "function",
+                                "function": {"name": tool_name, "arguments": ""},
+                            }
+                        ],
+                    },
+                    "logprobs": None,
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield f"data: {json.dumps(first_chunk, ensure_ascii=False)}\n\n"
+
+        # 流式发送 arguments（分 ~5 段）
+        chunk_size = max(1, len(args_str) // 5)
+        for i in range(0, len(args_str), chunk_size):
+            last_time = await self._wait_token_interval(token_interval, last_time)
+            completion_tokens += 1
+            chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "tool_calls": [
+                                {
+                                    "index": 0,
+                                    "function": {"arguments": args_str[i : i + chunk_size]},
+                                }
+                            ]
+                        },
+                        "logprobs": None,
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+        # 结束标记
+        final_chunk = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "logprobs": None, "finish_reason": "tool_calls"}],
+            "usage": {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens,
+            },
+        }
+        yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+        yield "data: [DONE]\n\n"
+
     async def _handle_chat_completions(self, request: web.Request) -> web.Response:
         """处理 /v1/chat/completions 请求（OpenAI 格式）"""
         await self._rps_limiter.acquire()
@@ -374,9 +543,71 @@ class MockLLMServer:
                 status=500,
             )
 
+        prompt_tokens = self._count_prompt_tokens(messages)
+
+        # Tool call 检测：有 tools 且最后消息非 tool result → 返回 tool_call
+        tools = data.get("tools")
+        if tools and self._should_respond_with_tool_call(tools, messages, "openai"):
+            tool_name, tool_args = self._pick_tool(tools, "openai")
+            tool_call_id = f"call_{uuid.uuid4().hex[:24]}"
+            args_str = json.dumps(tool_args, ensure_ascii=False)
+            completion_tokens = self._estimate_tokens(args_str)
+
+            if stream:
+                response = web.StreamResponse(
+                    status=200,
+                    headers={
+                        "Content-Type": "text/event-stream",
+                        "Cache-Control": "no-cache",
+                        "Connection": "keep-alive",
+                    },
+                )
+                await response.prepare(request)
+                async for chunk in self._stream_openai_tool_call(
+                    tool_name, tool_args, tool_call_id, model, prompt_tokens, request_id
+                ):
+                    await response.write(chunk.encode("utf-8"))
+                await response.write_eof()
+                return response
+
+            return web.json_response(
+                {
+                    "id": request_id,
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": model,
+                    "choices": [
+                        {
+                            "index": 0,
+                            "message": {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": tool_call_id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": tool_name,
+                                            "arguments": args_str,
+                                        },
+                                    }
+                                ],
+                            },
+                            "logprobs": None,
+                            "finish_reason": "tool_calls",
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
+                    "system_fingerprint": "mock-fp-001",
+                }
+            )
+
         response_text = self._generate_response_text()
         thinking_text = self._generate_thinking_text() if include_thinking else None
-        prompt_tokens = self._count_prompt_tokens(messages)
 
         if stream:
             response = web.StreamResponse(
@@ -538,6 +769,102 @@ class MockLLMServer:
         await resp.write_eof()
         return resp
 
+    async def _claude_stream_tool_use_response(
+        self,
+        request: web.Request,
+        tool_name: str,
+        tool_args: dict,
+        tool_use_id: str,
+        model: str,
+        prompt_tokens: int,
+        request_id: str,
+    ) -> web.StreamResponse:
+        """生成 Claude 格式的流式 tool_use 响应"""
+        resp = web.StreamResponse(
+            status=200,
+            headers={
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+            },
+        )
+        await resp.prepare(request)
+
+        token_interval = 1.0 / self.config.token_rate if self.config.token_rate > 0 else 0
+        last_time = time.perf_counter()
+
+        async def send_event(event_type: str, data: dict):
+            line = f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+            await resp.write(line.encode("utf-8"))
+
+        args_str = json.dumps(tool_args, ensure_ascii=False)
+        output_tokens = self._estimate_tokens(args_str)
+
+        # message_start
+        await send_event(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": request_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [],
+                    "model": model,
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": prompt_tokens, "output_tokens": 0},
+                },
+            },
+        )
+
+        # tool_use content block
+        await send_event(
+            "content_block_start",
+            {
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": {
+                    "type": "tool_use",
+                    "id": tool_use_id,
+                    "name": tool_name,
+                    "input": {},
+                },
+            },
+        )
+
+        # 流式发送 input JSON（分 ~5 段）
+        chunk_size = max(1, len(args_str) // 5)
+        for i in range(0, len(args_str), chunk_size):
+            last_time = await self._wait_token_interval(token_interval, last_time)
+            await send_event(
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {
+                        "type": "input_json_delta",
+                        "partial_json": args_str[i : i + chunk_size],
+                    },
+                },
+            )
+
+        await send_event("content_block_stop", {"type": "content_block_stop", "index": 0})
+
+        # message_delta + message_stop
+        await send_event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                "usage": {"output_tokens": output_tokens},
+            },
+        )
+        await send_event("message_stop", {"type": "message_stop"})
+
+        await resp.write_eof()
+        return resp
+
     async def _handle_claude_messages(self, request: web.Request) -> web.Response:
         """处理 /v1/messages 请求（Claude 格式）"""
         await self._rps_limiter.acquire()
@@ -562,9 +889,46 @@ class MockLLMServer:
                 status=500,
             )
 
+        prompt_tokens = self._count_prompt_tokens(messages)
+
+        # Tool use 检测
+        tools = data.get("tools")
+        if tools and self._should_respond_with_tool_call(tools, messages, "claude"):
+            tool_name, tool_args = self._pick_tool(tools, "claude")
+            tool_use_id = f"toolu_{uuid.uuid4().hex[:24]}"
+            args_str = json.dumps(tool_args, ensure_ascii=False)
+            completion_tokens = self._estimate_tokens(args_str)
+
+            if stream:
+                return await self._claude_stream_tool_use_response(
+                    request, tool_name, tool_args, tool_use_id, model, prompt_tokens, request_id
+                )
+
+            return web.json_response(
+                {
+                    "id": request_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": tool_use_id,
+                            "name": tool_name,
+                            "input": tool_args,
+                        }
+                    ],
+                    "model": model,
+                    "stop_reason": "tool_use",
+                    "stop_sequence": None,
+                    "usage": {
+                        "input_tokens": prompt_tokens,
+                        "output_tokens": completion_tokens,
+                    },
+                }
+            )
+
         response_text = self._generate_response_text()
         thinking_text = self._generate_thinking_text() if include_thinking else None
-        prompt_tokens = self._count_prompt_tokens(messages)
         completion_tokens = self._estimate_tokens(response_text)
         if thinking_text:
             completion_tokens += self._estimate_tokens(thinking_text)
@@ -692,9 +1056,60 @@ class MockLLMServer:
                 status=500,
             )
 
+        prompt_tokens = self._count_gemini_prompt_tokens(contents)
+
+        # Function call 检测
+        tools = data.get("tools")
+        if tools and self._should_respond_with_tool_call(tools, contents, "gemini"):
+            tool_name, tool_args = self._pick_tool(tools, "gemini")
+            output_tokens = self._estimate_tokens(json.dumps(tool_args))
+
+            func_call_part = {"functionCall": {"name": tool_name, "args": tool_args}}
+
+            if is_stream:
+                resp = web.StreamResponse(
+                    status=200,
+                    headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+                )
+                await resp.prepare(request)
+                chunk = {
+                    "candidates": [
+                        {
+                            "content": {"parts": [func_call_part], "role": "model"},
+                            "finishReason": "STOP",
+                        }
+                    ],
+                    "usageMetadata": {
+                        "promptTokenCount": prompt_tokens,
+                        "candidatesTokenCount": output_tokens,
+                        "totalTokenCount": prompt_tokens + output_tokens,
+                    },
+                }
+                await resp.write(
+                    f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                )
+                await resp.write_eof()
+                return resp
+
+            return web.json_response(
+                {
+                    "candidates": [
+                        {
+                            "content": {"parts": [func_call_part], "role": "model"},
+                            "finishReason": "STOP",
+                            "index": 0,
+                        }
+                    ],
+                    "usageMetadata": {
+                        "promptTokenCount": prompt_tokens,
+                        "candidatesTokenCount": output_tokens,
+                        "totalTokenCount": prompt_tokens + output_tokens,
+                    },
+                }
+            )
+
         response_text = self._generate_response_text()
         thinking_text = self._generate_thinking_text() if include_thinking else None
-        prompt_tokens = self._count_gemini_prompt_tokens(contents)
         completion_tokens = self._estimate_tokens(response_text)
         if thinking_text:
             completion_tokens += self._estimate_tokens(thinking_text)

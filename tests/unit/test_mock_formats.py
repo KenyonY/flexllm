@@ -406,3 +406,448 @@ class TestShouldIncludeThinking:
             )
             is False
         )
+
+
+# ── Tool Call 支持 ──
+
+SAMPLE_TOOLS_OPENAI = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "location": {"type": "string"},
+                    "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                },
+                "required": ["location"],
+            },
+        },
+    }
+]
+
+SAMPLE_TOOLS_CLAUDE = [
+    {
+        "name": "get_weather",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "location": {"type": "string"},
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+            },
+            "required": ["location"],
+        },
+    }
+]
+
+SAMPLE_TOOLS_GEMINI = [
+    {
+        "functionDeclarations": [
+            {
+                "name": "get_weather",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"},
+                    },
+                    "required": ["location"],
+                },
+            }
+        ]
+    }
+]
+
+
+class TestOpenAIToolCall:
+    @pytest.mark.asyncio
+    async def test_non_stream_tool_call(self):
+        """OpenAI 非流式：有 tools 时返回 tool_calls"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/chat/completions",
+                    json={
+                        "model": "mock",
+                        "messages": [{"role": "user", "content": "天气如何"}],
+                        "tools": SAMPLE_TOOLS_OPENAI,
+                    },
+                ) as resp:
+                    assert resp.status == 200
+                    data = await resp.json()
+                    choice = data["choices"][0]
+                    assert choice["finish_reason"] == "tool_calls"
+                    tool_calls = choice["message"]["tool_calls"]
+                    assert len(tool_calls) == 1
+                    tc = tool_calls[0]
+                    assert tc["type"] == "function"
+                    assert tc["function"]["name"] == "get_weather"
+                    args = json.loads(tc["function"]["arguments"])
+                    assert "location" in args
+
+    @pytest.mark.asyncio
+    async def test_non_stream_text_after_tool_result(self):
+        """OpenAI 非流式：tool result 后返回普通文本"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/chat/completions",
+                    json={
+                        "model": "mock",
+                        "messages": [
+                            {"role": "user", "content": "天气如何"},
+                            {
+                                "role": "assistant",
+                                "content": None,
+                                "tool_calls": [
+                                    {
+                                        "id": "call_123",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "get_weather",
+                                            "arguments": '{"location":"北京"}',
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "tool",
+                                "tool_call_id": "call_123",
+                                "content": "晴天，25度",
+                            },
+                        ],
+                        "tools": SAMPLE_TOOLS_OPENAI,
+                    },
+                ) as resp:
+                    data = await resp.json()
+                    choice = data["choices"][0]
+                    assert choice["finish_reason"] == "stop"
+                    assert choice["message"]["content"] is not None
+                    assert len(choice["message"]["content"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_call(self):
+        """OpenAI 流式：tool_call 流式返回"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/chat/completions",
+                    json={
+                        "model": "mock",
+                        "messages": [{"role": "user", "content": "天气如何"}],
+                        "tools": SAMPLE_TOOLS_OPENAI,
+                        "stream": True,
+                    },
+                ) as resp:
+                    assert resp.status == 200
+                    tool_name = None
+                    args_parts = []
+                    finish_reason = None
+                    async for line in resp.content:
+                        text = line.decode("utf-8").strip()
+                        if text.startswith("data: ") and text != "data: [DONE]":
+                            chunk = json.loads(text[6:])
+                            delta = chunk["choices"][0]["delta"]
+                            fr = chunk["choices"][0].get("finish_reason")
+                            if fr:
+                                finish_reason = fr
+                            if "tool_calls" in delta:
+                                tc = delta["tool_calls"][0]
+                                if "id" in tc:
+                                    tool_name = tc["function"]["name"]
+                                if "function" in tc and tc["function"].get("arguments"):
+                                    args_parts.append(tc["function"]["arguments"])
+                    assert tool_name == "get_weather"
+                    assert finish_reason == "tool_calls"
+                    full_args = json.loads("".join(args_parts))
+                    assert "location" in full_args
+
+
+class TestClaudeToolUse:
+    @pytest.mark.asyncio
+    async def test_non_stream_tool_use(self):
+        """Claude 非流式：有 tools 时返回 tool_use"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/messages",
+                    json={
+                        "model": "mock",
+                        "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": "天气如何"}],
+                        "tools": SAMPLE_TOOLS_CLAUDE,
+                    },
+                    headers={"x-api-key": "test", "anthropic-version": "2023-06-01"},
+                ) as resp:
+                    assert resp.status == 200
+                    data = await resp.json()
+                    assert data["stop_reason"] == "tool_use"
+                    tool_use = data["content"][0]
+                    assert tool_use["type"] == "tool_use"
+                    assert tool_use["name"] == "get_weather"
+                    assert "location" in tool_use["input"]
+
+    @pytest.mark.asyncio
+    async def test_non_stream_text_after_tool_result(self):
+        """Claude 非流式：tool_result 后返回普通文本"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/messages",
+                    json={
+                        "model": "mock",
+                        "max_tokens": 1024,
+                        "messages": [
+                            {"role": "user", "content": "天气如何"},
+                            {
+                                "role": "assistant",
+                                "content": [
+                                    {
+                                        "type": "tool_use",
+                                        "id": "toolu_123",
+                                        "name": "get_weather",
+                                        "input": {"location": "北京"},
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": "toolu_123",
+                                        "content": "晴天，25度",
+                                    }
+                                ],
+                            },
+                        ],
+                        "tools": SAMPLE_TOOLS_CLAUDE,
+                    },
+                    headers={"x-api-key": "test", "anthropic-version": "2023-06-01"},
+                ) as resp:
+                    data = await resp.json()
+                    assert data["stop_reason"] == "end_turn"
+                    assert data["content"][0]["type"] == "text"
+
+    @pytest.mark.asyncio
+    async def test_stream_tool_use(self):
+        """Claude 流式：tool_use 流式返回"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/messages",
+                    json={
+                        "model": "mock",
+                        "max_tokens": 1024,
+                        "messages": [{"role": "user", "content": "天气如何"}],
+                        "tools": SAMPLE_TOOLS_CLAUDE,
+                        "stream": True,
+                    },
+                    headers={"x-api-key": "test", "anthropic-version": "2023-06-01"},
+                ) as resp:
+                    assert resp.status == 200
+                    tool_name = None
+                    json_parts = []
+                    stop_reason = None
+                    async for line in resp.content:
+                        text = line.decode("utf-8").strip()
+                        if text.startswith("data: "):
+                            data = json.loads(text[6:])
+                            if data.get("type") == "content_block_start":
+                                block = data.get("content_block", {})
+                                if block.get("type") == "tool_use":
+                                    tool_name = block["name"]
+                            elif data.get("type") == "content_block_delta":
+                                delta = data.get("delta", {})
+                                if delta.get("type") == "input_json_delta":
+                                    json_parts.append(delta["partial_json"])
+                            elif data.get("type") == "message_delta":
+                                stop_reason = data["delta"].get("stop_reason")
+                    assert tool_name == "get_weather"
+                    assert stop_reason == "tool_use"
+                    full_input = json.loads("".join(json_parts))
+                    assert "location" in full_input
+
+
+class TestGeminiFunctionCall:
+    @pytest.mark.asyncio
+    async def test_non_stream_function_call(self):
+        """Gemini 非流式：有 tools 时返回 functionCall"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.gemini_url}/models/mock-model:generateContent?key=test",
+                    json={
+                        "contents": [{"role": "user", "parts": [{"text": "天气如何"}]}],
+                        "tools": SAMPLE_TOOLS_GEMINI,
+                    },
+                ) as resp:
+                    assert resp.status == 200
+                    data = await resp.json()
+                    parts = data["candidates"][0]["content"]["parts"]
+                    assert len(parts) == 1
+                    fc = parts[0]["functionCall"]
+                    assert fc["name"] == "get_weather"
+                    assert "location" in fc["args"]
+
+    @pytest.mark.asyncio
+    async def test_non_stream_text_after_function_response(self):
+        """Gemini 非流式：functionResponse 后返回普通文本"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.gemini_url}/models/mock-model:generateContent?key=test",
+                    json={
+                        "contents": [
+                            {"role": "user", "parts": [{"text": "天气如何"}]},
+                            {
+                                "role": "model",
+                                "parts": [
+                                    {
+                                        "functionCall": {
+                                            "name": "get_weather",
+                                            "args": {"location": "北京"},
+                                        }
+                                    }
+                                ],
+                            },
+                            {
+                                "role": "function",
+                                "parts": [
+                                    {
+                                        "functionResponse": {
+                                            "name": "get_weather",
+                                            "response": {"result": "晴天，25度"},
+                                        }
+                                    }
+                                ],
+                            },
+                        ],
+                        "tools": SAMPLE_TOOLS_GEMINI,
+                    },
+                ) as resp:
+                    data = await resp.json()
+                    parts = data["candidates"][0]["content"]["parts"]
+                    assert "text" in parts[0]
+                    assert "functionCall" not in parts[0]
+
+    @pytest.mark.asyncio
+    async def test_stream_function_call(self):
+        """Gemini 流式：functionCall 流式返回"""
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.gemini_url}/models/mock-model:streamGenerateContent?key=test&alt=sse",
+                    json={
+                        "contents": [{"role": "user", "parts": [{"text": "天气如何"}]}],
+                        "tools": SAMPLE_TOOLS_GEMINI,
+                    },
+                ) as resp:
+                    assert resp.status == 200
+                    func_call = None
+                    async for line in resp.content:
+                        text = line.decode("utf-8").strip()
+                        if text.startswith("data: "):
+                            chunk = json.loads(text[6:])
+                            parts = (
+                                chunk.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+                            )
+                            for p in parts:
+                                if "functionCall" in p:
+                                    func_call = p["functionCall"]
+                    assert func_call is not None
+                    assert func_call["name"] == "get_weather"
+                    assert "location" in func_call["args"]
+
+
+class TestToolCallHelpers:
+    """测试 tool call 辅助方法的逻辑"""
+
+    def _make_server(self):
+        server = MockLLMServer.__new__(MockLLMServer)
+        server.config = MockServerConfig()
+        return server
+
+    def test_should_respond_with_tool_call_no_tools(self):
+        server = self._make_server()
+        assert server._should_respond_with_tool_call(None, [], "openai") is False
+        assert server._should_respond_with_tool_call([], [], "openai") is False
+
+    def test_should_respond_openai_user_message(self):
+        server = self._make_server()
+        messages = [{"role": "user", "content": "hi"}]
+        assert server._should_respond_with_tool_call(SAMPLE_TOOLS_OPENAI, messages, "openai")
+
+    def test_should_not_respond_openai_tool_result(self):
+        server = self._make_server()
+        messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "tool", "tool_call_id": "call_123", "content": "result"},
+        ]
+        assert not server._should_respond_with_tool_call(SAMPLE_TOOLS_OPENAI, messages, "openai")
+
+    def test_should_respond_claude_user_message(self):
+        server = self._make_server()
+        messages = [{"role": "user", "content": "hi"}]
+        assert server._should_respond_with_tool_call(SAMPLE_TOOLS_CLAUDE, messages, "claude")
+
+    def test_should_not_respond_claude_tool_result(self):
+        server = self._make_server()
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_123", "content": "result"}
+                ],
+            }
+        ]
+        assert not server._should_respond_with_tool_call(SAMPLE_TOOLS_CLAUDE, messages, "claude")
+
+    def test_should_respond_gemini_user_message(self):
+        server = self._make_server()
+        contents = [{"role": "user", "parts": [{"text": "hi"}]}]
+        assert server._should_respond_with_tool_call(SAMPLE_TOOLS_GEMINI, contents, "gemini")
+
+    def test_should_not_respond_gemini_function_response(self):
+        server = self._make_server()
+        contents = [
+            {
+                "role": "function",
+                "parts": [
+                    {
+                        "functionResponse": {
+                            "name": "get_weather",
+                            "response": {"result": "ok"},
+                        }
+                    }
+                ],
+            }
+        ]
+        assert not server._should_respond_with_tool_call(SAMPLE_TOOLS_GEMINI, contents, "gemini")
+
+    def test_generate_mock_args(self):
+        server = self._make_server()
+        schema = {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "count": {"type": "integer"},
+                "rate": {"type": "number"},
+                "active": {"type": "boolean"},
+            },
+            "required": ["name", "count", "rate", "active"],
+        }
+        args = server._generate_mock_args(schema)
+        assert isinstance(args["name"], str)
+        assert isinstance(args["count"], int)
+        assert isinstance(args["rate"], float)
+        assert isinstance(args["active"], bool)

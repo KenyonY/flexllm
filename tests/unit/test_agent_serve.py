@@ -19,8 +19,7 @@ class TestAgentSessionManager:
             session_id="s1",
             client=MagicMock(),
             system="test",
-            tool_defs=[],
-            tool_executor=lambda n, a: "",
+            tool_registry=None,
             max_rounds=5,
         )
         assert agent is not None
@@ -29,13 +28,13 @@ class TestAgentSessionManager:
     def test_get_or_create_existing(self):
         mgr = AgentSessionManager(ttl=60)
         client = MagicMock()
-        agent1 = mgr.get_or_create("s1", client, "test", [], None, 5)
-        agent2 = mgr.get_or_create("s1", client, "test", [], None, 5)
+        agent1 = mgr.get_or_create("s1", client, "test", None, 5)
+        agent2 = mgr.get_or_create("s1", client, "test", None, 5)
         assert agent1 is agent2
 
     def test_cleanup_expired(self):
         mgr = AgentSessionManager(ttl=0)  # TTL=0，立即过期
-        mgr.get_or_create("s1", MagicMock(), "test", [], None, 5)
+        mgr.get_or_create("s1", MagicMock(), "test", None, 5)
         # 让 timestamp 过期
         mgr._timestamps["s1"] = time.time() - 1
         mgr.cleanup_expired()
@@ -43,7 +42,7 @@ class TestAgentSessionManager:
 
     def test_cleanup_not_expired(self):
         mgr = AgentSessionManager(ttl=3600)
-        mgr.get_or_create("s1", MagicMock(), "test", [], None, 5)
+        mgr.get_or_create("s1", MagicMock(), "test", None, 5)
         mgr.cleanup_expired()
         assert "s1" in mgr._sessions
 
@@ -86,8 +85,7 @@ def serve_server(serve_config):
     server = ServeServer(serve_config)
     # Mock internal state
     server._client = MagicMock()
-    server._tool_defs = [{"type": "function", "function": {"name": "bash", "parameters": {}}}]
-    server._tool_executor = lambda n, a: "ok"
+    server._tool_registry = None
     server._session_mgr = AgentSessionManager()
     return server
 

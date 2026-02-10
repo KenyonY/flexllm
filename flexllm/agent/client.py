@@ -95,6 +95,7 @@ class AgentClient:
         trace_exporter: "TraceExporter | None" = None,
         memory: "MemoryStore | None" = None,
         session_id: str | None = None,
+        enable_subagent: bool = False,
     ):
         self.client = client
         self.system = system
@@ -119,6 +120,10 @@ class AgentClient:
             self._history: list[dict] = memory.load(session_id)
         else:
             self._history: list[dict] = []
+
+        # Subagent 支持
+        if enable_subagent and self._tool_registry is not None:
+            self._inject_task_tool()
 
         # 事件回调（可选）
         self.on_tool_call: Callable[[str, str], Any] | None = None
@@ -452,6 +457,80 @@ class AgentClient:
                 asyncio.ensure_future(result)
         except Exception as e:
             logger.warning(f"Callback 执行失败: {e}")
+
+    # ========== Subagent 支持 ==========
+
+    def _inject_task_tool(self):
+        """将 task 工具注入到 ToolRegistry（闭包绑定当前实例）"""
+        from .agent_types import get_agent_type
+        from .tools.base import ToolDef
+        from .tools.task_tool import TASK_TOOL_SCHEMA
+
+        parent_self = self  # 闭包捕获
+
+        async def task_executor(description: str, prompt: str, agent_type: str = "explore") -> str:
+            config = get_agent_type(agent_type)
+
+            # 构建子代理 ToolRegistry
+            sub_registry = parent_self._build_subagent_registry(config)
+
+            # 构建子代理 system prompt
+            sub_system = config["prompt"]
+            if parent_self.system:
+                sub_system = f"{config['prompt']}\n\n工作目录上下文：\n{parent_self.system[:500]}"
+
+            # 创建子 AgentClient（不启用 subagent — 防止递归）
+            sub_agent = AgentClient(
+                client=parent_self.client,
+                system=sub_system,
+                tool_registry=sub_registry,
+                max_rounds=parent_self.max_rounds,
+                approval_handler=parent_self.approval_handler,
+            )
+
+            # 继承父 agent 的回调
+            sub_agent.on_tool_call = parent_self.on_tool_call
+            sub_agent.on_tool_result = parent_self.on_tool_result
+            sub_agent.on_llm_response = parent_self.on_llm_response
+
+            result = await sub_agent.run(prompt)
+            return result.content or "(subagent 未返回内容)"
+
+        task_def = ToolDef(
+            name=TASK_TOOL_SCHEMA["name"],
+            description=TASK_TOOL_SCHEMA["description"],
+            parameters=TASK_TOOL_SCHEMA["parameters"],
+            executor=task_executor,
+            readonly=True,
+        )
+        self._tool_registry.register(task_def)
+        self.tools = self._tool_registry.get_tool_defs()
+
+    def _build_subagent_registry(self, agent_type_config: dict) -> "Any":
+        """为子代理构建 ToolRegistry（内置工具过滤 + MCP 工具继承）"""
+        from .tools.base import TOOL_REGISTRY, ToolRegistry
+
+        registry = ToolRegistry()
+
+        # 内置工具：按 agent_type 的 tools 列表过滤
+        allowed_tools = agent_type_config["tools"]
+        if allowed_tools == "*":
+            builtin_names = list(TOOL_REGISTRY.keys())
+        else:
+            builtin_names = [n for n in allowed_tools if n in TOOL_REGISTRY]
+
+        for name in builtin_names:
+            registry.register(TOOL_REGISTRY[name])
+
+        # MCP 工具继承：父 registry 中不在全局 TOOL_REGISTRY 且非 task 的工具
+        if self._tool_registry:
+            for name in self._tool_registry.names:
+                if name not in TOOL_REGISTRY and name != "task":
+                    tool_def = self._tool_registry._tools.get(name)
+                    if tool_def:
+                        registry.register(tool_def)
+
+        return registry
 
     # ========== 验证闭环 ==========
 

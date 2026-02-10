@@ -76,8 +76,7 @@ class AgentSessionManager:
         session_id: str,
         client,
         system: str | None,
-        tool_defs: list[dict],
-        tool_executor,
+        tool_registry,
         max_rounds: int,
     ) -> "AgentClient":
         from .agent.client import AgentClient
@@ -87,8 +86,7 @@ class AgentSessionManager:
             self._sessions[session_id] = AgentClient(
                 client=client,
                 system=system,
-                tools=tool_defs,
-                tool_executor=tool_executor,
+                tool_registry=tool_registry,
                 max_rounds=max_rounds,
             )
         self._timestamps[session_id] = time.time()
@@ -108,8 +106,7 @@ class ServeServer:
     def __init__(self, config: ServeConfig):
         self.config = config
         self._client = None
-        self._tool_defs: list[dict] | None = None
-        self._tool_executor = None
+        self._tool_registry = None
         self._session_mgr: AgentSessionManager | None = None
 
     def _build_messages(self, content: str) -> list[dict]:
@@ -189,9 +186,9 @@ class ServeServer:
 
         # 初始化 Agent 工具
         if self.config.tools:
-            from .cli.chat_helpers import get_builtin_tools
+            from .cli.chat_helpers import _build_registry
 
-            self._tool_defs, self._tool_executor = get_builtin_tools(self.config.tools)
+            self._tool_registry = _build_registry(self.config.tools)
             self._session_mgr = AgentSessionManager()
 
     async def _on_cleanup(self, app: web.Application):
@@ -390,8 +387,7 @@ class ServeServer:
         return AgentClient(
             client=self._client,
             system=system or self.config.system_prompt,
-            tools=self._tool_defs,
-            tool_executor=self._tool_executor,
+            tool_registry=self._tool_registry,
             max_rounds=max_rounds or self.config.max_rounds,
         )
 
@@ -519,8 +515,7 @@ class ServeServer:
             session_id=session_id,
             client=self._client,
             system=data.get("system") or self.config.system_prompt,
-            tool_defs=self._tool_defs,
-            tool_executor=self._tool_executor,
+            tool_registry=self._tool_registry,
             max_rounds=self.config.max_rounds,
         )
 

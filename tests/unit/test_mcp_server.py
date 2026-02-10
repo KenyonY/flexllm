@@ -77,8 +77,7 @@ class TestAgentSessionManager:
             session_id="s1",
             client=mock_client,
             system="test",
-            tool_defs=[],
-            tool_executor=None,
+            tool_registry=None,
             max_rounds=10,
         )
         assert agent is not None
@@ -93,16 +92,14 @@ class TestAgentSessionManager:
             session_id="s1",
             client=mock_client,
             system="test",
-            tool_defs=[],
-            tool_executor=None,
+            tool_registry=None,
             max_rounds=10,
         )
         agent2 = mgr.get_or_create(
             session_id="s1",
             client=mock_client,
             system="test",
-            tool_defs=[],
-            tool_executor=None,
+            tool_registry=None,
             max_rounds=10,
         )
         assert agent1 is agent2
@@ -117,16 +114,14 @@ class TestAgentSessionManager:
             session_id="s1",
             client=mock_client,
             system="test",
-            tool_defs=[],
-            tool_executor=None,
+            tool_registry=None,
             max_rounds=10,
         )
         agent2 = mgr.get_or_create(
             session_id="s2",
             client=mock_client,
             system="test",
-            tool_defs=[],
-            tool_executor=None,
+            tool_registry=None,
             max_rounds=10,
         )
         assert agent1 is not agent2
@@ -143,8 +138,7 @@ class TestAgentSessionManager:
             session_id="s1",
             client=mock_client,
             system="test",
-            tool_defs=[],
-            tool_executor=None,
+            tool_registry=None,
             max_rounds=10,
         )
         time.sleep(0.1)
