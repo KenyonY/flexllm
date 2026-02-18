@@ -5,20 +5,20 @@ v0.6.0 新增。将 flexllm 从 LLM 客户端工具升级为 Agent 基础设施�
 ## 架构总览
 
 ```
-外部 MCP Server          其他 Agent / 前端系统           MCP Client (Claude Desktop, Cursor...)
-  (GitHub, DB,             (通过 HTTP API 调用)             (通过 MCP 协议发现和调用)
-   Browser...)                     |                                  |
-       |                           |                                  |
-       v                           v                                  v
+外部 MCP Server          其他 Agent / 前端系统
+  (GitHub, DB,             (通过 HTTP API 调用)
+   Browser...)                     |
+       |                           |
+       v                           v
 +-----------------------------------------------------------------------------+
 |                           flexllm Agent 层                                   |
 |                                                                              |
-|  +----------+  +-----------+  +-----------+                                  |
-|  | MCP Client|  | Agent HTTP|  | MCP Server|                                 |
-|  | (消费工具) |  | Serve     |  | (暴露能力) |                                |
-|  +-----+----+  +-----+-----+  +-----+-----+                                 |
-|        |              |              |                                        |
-|        v              v              v                                        |
+|  +----------+  +-----------+                                                 |
+|  | MCP Client|  | Agent HTTP|                                                |
+|  | (消费工具) |  | Serve     |                                               |
+|  +-----+----+  +-----+-----+                                                |
+|        |              |                                                      |
+|        v              v                                                      |
 |  +----------------------------------------------------------------+          |
 |  |                    AgentClient (核心)                            |          |
 |  |  tool-use 循环 | ToolRegistry | 审批机制 | Structured Output    |          |
@@ -228,44 +228,7 @@ curl -X POST http://localhost:8000/api/agent/chat \
 
 ---
 
-## 4. MCP Server — 被 Claude Desktop/Cursor 调用
-
-将 flexllm 暴露为 MCP server，让 MCP client（Claude Desktop、Cursor 等）直接发现和调用。
-
-### 启动
-
-```bash
-flexllm mcp-server                     # 基础 LLM 调用
-flexllm mcp-server --tools code        # 包含 Agent 工具
-flexllm mcp-server -s "你是代码助手"   # 自定义系统提示词
-```
-
-### 配置 Claude Desktop
-
-在 `claude_desktop_config.json` 中添加：
-
-```json
-{
-  "mcpServers": {
-    "flexllm": {
-      "command": "flexllm",
-      "args": ["mcp-server", "--tools", "code", "-m", "gpt-4"]
-    }
-  }
-}
-```
-
-### 暴露的工具
-
-| 工具 | 说明 |
-|------|------|
-| `llm_chat` | 调用 LLM 生成回复（支持多轮消息） |
-| `llm_ask` | 快速向 LLM 提问 |
-| `agent_run` | 执行 agent 任务（需 `--tools`） |
-
----
-
-## 5. 持久化记忆
+## 4. 持久化记忆
 
 Agent 跨 session 保留对话历史和知识事实。基于 flaxkv2 存储。
 
@@ -306,7 +269,7 @@ value = store.get_fact("user_preference")
 
 ---
 
-## 6. 结构化可观测性 (Tracing)
+## 5. 结构化可观测性 (Tracing)
 
 追踪 agent 执行过程中每一步的耗时和 token 消耗。
 
@@ -349,7 +312,7 @@ Total: 2 rounds, 1650 tokens
 
 ---
 
-## 7. Human-in-the-loop — 操作审批
+## 6. Human-in-the-loop — 操作审批
 
 危险操作（写文件、执行命令）前要求确认。
 

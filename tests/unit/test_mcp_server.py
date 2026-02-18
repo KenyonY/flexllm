@@ -1,51 +1,9 @@
-"""MCP Server 单元测试"""
+"""Serve 模块单元测试"""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+import time
+from unittest.mock import MagicMock
 
-import pytest
-
-try:
-    import mcp  # noqa: F401
-
-    _has_mcp = True
-except ImportError:
-    _has_mcp = False
-
-
-class TestCreateMCPServer:
-    def test_requires_mcp_sdk(self):
-        """没有 mcp SDK 时应该报错"""
-        with patch.dict("sys.modules", {"mcp": None, "mcp.server": None}):
-            # 由于已经导入过 mcp，只能测试函数签名
-            from flexllm.mcp_server import create_mcp_server
-
-            assert callable(create_mcp_server)
-
-    @pytest.mark.skipif(not _has_mcp, reason="mcp SDK not installed")
-    def test_create_server_returns_server(self):
-        """创建 server 并返回 Server 实例"""
-        from flexllm.mcp_server import create_mcp_server
-
-        server = create_mcp_server(
-            model="test-model",
-            base_url="http://localhost:8000/v1",
-            api_key="test-key",
-        )
-        assert server is not None
-
-    @pytest.mark.skipif(not _has_mcp, reason="mcp SDK not installed")
-    def test_create_server_with_tools(self):
-        """创建带 tools 的 server"""
-        from flexllm.mcp_server import create_mcp_server
-
-        server = create_mcp_server(
-            model="test-model",
-            base_url="http://localhost:8000/v1",
-            api_key="test-key",
-            tools="code",
-            max_rounds=5,
-        )
-        assert server is not None
+from flexllm.agent.types import AgentResult, ToolCallRecord
 
 
 class TestServeConfig:
@@ -127,8 +85,6 @@ class TestAgentSessionManager:
         assert agent1 is not agent2
 
     def test_cleanup_expired(self):
-        import time
-
         from flexllm.serve import AgentSessionManager
 
         mgr = AgentSessionManager(ttl=0)  # TTL=0 表示立即过期
@@ -150,7 +106,6 @@ class TestAgentSessionManager:
 
 class TestServeServerAgent:
     def test_agent_result_to_dict(self):
-        from flexllm.agent.types import AgentResult, ToolCallRecord
         from flexllm.serve import ServeServer
 
         result = AgentResult(
