@@ -276,6 +276,46 @@ class ClaudeClient(LLMClientBase):
                                     },
                                 }
                             )
+                    elif item_type in ("video_url", "audio_url"):
+                        # 转换视频/音频到 Claude document 格式
+                        media_key = item_type  # "video_url" 或 "audio_url"
+                        url = item.get(media_key, {}).get("url", "")
+                        if url.startswith("data:"):
+                            match = re.match(r"data:([^;]+);base64,(.+)", url)
+                            if match:
+                                claude_content.append(
+                                    {
+                                        "type": "document",
+                                        "source": {
+                                            "type": "base64",
+                                            "media_type": match.group(1),
+                                            "data": match.group(2),
+                                        },
+                                    }
+                                )
+                        else:
+                            claude_content.append(
+                                {
+                                    "type": "document",
+                                    "source": {"type": "url", "url": url},
+                                }
+                            )
+                    elif item_type == "input_audio":
+                        # 转换 OpenAI input_audio 到 Claude document 格式
+                        audio_data = item.get("input_audio", {})
+                        data = audio_data.get("data", "")
+                        fmt = audio_data.get("format", "wav")
+                        if data:
+                            claude_content.append(
+                                {
+                                    "type": "document",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": f"audio/{fmt}",
+                                        "data": data,
+                                    },
+                                }
+                            )
             return {"role": claude_role, "content": claude_content}
 
         return {"role": claude_role, "content": content}

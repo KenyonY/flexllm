@@ -112,6 +112,47 @@ async def encode_base64_from_url(url, session: aiohttp.ClientSession, return_wit
         return base64_data
 
 
+async def encode_media_to_base64(source, session=None, return_with_mime=True) -> str:
+    """通用媒体文件 base64 编码，直接读取原始字节，不经过 PIL/OpenCV。
+
+    支持视频、音频等非图片文件。对于图片文件同样适用。
+
+    Args:
+        source: 文件来源，可以是本地路径、URL、file:// URI 或 data: URI
+        session: aiohttp.ClientSession，处理 HTTP URL 时使用
+        return_with_mime: 是否返回带 MIME 前缀的 data URI
+
+    Returns:
+        base64 编码字符串（带或不带 data: 前缀）
+    """
+    if isinstance(source, str) and source.startswith("data:"):
+        if return_with_mime:
+            return source
+        # 去掉 data:...;base64, 前缀
+        if ";base64," in source:
+            return source.split(";base64,", 1)[1]
+        return source
+
+    if isinstance(source, str) and source.startswith("file://"):
+        return encode_base64_from_local_path(source[7:], return_with_mime=return_with_mime)
+
+    if isinstance(source, str) and os.path.exists(source):
+        return encode_base64_from_local_path(source, return_with_mime=return_with_mime)
+
+    if isinstance(source, str) and source.startswith("http"):
+        close_session = False
+        if session is None:
+            session = aiohttp.ClientSession()
+            close_session = True
+        try:
+            return await encode_base64_from_url(source, session, return_with_mime=return_with_mime)
+        finally:
+            if close_session:
+                await session.close()
+
+    raise ValueError(f"Unsupported media source: {source}")
+
+
 def encode_base64_from_pil(image: Image.Image, return_with_mime=True):
     """Encode a PIL image object to a Base64 string, with optional MIME type prefix."""
     buffer = BytesIO()

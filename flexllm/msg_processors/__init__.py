@@ -9,6 +9,7 @@ from .image_processor import (
     encode_base64_from_local_path,
     encode_base64_from_pil,
     encode_image_to_base64,
+    encode_media_to_base64,
     encode_to_base64,
     get_pil_image,
     get_pil_image_sync,
@@ -49,6 +50,7 @@ __all__ = [
     "decode_base64_to_bytes",
     "encode_base64_from_local_path",
     "encode_base64_from_pil",
+    "encode_media_to_base64",
     # 基础消息处理
     "process_content_recursive",
     "messages_preprocess",

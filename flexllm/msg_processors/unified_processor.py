@@ -898,30 +898,97 @@ def get_global_unified_processor(
     return _global_unified_processor
 
 
+def _is_source_needs_conversion(value: str) -> bool:
+    """判断一个字符串是否是需要转换为 base64 的文件来源（路径或 URL）"""
+    return (
+        value.startswith("/")
+        or value.startswith("http")
+        or value.startswith("file://")
+        or os.path.exists(value)
+    )
+
+
 async def process_content_recursive(
     content: Any,
     session: aiohttp.ClientSession | None = None,
     processor: UnifiedImageProcessor | None = None,
     **kwargs,
 ):
-    """递归处理内容中的图像URL"""
+    """递归处理内容，根据 type 字段路由不同的媒体处理逻辑。
+
+    支持的 type：
+    - image_url: 通过 UnifiedImageProcessor 处理（支持缩放）
+    - video_url: 原始字节 base64 编码
+    - audio_url: 原始字节 base64 编码
+    - input_audio: OpenAI 格式，data 字段转换为纯 base64（无 data: 前缀）
+    - 其他: 递归处理子节点
+    """
+    from .image_processor import encode_media_to_base64
+
     if processor is None:
         processor = get_global_unified_processor()
 
     if isinstance(content, dict):
-        for key, value in content.items():
-            if key == "url" and isinstance(value, str):
-                # 处理图像URL
+        item_type = content.get("type")
+
+        if item_type == "image_url":
+            url = content.get("image_url", {}).get("url", "")
+            if url and not url.startswith("data:"):
                 try:
-                    base64_data = await processor.process_single_source(value, session, **kwargs)
+                    base64_data = await processor.process_single_source(url, session, **kwargs)
                     if base64_data:
-                        content[key] = base64_data
+                        content["image_url"]["url"] = base64_data
                 except Exception as e:
                     logger.error(
-                        f"处理URL失败 {safe_repr_source(value)}: {safe_repr_error(str(e))}"
+                        f"处理图像URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
                     )
-            else:
+
+        elif item_type == "video_url":
+            url = content.get("video_url", {}).get("url", "")
+            if url and not url.startswith("data:"):
+                try:
+                    base64_data = await encode_media_to_base64(
+                        url, session=session, return_with_mime=True
+                    )
+                    if base64_data:
+                        content["video_url"]["url"] = base64_data
+                except Exception as e:
+                    logger.error(
+                        f"处理视频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
+                    )
+
+        elif item_type == "audio_url":
+            url = content.get("audio_url", {}).get("url", "")
+            if url and not url.startswith("data:"):
+                try:
+                    base64_data = await encode_media_to_base64(
+                        url, session=session, return_with_mime=True
+                    )
+                    if base64_data:
+                        content["audio_url"]["url"] = base64_data
+                except Exception as e:
+                    logger.error(
+                        f"处理音频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
+                    )
+
+        elif item_type == "input_audio":
+            data = content.get("input_audio", {}).get("data", "")
+            if data and isinstance(data, str) and _is_source_needs_conversion(data):
+                try:
+                    base64_data = await encode_media_to_base64(
+                        data, session=session, return_with_mime=False
+                    )
+                    if base64_data:
+                        content["input_audio"]["data"] = base64_data
+                except Exception as e:
+                    logger.error(
+                        f"处理音频数据失败 {safe_repr_source(data)}: {safe_repr_error(str(e))}"
+                    )
+
+        else:
+            for key, value in content.items():
                 await process_content_recursive(value, session, processor, **kwargs)
+
     elif isinstance(content, list):
         for item in content:
             await process_content_recursive(item, session, processor, **kwargs)

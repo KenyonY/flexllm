@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from collections.abc import Callable
 from copy import deepcopy
@@ -24,10 +25,27 @@ except ImportError:
     TQDM_AVAILABLE = False
 
 
+def _is_source_needs_conversion(value: str) -> bool:
+    """判断一个字符串是否是需要转换为 base64 的文件来源（路径或 URL）"""
+    return (
+        value.startswith("/")
+        or value.startswith("http")
+        or value.startswith("file://")
+        or os.path.exists(value)
+    )
+
+
 async def process_content_recursive(
     content, session, cache_config: ImageCacheConfig | None = None, **kwargs
 ):
-    """Recursively process a content dictionary, replacing any URL with its Base64 equivalent.
+    """递归处理内容，根据 type 字段路由不同的媒体处理逻辑。
+
+    支持的 type：
+    - image_url: PIL/OpenCV 管道处理（支持缩放）
+    - video_url: 原始字节 base64 编码
+    - audio_url: 原始字节 base64 编码
+    - input_audio: OpenAI 格式，data 字段转换为纯 base64（无 data: 前缀）
+    - 其他: 递归处理子节点
 
     Args:
         content: Content dictionary to process
@@ -35,13 +53,16 @@ async def process_content_recursive(
         cache_config: Image cache configuration, if None or disabled, no caching will be used
         **kwargs: Additional arguments to pass to image processing functions
     """
-    from .image_processor import encode_image_to_base64
+    from .image_processor import encode_image_to_base64, encode_media_to_base64
 
     if isinstance(content, dict):
-        for key, value in content.items():
-            if key == "url" and isinstance(value, str):  # Detect URL fields
+        item_type = content.get("type")
+
+        if item_type == "image_url":
+            url = content.get("image_url", {}).get("url", "")
+            if url and not url.startswith("data:"):
                 base64_data = await encode_image_to_base64(
-                    value,
+                    url,
                     session,
                     max_width=kwargs.get("max_width"),
                     max_height=kwargs.get("max_height"),
@@ -49,9 +70,39 @@ async def process_content_recursive(
                     cache_config=cache_config,
                 )
                 if base64_data:
-                    content[key] = base64_data
-            else:
+                    content["image_url"]["url"] = base64_data
+
+        elif item_type == "video_url":
+            url = content.get("video_url", {}).get("url", "")
+            if url and not url.startswith("data:"):
+                base64_data = await encode_media_to_base64(
+                    url, session=session, return_with_mime=True
+                )
+                if base64_data:
+                    content["video_url"]["url"] = base64_data
+
+        elif item_type == "audio_url":
+            url = content.get("audio_url", {}).get("url", "")
+            if url and not url.startswith("data:"):
+                base64_data = await encode_media_to_base64(
+                    url, session=session, return_with_mime=True
+                )
+                if base64_data:
+                    content["audio_url"]["url"] = base64_data
+
+        elif item_type == "input_audio":
+            data = content.get("input_audio", {}).get("data", "")
+            if data and isinstance(data, str) and _is_source_needs_conversion(data):
+                base64_data = await encode_media_to_base64(
+                    data, session=session, return_with_mime=False
+                )
+                if base64_data:
+                    content["input_audio"]["data"] = base64_data
+
+        else:
+            for key, value in content.items():
                 await process_content_recursive(value, session, cache_config=cache_config, **kwargs)
+
     elif isinstance(content, list):
         for item in content:
             await process_content_recursive(item, session, cache_config=cache_config, **kwargs)

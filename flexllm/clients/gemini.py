@@ -543,6 +543,14 @@ class GeminiClient(LLMClientBase):
                     elif item_type == "image_url":
                         if img := self._convert_image_url(item.get("image_url", {})):
                             parts.append(img)
+                    elif item_type in ("video_url", "audio_url"):
+                        media_obj = item.get(item_type, {})
+                        if part := self._convert_media_url(media_obj):
+                            parts.append(part)
+                    elif item_type == "input_audio":
+                        audio_obj = item.get("input_audio", {})
+                        if part := self._convert_input_audio(audio_obj):
+                            parts.append(part)
                     elif item_type == "image":
                         if img := self._convert_image_direct(item):
                             parts.append(img)
@@ -561,6 +569,28 @@ class GeminiClient(LLMClientBase):
                 return {"inline_data": {"mime_type": match.group(1), "data": match.group(2)}}
 
         logger.warning(f"Gemini API 不直接支持外部 URL，请先转换为 base64: {url[:50]}...")
+        return None
+
+    def _convert_media_url(self, media_url_obj: dict) -> dict | None:
+        """将 video_url/audio_url 格式转换为 Gemini 的 inline_data 格式"""
+        url = media_url_obj.get("url", "")
+        if not url:
+            return None
+
+        if url.startswith("data:"):
+            match = re.match(r"data:([^;]+);base64,(.+)", url)
+            if match:
+                return {"inline_data": {"mime_type": match.group(1), "data": match.group(2)}}
+
+        logger.warning(f"Gemini API 不直接支持外部 URL，请先转换为 base64: {url[:50]}...")
+        return None
+
+    def _convert_input_audio(self, audio_obj: dict) -> dict | None:
+        """将 OpenAI input_audio 格式转换为 Gemini 的 inline_data 格式"""
+        data = audio_obj.get("data", "")
+        fmt = audio_obj.get("format", "wav")
+        if data:
+            return {"inline_data": {"mime_type": f"audio/{fmt}", "data": data}}
         return None
 
     def _convert_image_direct(self, image_obj: dict) -> dict | None:
