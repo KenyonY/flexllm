@@ -5,6 +5,7 @@ OpenAI 兼容 API 客户端
 """
 
 import logging
+import re
 from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,45 @@ class OpenAIClient(LLMClientBase):
     def _get_headers(self) -> dict:
         return self._headers
 
+    @staticmethod
+    def _convert_audio_url_to_input_audio(messages: list[dict]) -> list[dict]:
+        """将 audio_url 类型转换为 OpenAI 标准的 input_audio 类型。
+
+        audio_url 是 flexllm 的便捷格式，OpenAI API 不支持。
+        类似 Claude/Gemini client 中对 audio_url 的转换。
+        """
+        result = []
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                result.append(msg)
+                continue
+            new_content = []
+            changed = False
+            for part in content:
+                if part.get("type") == "audio_url":
+                    url = part.get("audio_url", {}).get("url", "")
+                    if url.startswith("data:"):
+                        match = re.match(r"data:audio/([^;]+);base64,(.+)", url, re.DOTALL)
+                        if match:
+                            new_content.append(
+                                {
+                                    "type": "input_audio",
+                                    "input_audio": {
+                                        "data": match.group(2),
+                                        "format": match.group(1),
+                                    },
+                                }
+                            )
+                            changed = True
+                            continue
+                    # 非 data URI 的 audio_url 无法转换，保持原样
+                    new_content.append(part)
+                else:
+                    new_content.append(part)
+            result.append({**msg, "content": new_content} if changed else msg)
+        return result
+
     def _build_request_body(
         self,
         messages: list[dict],
@@ -118,7 +158,7 @@ class OpenAIClient(LLMClientBase):
                 - True: 启用思考（Ollama: think=True）
                 - None: 使用模型默认行为
         """
-        processed_messages = messages
+        processed_messages = self._convert_audio_url_to_input_audio(messages)
 
         # 禁用思考时，添加 /no_think 标签（vLLM/Qwen3 格式）
         if thinking is False:
