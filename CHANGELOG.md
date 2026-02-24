@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.6.2] - 2026-02-24
+
+### Bug Fixes
+
+- OpenAI client 自动将 audio_url 转换为 input_audio 格式
+
+### Documentation
+
+- 清理冗余过时文档
+
+### Features
+
+- **processor**: 支持 video_url/audio_url/input_audio 预处理
+- **agent**: Subagent 支持、输出管理重构、mock tool call
+
+### Miscellaneous
+
+- Bump version to 0.6.2
+- **pricing**: 更新模型定价数据
+
+### Refactor
+
+- **processor**: 统一默认预处理路径到 unified_processor
+
+### Testing
+
+- **e2e**: 添加视频/音频/图片媒体预处理端到端测试
+
 ## [0.6.1] - 2026-02-07
 
 ### Bug Fixes
