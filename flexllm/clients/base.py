@@ -17,8 +17,8 @@ from ..async_api import ConcurrentRequester
 from ..async_api.progress import ProgressBarConfig
 from ..cache import ResponseCache, ResponseCacheConfig
 from ..msg_processors.image_processor import ImageCacheConfig
-from ..msg_processors.messages_processor import messages_preprocess
 from ..msg_processors.unified_processor import batch_process_messages as optimized_batch_preprocess
+from ..msg_processors.unified_processor import unified_messages_preprocess
 from ..pricing import estimate_cost, get_model_pricing
 from ..pricing.cost_tracker import BudgetExceededError, CostReport, CostTracker, CostTrackerConfig
 from .batch_helpers import (
@@ -224,11 +224,9 @@ class LLMClientBase(ABC):
     async def _preprocess_messages(
         self, messages: list[dict], preprocess_msg: bool = False
     ) -> list[dict]:
-        """消息预处理（图片转 base64 等）"""
+        """消息预处理（图片/视频/音频转 base64 等）"""
         if preprocess_msg:
-            return await messages_preprocess(
-                messages, preprocess_msg=preprocess_msg, cache_config=self._cache_config
-            )
+            return await unified_messages_preprocess(messages)
         return messages
 
     async def _preprocess_messages_batch(

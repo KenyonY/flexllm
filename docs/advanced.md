@@ -2,9 +2,64 @@
 
 ## 多模态处理
 
+### 消息预处理
+
+`messages_preprocess` 自动将消息中的本地文件路径和 URL 转换为 base64，支持图片、视频和音频：
+
+```python
+from flexllm.msg_processors import messages_preprocess
+
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "/path/to/image.png"}},
+            {"type": "video_url", "video_url": {"url": "/path/to/video.mp4"}},
+            {"type": "input_audio", "input_audio": {"data": "/path/to/audio.wav", "format": "wav"}},
+            {"type": "text", "text": "描述你看到和听到的内容"},
+        ],
+    }
+]
+
+# 预处理：本地路径/URL → base64
+processed = await messages_preprocess(messages)
+result = await client.chat_completions(processed)
+```
+
+**支持的内容类型和处理方式：**
+
+| `type` 字段 | 数据字段 | 处理方式 | 输出格式 |
+|---|---|---|---|
+| `image_url` | `image_url.url` | PIL/OpenCV 管道（支持缩放） | `data:image/...;base64,...` |
+| `video_url` | `video_url.url` | 原始字节 base64 | `data:video/...;base64,...` |
+| `audio_url` | `audio_url.url` | 原始字节 base64 | `data:audio/...;base64,...` |
+| `input_audio` | `input_audio.data` | 原始字节 base64 | 纯 base64（无 data: 前缀，OpenAI 格式） |
+
+**支持的来源：** 本地路径、`file://` URI、HTTP/HTTPS URL、`data:` URI（直接透传）。
+
+**跨 Provider 格式转换：** Claude 和 Gemini 客户端会自动将 OpenAI 格式转换为各自原生格式：
+- Claude: `video_url`/`audio_url` → `document` 类型，`input_audio` → `document` 类型
+- Gemini: 统一转换为 `inline_data` 格式
+
+### 通用媒体编码
+
+对于单个文件的 base64 编码，可直接使用 `encode_media_to_base64`：
+
+```python
+from flexllm.msg_processors import encode_media_to_base64
+
+# 本地文件 → data URI
+data_uri = await encode_media_to_base64("/path/to/video.mp4")
+# "data:video/mp4;base64,..."
+
+# 不带 MIME 前缀（适用于 input_audio.data）
+raw_b64 = await encode_media_to_base64("/path/to/audio.wav", return_with_mime=False)
+# "UklGRiT6AABX..."
+```
+
 ### MllmClient
 
-处理图文混合内容：
+处理图文混合内容的高级客户端：
 
 ```python
 from flexllm import MllmClient
@@ -35,12 +90,6 @@ messages_list = [[msg1], [msg2], ...]  # 每个元素是一组消息
 results = await client.call_llm(messages_list)
 ```
 
-**支持的图像源：**
-- 本地文件路径（自动转 base64）
-- HTTP/HTTPS URL（自动下载转 base64）
-- base64 编码字符串
-- PIL Image 对象
-
 ### 图像处理器
 
 ```python
@@ -50,7 +99,7 @@ from flexllm.msg_processors import (
     unified_batch_process_messages,
 )
 
-# 单张图片编码
+# 单张图片编码（支持缩放）
 base64_data = await encode_image_to_base64("/path/to/image.jpg")
 
 # 批量消息预处理（高性能）

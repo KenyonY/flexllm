@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import hashlib
 import json
@@ -134,10 +135,10 @@ async def encode_media_to_base64(source, session=None, return_with_mime=True) ->
         return source
 
     if isinstance(source, str) and source.startswith("file://"):
-        return encode_base64_from_local_path(source[7:], return_with_mime=return_with_mime)
+        return await asyncio.to_thread(encode_base64_from_local_path, source[7:], return_with_mime)
 
     if isinstance(source, str) and os.path.exists(source):
-        return encode_base64_from_local_path(source, return_with_mime=return_with_mime)
+        return await asyncio.to_thread(encode_base64_from_local_path, source, return_with_mime)
 
     if isinstance(source, str) and source.startswith("http"):
         close_session = False

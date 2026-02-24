@@ -18,24 +18,22 @@ from .image_processor import (
 # 便捷的类接口
 from .image_processor_helper import ImageProcessor
 
-# 基础消息处理功能
-from .messages_processor import (
-    batch_messages_preprocess,
-    batch_process_messages,  # 别名
-    messages_preprocess,
-    process_content_recursive,
-)
-
-# 统一高性能处理器（推荐用于生产环境）
+# 统一高性能处理器（默认路径）
 from .unified_processor import (
     UnifiedImageProcessor,
     UnifiedMemoryCache,
     UnifiedProcessorConfig,
+    batch_process_messages,
     cleanup_global_unified_processor,
     get_global_unified_processor,
+    process_content_recursive,
     unified_encode_image_to_base64,
 )
+from .unified_processor import batch_process_messages as batch_messages_preprocess
 from .unified_processor import batch_process_messages as unified_batch_process_messages
+from .unified_processor import (
+    unified_messages_preprocess as messages_preprocess,
+)
 
 __all__ = [
     # 图像缓存配置

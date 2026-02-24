@@ -68,6 +68,7 @@ results = await client.chat_completions_batch(messages_list, output_jsonl="resul
 | **Cost Tracking**          | Real-time cost monitoring with budget control                                   |
 | **High-Performance Async** | Fine-grained concurrency control, QPS limiting, and streaming                   |
 | **Multi-Provider**         | Supports OpenAI-compatible APIs, Gemini, Claude                                 |
+| **Multimodal Preprocessing** | Auto-convert local files/URLs to base64 for `image_url`, `video_url`, `audio_url`, `input_audio` |
 | **Agent (Tool-Use Loop)**  | AgentClient with automatic tool calling, parallel execution, multi-turn chat, and built-in tools (read/write/edit/glob/grep/bash) |
 
 ---
@@ -250,6 +251,40 @@ parsed = client.parse_thoughts(result.data)
 print("Thinking:", parsed["thought"])
 print("Answer:", parsed["answer"])
 ```
+
+### Multimodal Preprocessing
+
+Automatically convert local file paths and URLs to base64 data URIs. Supports images, videos, and audio — just pass local paths in your messages:
+
+```python
+from flexllm.msg_processors import messages_preprocess
+
+messages = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "/path/to/image.png"}},
+            {"type": "video_url", "video_url": {"url": "/path/to/video.mp4"}},
+            {"type": "input_audio", "input_audio": {"data": "/path/to/audio.wav", "format": "wav"}},
+            {"type": "text", "text": "Describe what you see and hear."},
+        ],
+    }
+]
+
+# All local paths → base64 data URIs (async)
+processed = await messages_preprocess(messages)
+result = await client.chat_completions(processed)
+```
+
+| Content type   | Source field       | Output format             |
+|----------------|--------------------|---------------------------|
+| `image_url`    | `image_url.url`    | `data:image/...;base64,…` (with resize support) |
+| `video_url`    | `video_url.url`    | `data:video/...;base64,…` |
+| `audio_url`    | `audio_url.url`    | `data:audio/...;base64,…` |
+| `input_audio`  | `input_audio.data` | Raw base64 (no `data:` prefix, OpenAI format) |
+
+Supported sources: local file paths, `file://` URIs, HTTP/HTTPS URLs, existing `data:` URIs (passthrough).
+Claude and Gemini clients automatically convert these to their native formats.
 
 ### Tool Calls (Function Calling)
 
