@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "updated_at": "2026-02-10",
+    "updated_at": "2026-02-24",
     "source": "OpenRouter API (https://openrouter.ai/api/v1/models)",
     "unit": "$/1M tokens"
   },
@@ -16,10 +16,6 @@
     "aion-rp-llama-3.1-8b": {
       "input": 0.8,
       "output": 1.6
-    },
-    "chatgpt-4o-latest": {
-      "input": 5.0,
-      "output": 15.0
     },
     "claude-3-haiku": {
       "input": 0.25,
@@ -65,6 +61,10 @@
       "input": 3.0,
       "output": 15.0
     },
+    "claude-sonnet-4.6": {
+      "input": 3.0,
+      "output": 15.0
+    },
     "codellama-7b-instruct-solidity": {
       "input": 0.8,
       "output": 1.2
@@ -101,13 +101,9 @@
       "input": 0.3,
       "output": 0.5
     },
-    "deephermes-3-mistral-24b-preview": {
-      "input": 0.02,
-      "output": 0.1
-    },
     "deepseek-chat": {
-      "input": 0.3,
-      "output": 1.2
+      "input": 0.32,
+      "output": 0.89
     },
     "deepseek-chat-v3-0324": {
       "input": 0.19,
@@ -126,16 +122,12 @@
       "output": 1.75
     },
     "deepseek-r1-distill-llama-70b": {
-      "input": 0.03,
-      "output": 0.11
+      "input": 0.7,
+      "output": 0.8
     },
     "deepseek-r1-distill-qwen-32b": {
       "input": 0.29,
       "output": 0.29
-    },
-    "deepseek-r1t-chimera": {
-      "input": 0.3,
-      "output": 1.2
     },
     "deepseek-r1t2-chimera": {
       "input": 0.25,
@@ -150,7 +142,7 @@
       "output": 0.79
     },
     "deepseek-v3.2": {
-      "input": 0.25,
+      "input": 0.26,
       "output": 0.38
     },
     "deepseek-v3.2-exp": {
@@ -158,12 +150,12 @@
       "output": 0.41
     },
     "deepseek-v3.2-speciale": {
-      "input": 0.27,
-      "output": 0.41
+      "input": 0.4,
+      "output": 1.2
     },
     "devstral-2512": {
-      "input": 0.05,
-      "output": 0.22
+      "input": 0.4,
+      "output": 2.0
     },
     "devstral-medium": {
       "input": 0.4,
@@ -217,10 +209,6 @@
       "input": 0.1,
       "output": 0.4
     },
-    "gemini-2.5-flash-preview-09-2025": {
-      "input": 0.3,
-      "output": 2.5
-    },
     "gemini-2.5-pro": {
       "input": 1.25,
       "output": 10.0
@@ -245,6 +233,10 @@
       "input": 2.0,
       "output": 12.0
     },
+    "gemini-3.1-pro-preview": {
+      "input": 2.0,
+      "output": 12.0
+    },
     "gemma-2-27b-it": {
       "input": 0.65,
       "output": 0.65
@@ -254,16 +246,16 @@
       "output": 0.09
     },
     "gemma-3-12b-it": {
-      "input": 0.03,
-      "output": 0.1
+      "input": 0.04,
+      "output": 0.13
     },
     "gemma-3-27b-it": {
       "input": 0.04,
       "output": 0.15
     },
     "gemma-3-4b-it": {
-      "input": 0.017,
-      "output": 0.0682
+      "input": 0.04,
+      "output": 0.08
     },
     "gemma-3n-e4b-it": {
       "input": 0.02,
@@ -274,8 +266,8 @@
       "output": 0.1
     },
     "glm-4.5": {
-      "input": 0.35,
-      "output": 1.55
+      "input": 0.55,
+      "output": 2.0
     },
     "glm-4.5-air": {
       "input": 0.13,
@@ -287,19 +279,23 @@
     },
     "glm-4.6": {
       "input": 0.35,
-      "output": 1.5
+      "output": 1.71
     },
     "glm-4.6v": {
       "input": 0.3,
       "output": 0.9
     },
     "glm-4.7": {
-      "input": 0.4,
-      "output": 1.5
+      "input": 0.38,
+      "output": 1.7
     },
     "glm-4.7-flash": {
       "input": 0.06,
       "output": 0.4
+    },
+    "glm-5": {
+      "input": 0.95,
+      "output": 2.55
     },
     "goliath-120b": {
       "input": 3.75,
@@ -530,8 +526,8 @@
       "output": 3.0
     },
     "hermes-4-70b": {
-      "input": 0.11,
-      "output": 0.38
+      "input": 0.13,
+      "output": 0.4
     },
     "hunyuan-a13b-instruct": {
       "input": 0.14,
@@ -566,16 +562,16 @@
       "output": 2.4
     },
     "kimi-k2-0905": {
-      "input": 0.39,
-      "output": 1.9
+      "input": 0.4,
+      "output": 2.0
     },
     "kimi-k2-thinking": {
-      "input": 0.4,
-      "output": 1.75
+      "input": 0.47,
+      "output": 2.0
     },
     "kimi-k2.5": {
       "input": 0.45,
-      "output": 2.25
+      "output": 2.2
     },
     "l3-euryale-70b": {
       "input": 1.48,
@@ -729,19 +725,15 @@
       "input": 0.27,
       "output": 0.95
     },
+    "minimax-m2.5": {
+      "input": 0.3,
+      "output": 1.1
+    },
     "ministral-14b-2512": {
       "input": 0.2,
       "output": 0.2
     },
-    "ministral-3b": {
-      "input": 0.04,
-      "output": 0.04
-    },
     "ministral-3b-2512": {
-      "input": 0.1,
-      "output": 0.1
-    },
-    "ministral-8b": {
       "input": 0.1,
       "output": 0.1
     },
@@ -802,8 +794,8 @@
       "output": 0.08
     },
     "mistral-small-3.1-24b-instruct": {
-      "input": 0.03,
-      "output": 0.11
+      "input": 0.35,
+      "output": 0.56
     },
     "mistral-small-3.2-24b-instruct": {
       "input": 0.06,
@@ -812,10 +804,6 @@
     "mistral-small-creative": {
       "input": 0.1,
       "output": 0.3
-    },
-    "mistral-tiny": {
-      "input": 0.25,
-      "output": 0.25
     },
     "mixtral-8x22b-instruct": {
       "input": 2.0,
@@ -846,8 +834,8 @@
       "output": 0.2
     },
     "nemotron-nano-12b-v2-vl": {
-      "input": 0.2,
-      "output": 0.6
+      "input": 0.07,
+      "output": 0.2
     },
     "nemotron-nano-9b-v2": {
       "input": 0.04,
@@ -949,10 +937,6 @@
       "input": 0.06,
       "output": 0.14
     },
-    "pixtral-12b": {
-      "input": 0.1,
-      "output": 0.1
-    },
     "pixtral-large-2411": {
       "input": 2.0,
       "output": 6.0
@@ -966,8 +950,8 @@
       "output": 0.1
     },
     "qwen-2.5-coder-32b-instruct": {
-      "input": 0.03,
-      "output": 0.11
+      "input": 0.2,
+      "output": 0.2
     },
     "qwen-2.5-vl-7b-instruct": {
       "input": 0.2,
@@ -1002,36 +986,32 @@
       "output": 0.09
     },
     "qwen2.5-vl-32b-instruct": {
-      "input": 0.05,
-      "output": 0.22
-    },
-    "qwen2.5-vl-72b-instruct": {
-      "input": 0.15,
-      "output": 0.6
-    },
-    "qwen3-14b": {
-      "input": 0.05,
-      "output": 0.22
-    },
-    "qwen3-235b-a22b": {
       "input": 0.2,
       "output": 0.6
+    },
+    "qwen2.5-vl-72b-instruct": {
+      "input": 0.8,
+      "output": 0.8
+    },
+    "qwen3-14b": {
+      "input": 0.06,
+      "output": 0.24
+    },
+    "qwen3-235b-a22b": {
+      "input": 0.455,
+      "output": 1.82
     },
     "qwen3-235b-a22b-2507": {
       "input": 0.071,
       "output": 0.1
     },
-    "qwen3-235b-a22b-thinking-2507": {
-      "input": 0.11,
-      "output": 0.6
-    },
     "qwen3-30b-a3b": {
-      "input": 0.06,
-      "output": 0.22
+      "input": 0.08,
+      "output": 0.28
     },
     "qwen3-30b-a3b-instruct-2507": {
-      "input": 0.08,
-      "output": 0.33
+      "input": 0.09,
+      "output": 0.3
     },
     "qwen3-30b-a3b-thinking-2507": {
       "input": 0.051,
@@ -1058,8 +1038,8 @@
       "output": 1.5
     },
     "qwen3-coder-next": {
-      "input": 0.07,
-      "output": 0.3
+      "input": 0.12,
+      "output": 0.75
     },
     "qwen3-coder-plus": {
       "input": 1.0,
@@ -1085,29 +1065,29 @@
       "input": 0.2,
       "output": 0.88
     },
-    "qwen3-vl-235b-a22b-thinking": {
-      "input": 0.45,
-      "output": 3.5
-    },
     "qwen3-vl-30b-a3b-instruct": {
-      "input": 0.15,
-      "output": 0.6
-    },
-    "qwen3-vl-30b-a3b-thinking": {
-      "input": 0.2,
-      "output": 1.0
+      "input": 0.13,
+      "output": 0.52
     },
     "qwen3-vl-32b-instruct": {
-      "input": 0.5,
-      "output": 1.5
+      "input": 0.104,
+      "output": 0.416
     },
     "qwen3-vl-8b-instruct": {
       "input": 0.08,
       "output": 0.5
     },
     "qwen3-vl-8b-thinking": {
-      "input": 0.18,
-      "output": 2.1
+      "input": 0.117,
+      "output": 1.365
+    },
+    "qwen3.5-397b-a17b": {
+      "input": 0.55,
+      "output": 3.5
+    },
+    "qwen3.5-plus-02-15": {
+      "input": 0.4,
+      "output": 2.4
     },
     "qwq-32b": {
       "input": 0.15,
@@ -1177,9 +1157,9 @@
       "input": 0.18,
       "output": 0.18
     },
-    "tng-r1t-chimera": {
-      "input": 0.25,
-      "output": 0.85
+    "step-3.5-flash": {
+      "input": 0.1,
+      "output": 0.3
     },
     "tongyi-deepresearch-30b-a3b": {
       "input": 0.09,
@@ -1210,8 +1190,8 @@
       "output": 1.0
     },
     "wizardlm-2-8x22b": {
-      "input": 0.48,
-      "output": 0.48
+      "input": 0.62,
+      "output": 0.62
     }
   }
 }
