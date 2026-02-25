@@ -246,6 +246,16 @@ class ConcurrentRequester:
                 finally:
                     loop.close()
 
+    def __del__(self):
+        """析构时标记 session/connector 为已关闭，避免 'Unclosed client session' 警告。
+        __del__ 中无法 await 异步 close()，标记 _closed 是 aiohttp 生态的标准做法，
+        底层 TCP 连接会在进程退出时由 OS 回收。
+        """
+        if self._connector is not None and not self._connector.closed:
+            self._connector._closed = True
+        if self._session is not None and not self._session.closed:
+            self._session._closed = True
+
     @staticmethod
     async def _async_close(session: ClientSession, connector: TCPConnector):
         """异步关闭 session 和 connector（内部使用）"""

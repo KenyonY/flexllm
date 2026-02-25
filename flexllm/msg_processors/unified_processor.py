@@ -46,6 +46,17 @@ except ImportError:
     DEFAULT_CACHE_DIR = "cache"
 
 try:
+    from .audio_processor import extract_audio_kwargs, preprocess_audio
+
+    HAS_AUDIO_PROCESSOR = True
+except ImportError:
+    HAS_AUDIO_PROCESSOR = False
+
+    def extract_audio_kwargs(kwargs):
+        return {}
+
+
+try:
     from tqdm.asyncio import tqdm
 
     TQDM_AVAILABLE = True
@@ -908,6 +919,148 @@ def _is_source_needs_conversion(value: str) -> bool:
     )
 
 
+async def _get_raw_bytes(source: str, session: aiohttp.ClientSession | None = None) -> bytes:
+    """从文件路径、URL 或 data URI 获取原始字节"""
+    if source.startswith("data:"):
+        if ";base64," in source:
+            return base64.b64decode(source.split(";base64,", 1)[1])
+        raise ValueError("不支持的 data URI 格式")
+
+    path = source[7:] if source.startswith("file://") else source
+    if os.path.exists(path):
+        return await asyncio.to_thread(Path(path).read_bytes)
+
+    if source.startswith("http"):
+        close = session is None
+        if close:
+            session = aiohttp.ClientSession()
+        try:
+            async with session.get(source) as resp:
+                resp.raise_for_status()
+                return await resp.read()
+        finally:
+            if close:
+                await session.close()
+
+    raise ValueError(f"不支持的来源: {source}")
+
+
+def _extract_frames_sync(video_path: str, fps: float, max_frames: int | None) -> list:
+    """同步提取视频帧。
+
+    Args:
+        video_path: 视频文件路径
+        fps: 目标帧率（每秒提取几帧）
+        max_frames: 最大帧数限制
+
+    Returns:
+        帧列表（numpy arrays, BGR format）
+    """
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise ValueError(f"无法打开视频: {video_path}")
+    try:
+        video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        frame_interval = max(1, round(video_fps / fps))
+
+        frames = []
+        frame_idx = 0
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                break
+            if frame_idx % frame_interval == 0:
+                frames.append(frame)
+                if max_frames and len(frames) >= max_frames:
+                    break
+            frame_idx += 1
+        return frames
+    finally:
+        cap.release()
+
+
+async def _extract_video_frames(
+    source: str,
+    session: aiohttp.ClientSession | None,
+    processor: "UnifiedImageProcessor",
+    video_fps: float = 1.0,
+    max_frames: int | None = None,
+    max_width: int | None = None,
+    max_height: int | None = None,
+    max_pixels: int | None = None,
+    **kwargs,
+) -> list[dict]:
+    """从视频中提取帧并转换为 image_url content parts。
+
+    Args:
+        source: 视频来源（文件路径/URL/data URI）
+        session: aiohttp 会话
+        processor: 图像处理器（用于计算 resize 尺寸）
+        video_fps: 每秒提取帧数
+        max_frames: 最大帧数
+        max_width/max_height/max_pixels: 帧 resize 参数
+
+    Returns:
+        image_url content part 列表
+    """
+    if not HAS_CV2:
+        raise ImportError("视频帧提取需要 opencv-python。请运行: pip install flexllm[image]")
+
+    import tempfile
+
+    temp_path = None
+    video_path = source
+
+    try:
+        if source.startswith("file://"):
+            video_path = source[7:]
+        elif source.startswith("data:"):
+            if ";base64," in source:
+                video_bytes = base64.b64decode(source.split(";base64,", 1)[1])
+                fd, temp_path = tempfile.mkstemp(suffix=".mp4")
+                os.write(fd, video_bytes)
+                os.close(fd)
+                video_path = temp_path
+            else:
+                return []
+        elif source.startswith("http"):
+            raw_bytes = await _get_raw_bytes(source, session)
+            fd, temp_path = tempfile.mkstemp(suffix=".mp4")
+            os.write(fd, raw_bytes)
+            os.close(fd)
+            video_path = temp_path
+        elif not os.path.exists(source):
+            logger.warning(f"视频文件不存在: {source}")
+            return []
+
+        frames = await asyncio.to_thread(_extract_frames_sync, video_path, video_fps, max_frames)
+        if not frames:
+            return []
+
+        image_parts = []
+        for frame in frames:
+            h, w = frame.shape[:2]
+            tw, th = processor._calculate_target_size(w, h, max_width, max_height, max_pixels)
+            if tw != w or th != h:
+                frame = cv2.resize(frame, (tw, th), interpolation=cv2.INTER_LANCZOS4)
+
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+            image_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+                }
+            )
+
+        logger.info(f"视频帧提取完成: {len(image_parts)} 帧")
+        return image_parts
+
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+
 async def process_content_recursive(
     content: Any,
     session: aiohttp.ClientSession | None = None,
@@ -918,10 +1071,21 @@ async def process_content_recursive(
 
     支持的 type：
     - image_url: 通过 UnifiedImageProcessor 处理（支持缩放）
-    - video_url: 原始字节 base64 编码
-    - audio_url: 原始字节 base64 编码
-    - input_audio: OpenAI 格式，data 字段转换为纯 base64（无 data: 前缀）
+    - video_url: 原始字节 base64 编码，或 video_fps 时切帧为 image_url 序列
+    - audio_url: 原始字节 base64 编码，支持音频预处理（重采样/声道/格式/截断）
+    - input_audio: OpenAI 格式，data 字段转换为纯 base64，支持音频预处理
     - 其他: 递归处理子节点
+
+    音频预处理参数（通过 kwargs 传入）：
+        target_sample_rate: 目标采样率
+        target_channels: 目标声道数
+        target_audio_format: 目标音频格式
+        max_duration_seconds: 最大时长
+
+    视频帧提取参数（通过 kwargs 传入）：
+        video_fps: 每秒提取帧数
+        max_frames: 最大帧数
+        max_width/max_height/max_pixels: 帧 resize（复用图片参数）
     """
     from .image_processor import encode_media_to_base64
 
@@ -944,6 +1108,7 @@ async def process_content_recursive(
                     )
 
         elif item_type == "video_url":
+            # 无 video_fps 时走原始 base64 编码路径
             url = content.get("video_url", {}).get("url", "")
             if url and not url.startswith("data:"):
                 try:
@@ -961,11 +1126,23 @@ async def process_content_recursive(
             url = content.get("audio_url", {}).get("url", "")
             if url and not url.startswith("data:"):
                 try:
-                    base64_data = await encode_media_to_base64(
-                        url, session=session, return_with_mime=True
-                    )
-                    if base64_data:
-                        content["audio_url"]["url"] = base64_data
+                    audio_kw = extract_audio_kwargs(kwargs)
+                    if audio_kw and HAS_AUDIO_PROCESSOR:
+                        raw = await _get_raw_bytes(url, session)
+                        processed, mime = preprocess_audio(raw, **audio_kw)
+                        b64 = base64.b64encode(processed).decode("utf-8")
+                        content["audio_url"]["url"] = f"data:{mime};base64,{b64}"
+                    else:
+                        if audio_kw and not HAS_AUDIO_PROCESSOR:
+                            logger.warning(
+                                "音频预处理依赖缺失，回退到原始编码。"
+                                "请运行: pip install flexllm[audio]"
+                            )
+                        base64_data = await encode_media_to_base64(
+                            url, session=session, return_with_mime=True
+                        )
+                        if base64_data:
+                            content["audio_url"]["url"] = base64_data
                 except Exception as e:
                     logger.error(
                         f"处理音频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
@@ -975,11 +1152,24 @@ async def process_content_recursive(
             data = content.get("input_audio", {}).get("data", "")
             if data and isinstance(data, str) and _is_source_needs_conversion(data):
                 try:
-                    base64_data = await encode_media_to_base64(
-                        data, session=session, return_with_mime=False
-                    )
-                    if base64_data:
-                        content["input_audio"]["data"] = base64_data
+                    audio_kw = extract_audio_kwargs(kwargs)
+                    if audio_kw and HAS_AUDIO_PROCESSOR:
+                        raw = await _get_raw_bytes(data, session)
+                        processed, _ = preprocess_audio(raw, **audio_kw)
+                        content["input_audio"]["data"] = base64.b64encode(processed).decode("utf-8")
+                        if "target_audio_format" in audio_kw:
+                            content["input_audio"]["format"] = audio_kw["target_audio_format"]
+                    else:
+                        if audio_kw and not HAS_AUDIO_PROCESSOR:
+                            logger.warning(
+                                "音频预处理依赖缺失，回退到原始编码。"
+                                "请运行: pip install flexllm[audio]"
+                            )
+                        base64_data = await encode_media_to_base64(
+                            data, session=session, return_with_mime=False
+                        )
+                        if base64_data:
+                            content["input_audio"]["data"] = base64_data
                 except Exception as e:
                     logger.error(
                         f"处理音频数据失败 {safe_repr_source(data)}: {safe_repr_error(str(e))}"
@@ -990,8 +1180,28 @@ async def process_content_recursive(
                 await process_content_recursive(value, session, processor, **kwargs)
 
     elif isinstance(content, list):
-        for item in content:
+        video_fps = kwargs.get("video_fps")
+        i = 0
+        while i < len(content):
+            item = content[i]
+            # video_fps 存在时，将 video_url 切帧为 image_url 序列
+            if video_fps and isinstance(item, dict) and item.get("type") == "video_url":
+                url = item.get("video_url", {}).get("url", "")
+                if url:
+                    try:
+                        frame_parts = await _extract_video_frames(url, session, processor, **kwargs)
+                        if frame_parts:
+                            content[i : i + 1] = frame_parts
+                            i += len(frame_parts)
+                            continue
+                    except Exception as e:
+                        logger.error(
+                            f"视频帧提取失败 {safe_repr_source(url)}: "
+                            f"{safe_repr_error(str(e))}，回退到原始编码"
+                        )
+            # 其他项或帧提取失败时走默认处理
             await process_content_recursive(item, session, processor, **kwargs)
+            i += 1
 
 
 async def unified_messages_preprocess(
@@ -1048,6 +1258,14 @@ async def unified_batch_messages_preprocess(
     max_width: int | None = None,
     max_height: int | None = None,
     max_pixels: int | None = None,
+    # 音频预处理参数
+    target_sample_rate: int | None = None,
+    target_channels: int | None = None,
+    target_audio_format: str | None = None,
+    max_duration_seconds: float | None = None,
+    # 视频帧提取参数
+    video_fps: float | None = None,
+    max_frames: int | None = None,
     **kwargs,
 ) -> list[list[dict[str, Any]]] | Any:
     """
@@ -1067,19 +1285,35 @@ async def unified_batch_messages_preprocess(
         max_width: 最大宽度
         max_height: 最大高度
         max_pixels: 最大像素数
+        target_sample_rate: 音频目标采样率（如 16000）
+        target_channels: 音频目标声道数（1=单声道）
+        target_audio_format: 音频目标格式（wav/flac/ogg）
+        max_duration_seconds: 音频最大时长秒数
+        video_fps: 视频帧提取帧率（如 1.0=每秒1帧）
+        max_frames: 视频最大帧数
         **kwargs: 其他处理参数
 
     Returns:
         处理后的消息列表或异步迭代器
     """
+    # 合并音频/视频参数到 kwargs
+    media_kwargs = {
+        "target_sample_rate": target_sample_rate,
+        "target_channels": target_channels,
+        "target_audio_format": target_audio_format,
+        "max_duration_seconds": max_duration_seconds,
+        "video_fps": video_fps,
+        "max_frames": max_frames,
+    }
+    # 只传递非 None 的参数
+    media_kwargs = {k: v for k, v in media_kwargs.items() if v is not None}
+    kwargs.update(media_kwargs)
 
     # 创建或获取处理器
     if processor_config:
         processor = UnifiedImageProcessor(processor_config)
     else:
         processor = get_global_unified_processor()
-
-    print(f"{processor.config=}")
 
     # 创建处理单个消息列表的函数
     async def process_single_batch(messages, semaphore, index=None):
