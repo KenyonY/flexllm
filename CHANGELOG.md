@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.0] - 2026-02-25
+
+### Features
+
+- **processor**: 音频预处理和视频帧提取，fix aiohttp session 泄漏
+
+### Miscellaneous
+
+- Bump version to 0.7.0
+
 ## [0.6.2] - 2026-02-24
 
 ### Bug Fixes
