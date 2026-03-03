@@ -1,6 +1,6 @@
 """Unit tests for LLMClientPool"""
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -331,3 +331,154 @@ class TestClientPoolRepr:
         assert "LLMClientPool" in repr_str
         assert "endpoints=2" in repr_str
         assert "fallback=True" in repr_str
+
+
+class TestFromConfig:
+    """测试 from_config 工厂方法"""
+
+    def _mock_config(self):
+        """构造 mock FlexLLMConfig"""
+        config = MagicMock()
+        config.config = {"default": "qwen-plus"}
+        config.get_model_config.return_value = {
+            "id": "qwen-plus",
+            "name": "qwen-plus",
+            "base_url": "https://api.example.com/v1",
+            "api_key": "sk-test",
+        }
+        config.get_system.return_value = "你是一个有用的助手"
+        config.get_model_params.return_value = {"temperature": 0.7, "max_tokens": 1024}
+        return config
+
+    @patch("flexllm.cli.config.get_config")
+    def test_from_config_default_model(self, mock_get_config):
+        """无参数使用默认模型"""
+        mock_get_config.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config()
+        assert client._mode == "single"
+        assert client._config_system == "你是一个有用的助手"
+        assert client._config_params == {"temperature": 0.7, "max_tokens": 1024}
+
+    @patch("flexllm.cli.config.get_config")
+    def test_from_config_named_model(self, mock_get_config):
+        """指定模型名称"""
+        mock_get_config.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config("qwen-plus")
+        mock_get_config.return_value.get_model_config.assert_called_with("qwen-plus")
+
+    @patch("flexllm.cli.config.get_config")
+    def test_from_config_overrides(self, mock_get_config):
+        """overrides 覆盖配置"""
+        mock_get_config.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config("qwen-plus", concurrency_limit=50)
+        assert client._single_client._concurrency_limit == 50
+
+    @patch("flexllm.cli.config.get_config")
+    def test_from_config_not_found(self, mock_get_config):
+        """模型未找到时抛出 ValueError"""
+        config = MagicMock()
+        config.get_model_config.return_value = None
+        mock_get_config.return_value = config
+
+        with pytest.raises(ValueError, match="未找到模型配置"):
+            LLMClientPool.from_config("nonexistent")
+
+    @patch("flexllm.cli.config.get_config")
+    def test_from_config_no_system(self, mock_get_config):
+        """配置中没有 system prompt 时 _config_system 为 None"""
+        config = self._mock_config()
+        config.get_system.return_value = None
+        mock_get_config.return_value = config
+
+        client = LLMClientPool.from_config()
+        assert client._config_system is None
+
+    @patch("flexllm.cli.config.get_config")
+    def test_from_config_with_provider(self, mock_get_config):
+        """配置中有 provider 字段"""
+        config = self._mock_config()
+        config.get_model_config.return_value = {
+            "id": "claude-3",
+            "name": "claude-3",
+            "provider": "claude",
+            "api_key": "sk-ant-test",
+        }
+        mock_get_config.return_value = config
+
+        client = LLMClientPool.from_config("claude-3")
+        assert client._provider == "claude"
+
+    @pytest.mark.asyncio
+    @patch("flexllm.cli.config.get_config")
+    async def test_config_params_merged_in_chat_completions(self, mock_get_config):
+        """chat_completions 中配置参数作为默认值合并"""
+        mock_get_config.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config()
+
+        with patch.object(
+            client._single_client, "chat_completions", new_callable=AsyncMock
+        ) as mock_chat:
+            mock_chat.return_value = "response"
+            await client.chat_completions(
+                [{"role": "user", "content": "你好"}],
+                temperature=0.9,  # 显式传入覆盖配置的 0.7
+            )
+            call_kwargs = mock_chat.call_args[1]
+            assert call_kwargs["temperature"] == 0.9  # 用户显式传入的优先
+            assert call_kwargs["max_tokens"] == 1024  # 配置中的默认值
+
+    @pytest.mark.asyncio
+    @patch("flexllm.cli.config.get_config")
+    async def test_config_system_injected(self, mock_get_config):
+        """messages 中没有 system 时自动注入配置的 system prompt"""
+        mock_get_config.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config()
+
+        with patch.object(
+            client._single_client, "chat_completions", new_callable=AsyncMock
+        ) as mock_chat:
+            mock_chat.return_value = "response"
+            await client.chat_completions([{"role": "user", "content": "你好"}])
+            call_args = mock_chat.call_args
+            messages = call_args[1]["messages"]
+            assert messages[0]["role"] == "system"
+            assert messages[0]["content"] == "你是一个有用的助手"
+            assert messages[1]["role"] == "user"
+
+    @pytest.mark.asyncio
+    @patch("flexllm.cli.config.get_config")
+    async def test_config_system_not_injected_when_present(self, mock_get_config):
+        """messages 中已有 system 时不注入"""
+        mock_get_config.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config()
+
+        with patch.object(
+            client._single_client, "chat_completions", new_callable=AsyncMock
+        ) as mock_chat:
+            mock_chat.return_value = "response"
+            await client.chat_completions(
+                [
+                    {"role": "system", "content": "自定义 system"},
+                    {"role": "user", "content": "你好"},
+                ]
+            )
+            call_args = mock_chat.call_args
+            messages = call_args[1]["messages"]
+            assert messages[0]["content"] == "自定义 system"
+            assert len([m for m in messages if m["role"] == "system"]) == 1
+
+    def test_default_config_attrs_on_normal_init(self):
+        """正常 __init__ 创建的实例 _config_system 和 _config_params 为空"""
+        pool = LLMClientPool(
+            base_url="http://api.example.com/v1",
+            api_key="key",
+            model="test",
+        )
+        assert pool._config_system is None
+        assert pool._config_params == {}

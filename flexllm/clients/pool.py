@@ -147,6 +147,10 @@ class LLMClientPool:
             cache: 响应缓存配置
             **kwargs: 其他传递给底层客户端的参数
         """
+        # from_config() 使用的配置属性
+        self._config_system: str | None = None
+        self._config_params: dict = {}
+
         # 判断是单 endpoint 还是多 endpoint 模式
         # 单模式：提供了 base_url，或者 provider 是 gemini/claude（它们不需要 base_url）
         # 多模式：提供了 endpoints 或 clients
@@ -218,6 +222,80 @@ class LLMClientPool:
                 cache=cache,
                 **kwargs,
             )
+
+    @classmethod
+    def from_config(
+        cls,
+        model: str = None,
+        **overrides,
+    ) -> "LLMClientPool":
+        """从 ~/.flexllm/config.yaml 配置文件创建客户端
+
+        Args:
+            model: 模型 name 或 id，None 则用配置文件中的默认模型
+            **overrides: 覆盖配置中的参数（base_url, api_key, concurrency_limit 等）
+
+        Returns:
+            配置好的 LLMClientPool 实例
+
+        Example:
+            # 使用默认模型
+            client = LLMClient.from_config()
+
+            # 指定模型
+            client = LLMClient.from_config("qwen-plus")
+
+            # 覆盖参数
+            client = LLMClient.from_config("qwen-plus", concurrency_limit=50)
+        """
+        from ..cli.config import get_config
+
+        config = get_config()
+        model_config = config.get_model_config(model)
+        if not model_config:
+            raise ValueError(
+                f"未找到模型配置: {model or '(默认)'}，"
+                "请检查 ~/.flexllm/config.yaml 或设置环境变量 FLEXLLM_BASE_URL"
+            )
+
+        # 构造 LLMClientPool 的参数
+        init_kwargs = {
+            "model": model_config.get("id"),
+            "base_url": model_config.get("base_url"),
+            "api_key": model_config.get("api_key", "EMPTY"),
+        }
+        if "provider" in model_config:
+            init_kwargs["provider"] = model_config["provider"]
+
+        # overrides 覆盖配置值
+        init_kwargs.update(overrides)
+
+        instance = cls(**init_kwargs)
+
+        # 设置配置中的 system prompt 和模型参数
+        resolved_name = model or config.config.get("default")
+        instance._config_system = config.get_system(resolved_name)
+        instance._config_params = config.get_model_params(resolved_name)
+
+        return instance
+
+    def _merge_config_params(self, kwargs: dict) -> dict:
+        """合并 from_config() 的配置参数，用户显式传入的优先"""
+        if self._config_params:
+            return {**self._config_params, **kwargs}
+        return kwargs
+
+    def _inject_config_system(self, messages: list[dict]) -> list[dict]:
+        """注入 from_config() 的 system prompt（messages 中没有 system 时）"""
+        if self._config_system and not any(m.get("role") == "system" for m in messages):
+            return [{"role": "system", "content": self._config_system}] + messages
+        return messages
+
+    def _inject_config_system_batch(self, messages_list: list[list[dict]]) -> list[list[dict]]:
+        """批量版本的 system prompt 注入"""
+        if not self._config_system:
+            return messages_list
+        return [self._inject_config_system(msgs) for msgs in messages_list]
 
     @staticmethod
     def _infer_provider(base_url: str, use_vertex_ai: bool) -> str:
@@ -514,6 +592,9 @@ class LLMClientPool:
         Returns:
             与 LLMClient.chat_completions 返回值一致
         """
+        kwargs = self._merge_config_params(kwargs)
+        messages = self._inject_config_system(messages)
+
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
             return await self._single_client.chat_completions(
@@ -583,6 +664,9 @@ class LLMClientPool:
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """同步版本的聊天完成"""
+        kwargs = self._merge_config_params(kwargs)
+        messages = self._inject_config_system(messages)
+
         # 单 endpoint 模式：使用底层客户端的 sync 方法
         if self._mode == "single":
             return self._single_client.chat_completions_sync(
@@ -644,6 +728,9 @@ class LLMClientPool:
         Returns:
             与 LLMClient.chat_completions_batch 返回值一致
         """
+        kwargs = self._merge_config_params(kwargs)
+        messages_list = self._inject_config_system_batch(messages_list)
+
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
             return await self._single_client.chat_completions_batch(
@@ -1088,6 +1175,9 @@ class LLMClientPool:
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
+        kwargs = self._merge_config_params(kwargs)
+        messages_list = self._inject_config_system_batch(messages_list)
+
         # 单 endpoint 模式：使用底层客户端的 sync 方法
         if self._mode == "single":
             return self._single_client.chat_completions_batch_sync(
@@ -1149,6 +1239,9 @@ class LLMClientPool:
         Yields:
             与 LLMClient.chat_completions_stream 一致
         """
+        kwargs = self._merge_config_params(kwargs)
+        messages = self._inject_config_system(messages)
+
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
             async for chunk in self._single_client.chat_completions_stream(
