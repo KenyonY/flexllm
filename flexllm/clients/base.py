@@ -321,6 +321,7 @@ class LLMClientBase(ABC):
                     self._cost_tracker.record(usage, effective_model)
                 return ChatCompletionResult(content=content, usage=usage, tool_calls=tool_calls)
             return content
+        logger.warning("chat_completions 请求失败: %s, 返回 RequestResult 而非 str", data.data)
         return data
 
     async def chat_completions_or_raise(
