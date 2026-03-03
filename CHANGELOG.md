@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.1] - 2026-03-03
+
+### Features
+
+- **client**: Add LLMClient.from_config() factory method
+
+### Miscellaneous
+
+- Bump version to 0.7.1
+
 ## [0.7.0] - 2026-02-25
 
 ### Features
