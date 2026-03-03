@@ -366,7 +366,7 @@ class TestFromConfig:
         """指定模型名称"""
         mock_get_config.return_value = self._mock_config()
 
-        client = LLMClientPool.from_config("qwen-plus")
+        client = LLMClientPool.from_config(model="qwen-plus")
         mock_get_config.return_value.get_model_config.assert_called_with("qwen-plus")
 
     @patch("flexllm.cli.config.get_config")
@@ -374,7 +374,7 @@ class TestFromConfig:
         """overrides 覆盖配置"""
         mock_get_config.return_value = self._mock_config()
 
-        client = LLMClientPool.from_config("qwen-plus", concurrency_limit=50)
+        client = LLMClientPool.from_config(model="qwen-plus", concurrency_limit=50)
         assert client._single_client._concurrency_limit == 50
 
     @patch("flexllm.cli.config.get_config")
@@ -385,7 +385,7 @@ class TestFromConfig:
         mock_get_config.return_value = config
 
         with pytest.raises(ValueError, match="未找到模型配置"):
-            LLMClientPool.from_config("nonexistent")
+            LLMClientPool.from_config(model="nonexistent")
 
     @patch("flexllm.cli.config.get_config")
     def test_from_config_no_system(self, mock_get_config):
@@ -409,7 +409,7 @@ class TestFromConfig:
         }
         mock_get_config.return_value = config
 
-        client = LLMClientPool.from_config("claude-3")
+        client = LLMClientPool.from_config(model="claude-3")
         assert client._provider == "claude"
 
     @pytest.mark.asyncio
@@ -545,6 +545,14 @@ class TestFromConfig:
             assert messages_list[0][0]["role"] == "system"
             assert messages_list[0][1]["content"] == "问题1"
             assert messages_list[1][1]["content"] == "问题2"
+
+    @patch("flexllm.cli.config.FlexLLMConfig")
+    def test_from_config_with_custom_path(self, mock_cls):
+        """指定配置文件路径"""
+        mock_cls.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config("/path/to/config.yaml", model="qwen-plus")
+        mock_cls.assert_called_once_with("/path/to/config.yaml")
 
     def test_default_config_attrs_on_normal_init(self):
         """正常 __init__ 创建的实例 _config_system 和 _config_params 为空"""

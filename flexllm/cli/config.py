@@ -17,16 +17,18 @@ class FlexLLMConfig:
         Path("~/.flexllm/config.yaml").expanduser(),
     ]
 
-    def __init__(self):
+    def __init__(self, config_path: str | Path = None):
         from dotenv import load_dotenv
 
         load_dotenv()
+        self._config_path = Path(config_path) if config_path else None
         self.config = self._load_config()
 
     def _load_config(self) -> dict:
         """加载配置文件"""
-        # 尝试从配置文件加载
-        for path in self.CONFIG_PATHS:
+        # 优先使用指定的配置文件路径
+        paths = [self._config_path] if self._config_path else self.CONFIG_PATHS
+        for path in paths:
             if path.exists():
                 try:
                     import yaml

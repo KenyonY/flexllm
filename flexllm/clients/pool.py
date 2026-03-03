@@ -227,12 +227,15 @@ class LLMClientPool:
     @classmethod
     def from_config(
         cls,
+        config: str = None,
+        *,
         model: str = None,
         **overrides,
     ) -> "LLMClientPool":
-        """从 ~/.flexllm/config.yaml 配置文件创建客户端
+        """从配置文件创建客户端
 
         Args:
+            config: 配置文件路径，None 则按默认路径搜索
             model: 模型 name 或 id，None 则用配置文件中的默认模型
             **overrides: 覆盖配置中的参数（base_url, api_key, concurrency_limit 等）
 
@@ -240,19 +243,22 @@ class LLMClientPool:
             配置好的 LLMClientPool 实例
 
         Example:
-            # 使用默认模型
+            # 默认配置文件 + 默认模型
             client = LLMClient.from_config()
 
-            # 指定模型
-            client = LLMClient.from_config("qwen-plus")
+            # 指定配置文件
+            client = LLMClient.from_config("path/to/config.yaml")
 
-            # 覆盖参数
-            client = LLMClient.from_config("qwen-plus", concurrency_limit=50)
+            # 默认配置文件 + 指定模型
+            client = LLMClient.from_config(model="qwen-plus")
+
+            # 指定配置文件 + 指定模型
+            client = LLMClient.from_config("path/to/config.yaml", model="qwen-plus")
         """
-        from ..cli.config import get_config
+        from ..cli.config import FlexLLMConfig, get_config
 
-        config = get_config()
-        model_config = config.get_model_config(model)
+        cfg = FlexLLMConfig(config) if config else get_config()
+        model_config = cfg.get_model_config(model)
         if not model_config:
             raise ValueError(
                 f"未找到模型配置: {model or '(默认)'}，"
@@ -274,10 +280,10 @@ class LLMClientPool:
         instance = cls(**init_kwargs)
 
         # 设置配置中的 system prompt、user_template 和模型参数
-        resolved_name = model or config.config.get("default")
-        instance._config_system = config.get_system(resolved_name)
-        instance._config_user_template = config.get_user_template(resolved_name)
-        instance._config_params = config.get_model_params(resolved_name)
+        resolved_name = model or cfg.config.get("default")
+        instance._config_system = cfg.get_system(resolved_name)
+        instance._config_user_template = cfg.get_user_template(resolved_name)
+        instance._config_params = cfg.get_model_params(resolved_name)
 
         return instance
 
