@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.3] - 2026-03-03
+
+### Features
+
+- **client**: From_config 第一个参数改为配置文件路径，model 改为 keyword-only
+
+### Miscellaneous
+
+- Bump version to 0.7.3
+
 ## [0.7.2] - 2026-03-03
 
 ### Features
