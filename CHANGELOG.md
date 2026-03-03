@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.7.2] - 2026-03-03
+
+### Features
+
+- **client**: From_config 支持字符串输入、user_template 和 .env
+
+### Miscellaneous
+
+- Bump version to 0.7.2
+
 ## [0.7.1] - 2026-03-03
 
 ### Features
@@ -9,6 +19,10 @@
 ### Miscellaneous
 
 - Bump version to 0.7.1
+
+### Refactor
+
+- 移除 MCP Server 模块（LLM 套 LLM 价值有限）
 
 ## [0.7.0] - 2026-02-25
 
