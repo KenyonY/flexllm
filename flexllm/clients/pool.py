@@ -150,6 +150,7 @@ class LLMClientPool:
         # from_config() 使用的配置属性
         self._config_system: str | None = None
         self._config_params: dict = {}
+        self._config_user_template: str | None = None
 
         # 判断是单 endpoint 还是多 endpoint 模式
         # 单模式：提供了 base_url，或者 provider 是 gemini/claude（它们不需要 base_url）
@@ -272,9 +273,10 @@ class LLMClientPool:
 
         instance = cls(**init_kwargs)
 
-        # 设置配置中的 system prompt 和模型参数
+        # 设置配置中的 system prompt、user_template 和模型参数
         resolved_name = model or config.config.get("default")
         instance._config_system = config.get_system(resolved_name)
+        instance._config_user_template = config.get_user_template(resolved_name)
         instance._config_params = config.get_model_params(resolved_name)
 
         return instance
@@ -285,17 +287,28 @@ class LLMClientPool:
             return {**self._config_params, **kwargs}
         return kwargs
 
-    def _inject_config_system(self, messages: list[dict]) -> list[dict]:
-        """注入 from_config() 的 system prompt（messages 中没有 system 时）"""
+    def _prepare_messages(self, messages: str | list[dict]) -> list[dict]:
+        """准备 messages：字符串转换 + user_template + system 注入
+
+        支持字符串快捷方式：
+            client.chat_completions("你好")
+            等价于 client.chat_completions([{"role": "user", "content": "你好"}])
+        """
+        if isinstance(messages, str):
+            content = messages
+            if self._config_user_template:
+                content = self._config_user_template.format(content=content)
+            messages = [{"role": "user", "content": content}]
+
+        # 注入 system prompt（messages 中没有 system 时）
         if self._config_system and not any(m.get("role") == "system" for m in messages):
-            return [{"role": "system", "content": self._config_system}] + messages
+            messages = [{"role": "system", "content": self._config_system}] + messages
+
         return messages
 
-    def _inject_config_system_batch(self, messages_list: list[list[dict]]) -> list[list[dict]]:
-        """批量版本的 system prompt 注入"""
-        if not self._config_system:
-            return messages_list
-        return [self._inject_config_system(msgs) for msgs in messages_list]
+    def _prepare_messages_batch(self, messages_list: list[str | list[dict]]) -> list[list[dict]]:
+        """批量版本的 _prepare_messages"""
+        return [self._prepare_messages(msgs) for msgs in messages_list]
 
     @staticmethod
     def _infer_provider(base_url: str, use_vertex_ai: bool) -> str:
@@ -569,7 +582,7 @@ class LLMClientPool:
 
     async def chat_completions(
         self,
-        messages: list[dict],
+        messages: str | list[dict],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
@@ -593,7 +606,7 @@ class LLMClientPool:
             与 LLMClient.chat_completions 返回值一致
         """
         kwargs = self._merge_config_params(kwargs)
-        messages = self._inject_config_system(messages)
+        messages = self._prepare_messages(messages)
 
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
@@ -657,7 +670,7 @@ class LLMClientPool:
 
     def chat_completions_sync(
         self,
-        messages: list[dict],
+        messages: str | list[dict],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
@@ -665,7 +678,7 @@ class LLMClientPool:
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """同步版本的聊天完成"""
         kwargs = self._merge_config_params(kwargs)
-        messages = self._inject_config_system(messages)
+        messages = self._prepare_messages(messages)
 
         # 单 endpoint 模式：使用底层客户端的 sync 方法
         if self._mode == "single":
@@ -690,7 +703,7 @@ class LLMClientPool:
 
     async def chat_completions_batch(
         self,
-        messages_list: list[list[dict]],
+        messages_list: list[str | list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
@@ -729,7 +742,7 @@ class LLMClientPool:
             与 LLMClient.chat_completions_batch 返回值一致
         """
         kwargs = self._merge_config_params(kwargs)
-        messages_list = self._inject_config_system_batch(messages_list)
+        messages_list = self._prepare_messages_batch(messages_list)
 
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
@@ -1159,7 +1172,7 @@ class LLMClientPool:
 
     def chat_completions_batch_sync(
         self,
-        messages_list: list[list[dict]],
+        messages_list: list[str | list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
@@ -1176,7 +1189,7 @@ class LLMClientPool:
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
         kwargs = self._merge_config_params(kwargs)
-        messages_list = self._inject_config_system_batch(messages_list)
+        messages_list = self._prepare_messages_batch(messages_list)
 
         # 单 endpoint 模式：使用底层客户端的 sync 方法
         if self._mode == "single":
@@ -1218,7 +1231,7 @@ class LLMClientPool:
 
     async def chat_completions_stream(
         self,
-        messages: list[dict],
+        messages: str | list[dict],
         model: str = None,
         return_usage: bool = False,
         preprocess_msg: bool = False,
@@ -1240,7 +1253,7 @@ class LLMClientPool:
             与 LLMClient.chat_completions_stream 一致
         """
         kwargs = self._merge_config_params(kwargs)
-        messages = self._inject_config_system(messages)
+        messages = self._prepare_messages(messages)
 
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":

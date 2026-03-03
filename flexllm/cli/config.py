@@ -18,6 +18,9 @@ class FlexLLMConfig:
     ]
 
     def __init__(self):
+        from dotenv import load_dotenv
+
+        load_dotenv()
         self.config = self._load_config()
 
     def _load_config(self) -> dict:

@@ -34,5 +34,5 @@ CLAUDE.md
 # flexllm config files (exclude example files)
 flexllm_config.yaml
 config.yaml
-!config.example.yaml
-!config.quickstart.yaml
+!flexllm_config.example.yaml
+!flexllm_config.quickstart.yaml

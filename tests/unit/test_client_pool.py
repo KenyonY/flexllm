@@ -336,7 +336,7 @@ class TestClientPoolRepr:
 class TestFromConfig:
     """测试 from_config 工厂方法"""
 
-    def _mock_config(self):
+    def _mock_config(self, user_template=None):
         """构造 mock FlexLLMConfig"""
         config = MagicMock()
         config.config = {"default": "qwen-plus"}
@@ -347,6 +347,7 @@ class TestFromConfig:
             "api_key": "sk-test",
         }
         config.get_system.return_value = "你是一个有用的助手"
+        config.get_user_template.return_value = user_template
         config.get_model_params.return_value = {"temperature": 0.7, "max_tokens": 1024}
         return config
 
@@ -473,6 +474,78 @@ class TestFromConfig:
             assert messages[0]["content"] == "自定义 system"
             assert len([m for m in messages if m["role"] == "system"]) == 1
 
+    @pytest.mark.asyncio
+    @patch("flexllm.cli.config.get_config")
+    async def test_string_input_converted_to_messages(self, mock_get_config):
+        """字符串输入自动转换为 messages"""
+        mock_get_config.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config()
+
+        with patch.object(
+            client._single_client, "chat_completions", new_callable=AsyncMock
+        ) as mock_chat:
+            mock_chat.return_value = "response"
+            await client.chat_completions("你好")
+            messages = mock_chat.call_args[1]["messages"]
+            assert messages[0]["role"] == "system"
+            assert messages[0]["content"] == "你是一个有用的助手"
+            assert messages[1]["role"] == "user"
+            assert messages[1]["content"] == "你好"
+
+    @pytest.mark.asyncio
+    @patch("flexllm.cli.config.get_config")
+    async def test_string_input_with_user_template(self, mock_get_config):
+        """字符串输入 + user_template"""
+        mock_get_config.return_value = self._mock_config(user_template="{content}/detail")
+
+        client = LLMClientPool.from_config()
+
+        with patch.object(
+            client._single_client, "chat_completions", new_callable=AsyncMock
+        ) as mock_chat:
+            mock_chat.return_value = "response"
+            await client.chat_completions("分析代码")
+            messages = mock_chat.call_args[1]["messages"]
+            assert messages[1]["role"] == "user"
+            assert messages[1]["content"] == "分析代码/detail"
+
+    @pytest.mark.asyncio
+    @patch("flexllm.cli.config.get_config")
+    async def test_list_input_user_template_not_applied(self, mock_get_config):
+        """list[dict] 输入时不应用 user_template"""
+        mock_get_config.return_value = self._mock_config(user_template="{content}/detail")
+
+        client = LLMClientPool.from_config()
+
+        with patch.object(
+            client._single_client, "chat_completions", new_callable=AsyncMock
+        ) as mock_chat:
+            mock_chat.return_value = "response"
+            await client.chat_completions([{"role": "user", "content": "你好"}])
+            messages = mock_chat.call_args[1]["messages"]
+            # list[dict] 输入时 user_template 不生效，用户自己构建的 messages 应保持原样
+            assert messages[1]["content"] == "你好"
+
+    @pytest.mark.asyncio
+    @patch("flexllm.cli.config.get_config")
+    async def test_batch_string_input(self, mock_get_config):
+        """batch 方法支持字符串列表"""
+        mock_get_config.return_value = self._mock_config()
+
+        client = LLMClientPool.from_config()
+
+        with patch.object(
+            client._single_client, "chat_completions_batch", new_callable=AsyncMock
+        ) as mock_batch:
+            mock_batch.return_value = ["r1", "r2"]
+            await client.chat_completions_batch(["问题1", "问题2"], show_progress=False)
+            messages_list = mock_batch.call_args[1]["messages_list"]
+            assert len(messages_list) == 2
+            assert messages_list[0][0]["role"] == "system"
+            assert messages_list[0][1]["content"] == "问题1"
+            assert messages_list[1][1]["content"] == "问题2"
+
     def test_default_config_attrs_on_normal_init(self):
         """正常 __init__ 创建的实例 _config_system 和 _config_params 为空"""
         pool = LLMClientPool(
@@ -482,3 +555,4 @@ class TestFromConfig:
         )
         assert pool._config_system is None
         assert pool._config_params == {}
+        assert pool._config_user_template is None
