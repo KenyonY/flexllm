@@ -14,6 +14,7 @@ from .utils import (
     parse_batch_input,
     parse_thinking,
     query_credits,
+    query_credits_by_key,
     resolve_model_config,
 )
 
@@ -1165,6 +1166,7 @@ models:
     @app.command()
     def credits(
         model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        key: Annotated[str | None, Option("-k", "--key", help="直接指定 API Key")] = None,
     ):
         """查询 API Key 余额
 
@@ -1172,9 +1174,29 @@ models:
           - OpenRouter, SiliconFlow, DeepSeek, AI/ML API, OpenAI
 
         Examples:
-            flexllm credits                # 查询默认模型的 key 余额
-            flexllm credits -m grok-4      # 查询指定模型的 key 余额
+            flexllm credits                        # 查询默认模型的 key 余额
+            flexllm credits -m grok-4              # 查询指定模型的 key 余额
+            flexllm credits -k sk-or-v1-xxx...     # 直接查询指定 key 的余额
         """
+        if key:
+            result = query_credits_by_key(key)
+
+            if result is None:
+                print("错误: 无法识别此 API Key 对应的 provider", file=sys.stderr)
+                raise typer.Exit(1)
+
+            if "error" in result:
+                print(f"错误: {result['error']}", file=sys.stderr)
+                raise typer.Exit(1)
+
+            print(f"\n{result['provider']} 账户余额")
+            print(f"API Key: {key[:15]}...{key[-4:]}")
+            print("-" * 40)
+
+            for k, value in result["data"].items():
+                print(f"  {k}: {value}")
+            return
+
         config = get_config()
         model_config = config.get_model_config(model)
 
@@ -1207,8 +1229,8 @@ models:
         print(f"API Key: {api_key[:15]}...{api_key[-4:]}")
         print("-" * 40)
 
-        for key, value in result["data"].items():
-            print(f"  {key}: {value}")
+        for k, value in result["data"].items():
+            print(f"  {k}: {value}")
 
     @app.command()
     def mock(

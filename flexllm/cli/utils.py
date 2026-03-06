@@ -222,6 +222,48 @@ def parse_thinking(value: str | None) -> bool | str | int | None:
         raise SystemExit(1)
 
 
+def _detect_provider_from_key(api_key: str) -> str | None:
+    """根据 API Key 前缀推断 provider 的 base_url"""
+    prefix_map = {
+        "sk-or-v1-": "https://openrouter.ai/api/v1",
+        "sk-ant-": "https://api.anthropic.com",
+    }
+    for prefix, base_url in prefix_map.items():
+        if api_key.startswith(prefix):
+            return base_url
+    return None
+
+
+# 所有支持余额查询的 provider base_url（用于逐个尝试）
+_CREDIT_PROVIDER_URLS = [
+    "https://openrouter.ai/api/v1",
+    "https://api.siliconflow.cn/v1",
+    "https://api.deepseek.com",
+    "https://aimlapi.com/v1",
+    "https://api.openai.com/v1",
+]
+
+
+def query_credits_by_key(api_key: str) -> dict | None:
+    """直接通过 API Key 查询余额，自动检测 provider"""
+    # 先尝试根据 key 前缀检测
+    detected_url = _detect_provider_from_key(api_key)
+    if detected_url:
+        result = query_credits(detected_url, api_key)
+        if result is not None and "error" not in result:
+            return result
+
+    # 逐个尝试所有 provider
+    for base_url in _CREDIT_PROVIDER_URLS:
+        if base_url == detected_url:
+            continue
+        result = query_credits(base_url, api_key)
+        if result is not None and "error" not in result:
+            return result
+
+    return None
+
+
 def query_credits(base_url: str, api_key: str) -> dict | None:
     """查询 API Key 余额"""
     import requests
