@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0] - 2026-03-07
+
+### Bug Fixes
+
+- **client**: Chat_completions 请求失败时打印 warning 日志
+
+### Features
+
+- **agent**: 流式输出、上下文压缩、编辑增强、项目指令、Skills、MCP 配置
+- **cli**: Credits 命令支持直接通过 -k/--key 查询 API Key 余额
+
 ## [0.7.3] - 2026-03-03
 
 ### Features
