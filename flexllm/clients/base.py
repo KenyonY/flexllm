@@ -191,6 +191,16 @@ class LLMClientBase(ABC):
         """从流式响应中提取思考内容，子类按需重写"""
         return None
 
+    def _extract_stream_tool_calls(self, data: dict) -> list[dict] | None:
+        """从流式 chunk 中提取 tool_call delta，子类可覆盖
+
+        Returns:
+            tool_call delta 列表或 None
+            每个 delta 格式: {"index": 0, "id": "...", "type": "function",
+                             "function": {"name": "...", "arguments": "..."}}
+        """
+        return None
+
     def _extract_stream_usage(self, data: dict) -> dict | None:
         """从流式 chunk 中提取 usage 信息，子类可覆盖
 
@@ -970,6 +980,16 @@ class LLMClientBase(ABC):
                             if thinking:
                                 if return_usage:
                                     yield {"type": "thinking", "content": thinking}
+                                continue
+
+                            # 提取 tool_call delta
+                            tool_call_deltas = self._extract_stream_tool_calls(data)
+                            if tool_call_deltas:
+                                if return_usage:
+                                    yield {
+                                        "type": "tool_call_delta",
+                                        "tool_calls": tool_call_deltas,
+                                    }
                                 continue
 
                             content = self._extract_stream_content(data)

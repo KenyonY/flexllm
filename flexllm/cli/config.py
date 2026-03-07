@@ -188,6 +188,90 @@ class FlexLLMConfig:
                     return {k: v for k, v in m.items() if k not in self.META_FIELDS}
         return {}
 
+    def get_agent_config(self) -> dict:
+        """获取 agent 配置（合并全局 + 项目级）
+
+        全局配置 (~/.flexllm/config.yaml):
+            agent:
+              mcp_servers:
+                github:
+                  command: npx
+                  args: ["-y", "@mcp/server-github"]
+                  env:
+                    GITHUB_TOKEN: "xxx"
+                local:
+                  type: http
+                  url: "http://localhost:8080/sse"
+                  headers:
+                    Authorization: "Bearer xxx"
+
+        也支持简写（command 为完整命令字符串）:
+            agent:
+              mcp_servers:
+                github:
+                  command: "npx -y @mcp/server-github"
+
+        项目配置 (.flexllm/settings.yaml，从 cwd 向上搜索):
+            mcp_servers:
+              db:
+                command: npx
+                args: ["@mcp/server-postgres"]
+
+        合并规则：项目级覆盖全局同名 server。
+
+        Returns:
+            {"mcp_servers": [...]}  # 转换为 list[dict] 格式供 _connect_mcp_servers 使用
+        """
+        # 全局 agent 配置
+        agent_config = self.config.get("agent", {}) or {}
+        global_mcp = agent_config.get("mcp_servers", {}) or {}
+
+        # 项目级配置
+        project_settings = self._load_project_settings()
+        project_mcp = project_settings.get("mcp_servers", {}) or {}
+
+        # 合并：项目级覆盖全局
+        merged_mcp = {}
+        if isinstance(global_mcp, dict):
+            merged_mcp.update(global_mcp)
+        elif isinstance(global_mcp, list):
+            # 兼容旧的 list 格式
+            for i, item in enumerate(global_mcp):
+                name = item.get("name", f"server-{i}")
+                merged_mcp[name] = item
+        if isinstance(project_mcp, dict):
+            merged_mcp.update(project_mcp)
+        elif isinstance(project_mcp, list):
+            for i, item in enumerate(project_mcp):
+                name = item.get("name", f"project-server-{i}")
+                merged_mcp[name] = item
+
+        # 转换为 list[dict] 格式，name 字段来自 key
+        mcp_list = []
+        for name, spec in merged_mcp.items():
+            if isinstance(spec, dict):
+                entry = dict(spec)
+                entry.setdefault("name", name)
+                mcp_list.append(entry)
+
+        return {"mcp_servers": mcp_list}
+
+    @staticmethod
+    def _load_project_settings() -> dict:
+        """从 cwd 向上搜索 .flexllm/settings.yaml 项目配置"""
+        current = Path.cwd()
+        for parent in [current, *current.parents]:
+            candidate = parent / ".flexllm" / "settings.yaml"
+            if candidate.is_file():
+                try:
+                    import yaml
+
+                    with open(candidate, encoding="utf-8") as f:
+                        return yaml.safe_load(f) or {}
+                except Exception:
+                    return {}
+        return {}
+
     def get_batch_config(self) -> dict:
         """获取 batch 命令的配置（配置文件中的 batch 节 + 默认值）"""
         batch_config = self.config.get("batch", {}) or {}

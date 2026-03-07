@@ -107,9 +107,22 @@ class AgentConsole:
             if preview:
                 self._console.print(f"    [dim green]{preview}[/]")
 
+    def on_llm_token(self, token: str):
+        """流式 token 实时输出"""
+        mode = self.mode
+        if mode == "quiet":
+            return
+        self._console.print(token, end="", highlight=False)
+        self._streaming = True
+
     def on_llm_response(self, response):
         mode = self.mode
         self._round += 1
+        # 流式模式下，token 已经输出过了，换行结束
+        if getattr(self, "_streaming", False):
+            self._console.print()
+            self._streaming = False
+            return
 
         if mode == "verbose":
             self._console.print(Rule(f" Round {self._round} ", style="bold blue"))

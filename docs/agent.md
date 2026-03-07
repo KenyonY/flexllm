@@ -13,19 +13,19 @@ v0.6.0 新增。将 flexllm 从 LLM 客户端工具升级为 Agent 基础设施�
 +-----------------------------------------------------------------------------+
 |                           flexllm Agent 层                                   |
 |                                                                              |
-|  +----------+  +-----------+                                                 |
-|  | MCP Client|  | Agent HTTP|                                                |
-|  | (消费工具) |  | Serve     |                                               |
-|  +-----+----+  +-----+-----+                                                |
-|        |              |                                                      |
-|        v              v                                                      |
+|  +----------+  +-----------+  +------------+  +---------+                   |
+|  | MCP Client|  | Agent HTTP|  | Project Inst|  | Skills  |                  |
+|  | (消费工具) |  | Serve     |  | (.flexllm.md)|  |         |                 |
+|  +-----+----+  +-----+-----+  +------+-----+  +----+----+                  |
+|        |              |               |              |                       |
+|        v              v               v              v                       |
 |  +----------------------------------------------------------------+          |
 |  |                    AgentClient (核心)                            |          |
 |  |  tool-use 循环 | ToolRegistry | 审批机制 | Structured Output    |          |
 |  +-----+----------------------------------------------------------+          |
 |        |                                                                      |
 |  +-----+----------------------------------------------------------+          |
-|  | Memory  |  Tracing  |  Validators                               |          |
+|  | Memory  |  Tracing  |  Validators  |  Context Compression       |          |
 |  +-----+----------------------------------------------------------+          |
 |        |                                                                      |
 |  +-----+----------------------------------------------------------+          |
@@ -45,7 +45,112 @@ pip install flexllm[all]      # 全部功能
 
 ---
 
-## 1. ToolRegistry — 动态工具注册
+## 1. 项目指令 (.flexllm.md)
+
+在项目根目录放置 `.flexllm.md` 文件，agent 启动时自动加载到 system prompt 中，为 agent 提供项目上下文。
+
+### 用法
+
+在项目根目录创建 `.flexllm.md`：
+
+```markdown
+这是 flexllm 项目，一个高性能 LLM 客户端库。
+
+代码规范：
+- Python 3.10+，使用 ruff 格式化
+- 用中文写注释
+- 遵循 KISS 原则
+
+项目结构：
+- flexllm/clients/ — LLM 客户端实现
+- flexllm/agent/ — Agent 模块
+- tests/unit/ — 单元测试
+```
+
+agent 启动时会从当前目录向上搜索，找到第一个 `.flexllm.md` 即加载。子目录中运行时也能自动找到父目录的配置。
+
+### 效果
+
+项目指令会以 `# Project Instructions` 追加到 system prompt 中：
+
+```
+[基础 system prompt]
+
+# Project Instructions
+
+[.flexllm.md 内容]
+```
+
+---
+
+## 2. Skills — 可复用 Prompt 模板
+
+将常用的 prompt 模板保存为 skill 文件，通过 `--skill` 参数快速加载。
+
+### Skill 格式
+
+与 Claude Code 的 skill 格式一致，使用 YAML frontmatter + Markdown 正文：
+
+```
+~/.flexllm/skills/
+├── code-review/
+│   └── SKILL.md          # 目录模式（推荐）
+├── translate.md           # 扁平模式（也支持）
+```
+
+### 创建 Skill
+
+```bash
+mkdir -p ~/.flexllm/skills/code-review
+
+cat > ~/.flexllm/skills/code-review/SKILL.md << 'EOF'
+---
+name: code-review
+description: 代码审核。审查代码质量、检查最佳实践、发现潜在问题。
+---
+
+你是一位资深代码审查专家。审查代码时请关注：
+
+1. **安全性**：SQL注入、XSS、命令注入等安全漏洞
+2. **性能**：不必要的循环、内存泄漏、N+1 查询
+3. **可读性**：命名规范、函数长度、注释质量
+
+输出格式：按严重程度分类（Critical / Warning / Suggestion），给出具体行号和修改建议。
+EOF
+```
+
+### Frontmatter 字段
+
+| 字段 | 说明 |
+|------|------|
+| `name` | skill 名称 |
+| `description` | skill 描述（用于展示） |
+
+### 使用
+
+```bash
+# agent 模式
+flexllm agent --tools code --skill code-review "审查 main.py"
+
+# 交互式对话
+flexllm chat --tools code --skill code-review
+```
+
+skill 内容会以 `# Skill: {name}` 追加到 system prompt 中，与项目指令叠加：
+
+```
+[基础 system prompt]
+
+# Project Instructions
+[.flexllm.md 内容]
+
+# Skill: code-review
+[skill 正文内容]
+```
+
+---
+
+## 3. ToolRegistry — 动态工具注册
 
 运行时动态管理工具集，是 MCP 集成和自定义工具的基础。
 
@@ -105,14 +210,53 @@ agent = AgentClient(client=client, tool_registry=registry)
 
 ---
 
-## 2. MCP Client — 连接外部工具生态
+## 4. MCP Client — 连接外部工具生态
 
 连接任意 MCP server，让 agent 能调用 GitHub、数据库、浏览器等外部工具。
+
+### 配置文件方式（推荐）
+
+在全局或项目配置中声明 MCP servers，agent 启动时自动连接，无需每次手动输入 `--mcp`。
+
+**全局配置** `~/.flexllm/config.yaml`：
+
+```yaml
+agent:
+  mcp_servers:
+    # command + args 分开（Claude Code 风格，推荐）
+    github:
+      command: npx
+      args: ["-y", "@mcp/server-github"]
+      env:
+        GITHUB_TOKEN: "ghp_xxxx"
+    # command 完整字符串（简写）
+    filesystem:
+      command: "npx @modelcontextprotocol/server-filesystem /home/user"
+    # HTTP/SSE 模式
+    remote:
+      url: "http://localhost:8080/sse"
+```
+
+**项目配置** `.flexllm/settings.yaml`（从 cwd 向上搜索）：
+
+```yaml
+mcp_servers:
+  project-db:
+    command: npx
+    args: ["@mcp/server-postgres"]
+    env:
+      DATABASE_URL: "postgres://localhost/mydb"
+```
+
+合并规则：项目级覆盖全局同名 server，CLI `--mcp` 追加在最后。
 
 ### CLI
 
 ```bash
-# 连接单个 MCP server
+# 使用配置文件中的 MCP servers（自动连接）
+flexllm agent --tools code "查看最近的 PR"
+
+# 临时添加 MCP server（与配置文件合并）
 flexllm agent --mcp "npx @mcp/server-github" --tools code "查看最近的 PR"
 
 # 连接多个 MCP server
@@ -156,7 +300,7 @@ async with MCPConnection(command="npx @mcp/server-github") as github, \
 
 ---
 
-## 3. Agent HTTP 服务
+## 5. Agent HTTP 服务
 
 通过 HTTP API 暴露 agent 能力，让其他系统/agent 直接调用。
 
@@ -228,7 +372,7 @@ curl -X POST http://localhost:8000/api/agent/chat \
 
 ---
 
-## 4. 持久化记忆
+## 6. 持久化记忆
 
 Agent 跨 session 保留对话历史和知识事实。基于 flaxkv2 存储。
 
@@ -269,7 +413,7 @@ value = store.get_fact("user_preference")
 
 ---
 
-## 5. 结构化可观测性 (Tracing)
+## 7. 结构化可观测性 (Tracing)
 
 追踪 agent 执行过程中每一步的耗时和 token 消耗。
 
@@ -312,7 +456,7 @@ Total: 2 rounds, 1650 tokens
 
 ---
 
-## 6. Human-in-the-loop — 操作审批
+## 8. Human-in-the-loop — 操作审批
 
 危险操作（写文件、执行命令）前要求确认。
 
@@ -371,10 +515,49 @@ agent = AgentClient(
     tools=tool_defs,                # OpenAI 格式工具定义（旧接口）
     tool_executor=my_fn,            # 工具执行函数（旧接口）
     max_rounds=10,                  # 最大 tool-use 轮数
-    max_context_tokens=8000,        # 上下文窗口限制
+    max_context_tokens=8000,        # 上下文窗口限制（智能压缩）
+    max_tool_result_chars=10000,    # 单个工具输出最大字符数
     approval_handler=console_approval,  # 操作审批
     trace_exporter=ConsoleExporter(),   # 可观测性
     memory=store,                   # 持久化记忆
     session_id="my-session",        # 会话 ID
+    enable_subagent=True,           # 启用子代理（task 工具）
 )
+
+# 流式输出（通过 on_llm_token 回调实时输出）
+agent.on_llm_token = lambda token: print(token, end="", flush=True)
+result = await agent.run("分析代码", stream=True)
 ```
+
+## 配置文件结构
+
+```
+~/.flexllm/
+├── config.yaml                # 全局配置（模型、agent MCP servers）
+└── skills/                    # Skills 目录
+    ├── code-review/
+    │   └── SKILL.md           # 目录模式 skill
+    └── translate.md           # 扁平模式 skill
+
+项目根目录/
+├── .flexllm.md                # 项目指令（自动注入 system prompt）
+└── .flexllm/
+    └── settings.yaml          # 项目级配置（MCP servers 等）
+```
+
+### MCP servers 配置格式
+
+支持 Claude Code 风格的 `command` + `args` 分开格式：
+
+```yaml
+# ~/.flexllm/config.yaml
+agent:
+  mcp_servers:
+    github:
+      command: npx
+      args: ["-y", "@mcp/server-github"]
+      env:
+        GITHUB_TOKEN: "ghp_xxxx"
+```
+
+项目级 `.flexllm/settings.yaml` 中的同名 server 会覆盖全局配置。

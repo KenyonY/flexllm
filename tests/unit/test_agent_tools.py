@@ -173,6 +173,36 @@ class TestEditFile:
         assert "[error:" in result
         assert "not found" in result
 
+    def test_edit_fuzzy_trailing_whitespace(self, tmp_path):
+        """行尾空白差异时模糊匹配"""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def hello():  \n    pass\n")
+
+        # old_string 行尾没有空格，但文件中有
+        result = edit_file(str(test_file), "def hello():\n    pass", "def world():\n    pass")
+        assert "[edited:" in result
+        assert "fuzzy match" in result
+        assert "def world():" in test_file.read_text()
+
+    def test_edit_fuzzy_no_match_hint(self, tmp_path):
+        """完全不匹配时给出定位提示"""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("def hello():\n    print('hi')\n    return True\n")
+
+        result = edit_file(str(test_file), "def goodbye():\n    pass", "new")
+        assert "[error:" in result
+        assert "not found" in result
+        assert "hint:" in result
+
+    def test_edit_fuzzy_similar_hint(self, tmp_path):
+        """不匹配时显示相似行的行号"""
+        test_file = tmp_path / "test.py"
+        test_file.write_text("line1\ndef process_data():\n    pass\nline4\n")
+
+        result = edit_file(str(test_file), "def process_data(x):\n    pass", "new")
+        assert "hint:" in result
+        assert "line 2" in result  # 应该提示 process_data 在第 2 行
+
 
 class TestGlobFiles:
     """Glob 工具测试"""

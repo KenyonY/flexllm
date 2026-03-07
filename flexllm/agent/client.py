@@ -76,6 +76,7 @@ class AgentClient:
         tool_registry: ToolRegistry 实例（新接口，与 tools+tool_executor 二选一）
         max_rounds: 单次 run 最大 tool-calling 轮数
         max_context_tokens: 可选，上下文窗口限制（粗略按字符估算）
+        max_tool_result_chars: 单个工具输出最大字符数（超出截断），默认 10000
         approval_handler: 工具执行审批函数 (name, args, readonly) -> bool
         trace_exporter: Trace 导出器（可观测性）
         memory: MemoryStore 实例（持久化记忆）
@@ -91,6 +92,7 @@ class AgentClient:
         tool_registry: Any | None = None,
         max_rounds: int = 10,
         max_context_tokens: int | None = None,
+        max_tool_result_chars: int = 10000,
         approval_handler: Callable[[str, str, bool], bool] | None = None,
         trace_exporter: "TraceExporter | None" = None,
         memory: "MemoryStore | None" = None,
@@ -101,6 +103,7 @@ class AgentClient:
         self.system = system
         self.max_rounds = max_rounds
         self.max_context_tokens = max_context_tokens
+        self.max_tool_result_chars = max_tool_result_chars
         self.approval_handler = approval_handler
         self.trace_exporter = trace_exporter
         self.memory = memory
@@ -129,6 +132,7 @@ class AgentClient:
         self.on_tool_call: Callable[[str, str], Any] | None = None
         self.on_tool_result: Callable[[str, str], Any] | None = None
         self.on_llm_response: Callable[[Any], Any] | None = None
+        self.on_llm_token: Callable[[str], Any] | None = None  # 流式 token 回调
         self.on_validation: Callable[[list[str], list], Any] | None = None  # (files, results)
 
     @property
@@ -140,32 +144,39 @@ class AgentClient:
         """清空对话历史"""
         self._history.clear()
 
-    async def run(self, user_input: str, **kwargs) -> AgentResult:
+    async def run(self, user_input: str, stream: bool = False, **kwargs) -> AgentResult:
         """
         单次任务（无状态），执行 tool-use 循环直到 LLM 不再调用工具。
 
         Args:
             user_input: 用户输入
+            stream: 是否流式输出（通过 on_llm_token 回调逐 token 输出）
             **kwargs: 传递给 LLMClient.chat_completions 的额外参数
                       如果传入 response_format 为 Pydantic model，会自动转换为 JSON schema
         Returns:
             AgentResult
         """
         messages = self._build_messages(user_input)
+        if stream:
+            return await self._run_loop_stream(messages, **kwargs)
         return await self._run_loop(messages, **kwargs)
 
-    async def chat(self, user_input: str, **kwargs) -> AgentResult:
+    async def chat(self, user_input: str, stream: bool = False, **kwargs) -> AgentResult:
         """
         多轮对话（有状态），自动维护 messages 历史。
 
         Args:
             user_input: 用户输入
+            stream: 是否流式输出（通过 on_llm_token 回调逐 token 输出）
             **kwargs: 传递给 LLMClient.chat_completions 的额外参数
         Returns:
             AgentResult
         """
         messages = self._build_messages(user_input)
-        result = await self._run_loop(messages, **kwargs)
+        if stream:
+            result = await self._run_loop_stream(messages, **kwargs)
+        else:
+            result = await self._run_loop(messages, **kwargs)
 
         # 更新历史：添加本轮对话
         self._history.append({"role": "user", "content": user_input})
@@ -285,6 +296,9 @@ class AgentClient:
                 if self.on_tool_result:
                     self._fire_callback(self.on_tool_result, fn_name, output)
 
+                # 截断过大的工具输出
+                output = self._truncate_tool_output(output)
+
                 # 追加 tool result message
                 messages.append(
                     {
@@ -295,6 +309,10 @@ class AgentClient:
                 )
 
             rounds += 1
+
+            # 循环内上下文压缩
+            if self.max_context_tokens:
+                messages = self._compress_context(messages)
 
         # 导出 trace
         if self.trace_exporter and trace and root_span:
@@ -320,6 +338,139 @@ class AgentClient:
             parsed=parsed,
         )
 
+    async def _run_loop_stream(self, messages: list[dict], **kwargs) -> AgentResult:
+        """流式 tool-use 核心循环：通过 on_llm_token 回调实时输出 LLM 文本"""
+        rounds = 0
+        tool_history = []
+        total_usage = None
+
+        # 处理 structured output（流式模式下不支持，回退到非流式）
+        response_format = kwargs.pop("response_format", None)
+        if response_format is not None:
+            kwargs["response_format"] = response_format
+            return await self._run_loop(messages, **kwargs)
+
+        # 准备 tools 参数
+        call_kwargs = dict(kwargs)
+        if self.tools:
+            call_kwargs["tools"] = self.tools
+
+        last_content = None
+
+        while rounds < self.max_rounds:
+            result = await self._stream_llm_call(messages, **call_kwargs)
+
+            total_usage = _merge_usage(total_usage, result.usage)
+            last_content = result.content
+
+            # 触发 on_llm_response 回调（流式完成后）
+            if self.on_llm_response:
+                self._fire_callback(self.on_llm_response, result)
+
+            # 没有 tool_calls，结束循环
+            if not result.tool_calls:
+                break
+
+            # 追加 assistant message（含 tool_calls）
+            assistant_msg = self._build_assistant_msg(result)
+            messages.append(assistant_msg)
+
+            # 并行执行所有 tool calls
+            tool_calls_info = [
+                (tc, tc.function["name"], tc.function.get("arguments", "{}"))
+                for tc in result.tool_calls
+            ]
+
+            for tc, fn_name, fn_args in tool_calls_info:
+                if self.on_tool_call:
+                    self._fire_callback(self.on_tool_call, fn_name, fn_args)
+
+            if len(tool_calls_info) > 1:
+                tasks = [
+                    self._execute_tool(fn_name, fn_args) for _, fn_name, fn_args in tool_calls_info
+                ]
+                outputs = await asyncio.gather(*tasks)
+            else:
+                outputs = [await self._execute_tool(tool_calls_info[0][1], tool_calls_info[0][2])]
+
+            for (tc, fn_name, fn_args), output in zip(tool_calls_info, outputs):
+                tool_history.append(ToolCallRecord(name=fn_name, arguments=fn_args, result=output))
+
+                if self.on_tool_result:
+                    self._fire_callback(self.on_tool_result, fn_name, output)
+
+                output = self._truncate_tool_output(output)
+                messages.append({"role": "tool", "tool_call_id": tc.id, "content": output})
+
+            rounds += 1
+
+            if self.max_context_tokens:
+                messages = self._compress_context(messages)
+
+        return AgentResult(
+            content=last_content,
+            rounds=rounds,
+            tool_calls=tool_history,
+            usage=total_usage,
+        )
+
+    async def _stream_llm_call(self, messages: list[dict], **kwargs):
+        """流式调用 LLM，通过 on_llm_token 回调实时输出，返回完整 ChatCompletionResult。"""
+        from ..clients.base import ChatCompletionResult, ToolCall
+
+        full_content = ""
+        tool_calls_acc = {}  # {index: {id, type, name, arguments}}
+        usage = None
+
+        async for chunk in self.client.chat_completions_stream(
+            messages, return_usage=True, **kwargs
+        ):
+            if chunk["type"] == "content":
+                token = chunk["content"]
+                full_content += token
+                if self.on_llm_token:
+                    self._fire_callback(self.on_llm_token, token)
+            elif chunk["type"] == "tool_call_delta":
+                for tc_delta in chunk["tool_calls"]:
+                    idx = tc_delta.get("index", 0)
+                    if idx not in tool_calls_acc:
+                        tool_calls_acc[idx] = {
+                            "id": "",
+                            "type": "function",
+                            "name": "",
+                            "arguments": "",
+                        }
+                    acc = tool_calls_acc[idx]
+                    if tc_delta.get("id"):
+                        acc["id"] = tc_delta["id"]
+                    if tc_delta.get("type"):
+                        acc["type"] = tc_delta["type"]
+                    fn = tc_delta.get("function", {})
+                    if fn.get("name"):
+                        acc["name"] = fn["name"]
+                    if "arguments" in fn:
+                        acc["arguments"] += fn["arguments"]
+            elif chunk["type"] == "usage":
+                usage = chunk["usage"]
+
+        # 构建 tool_calls
+        tool_calls = None
+        if tool_calls_acc:
+            tool_calls = [
+                ToolCall(
+                    id=tc["id"],
+                    type=tc["type"],
+                    function={"name": tc["name"], "arguments": tc["arguments"]},
+                )
+                for _, tc in sorted(tool_calls_acc.items())
+            ]
+
+        return ChatCompletionResult(
+            content=full_content or None,
+            usage=usage,
+            tool_calls=tool_calls,
+        )
+
     def _build_messages(self, user_input: str) -> list[dict]:
         """构建 messages 列表（system + history + user_input）"""
         messages = []
@@ -329,29 +480,63 @@ class AgentClient:
         messages.append({"role": "user", "content": user_input})
 
         if self.max_context_tokens:
-            messages = self._truncate(messages)
+            messages = self._compress_context(messages)
 
         return messages
 
-    def _truncate(self, messages: list[dict]) -> list[dict]:
-        """上下文裁剪：保留 system + 尽可能多的最近消息"""
-        # 粗略估算：1 token ≈ 2 个字符（中英文混合场景的折中）
-        max_chars = self.max_context_tokens * 2
+    def _truncate_tool_output(self, output: str) -> str:
+        """截断过大的工具输出"""
+        if len(output) > self.max_tool_result_chars:
+            return (
+                output[: self.max_tool_result_chars]
+                + f"\n\n[truncated: showing {self.max_tool_result_chars} of {len(output)} chars]"
+            )
+        return output
+
+    def _compress_context(self, messages: list[dict]) -> list[dict]:
+        """智能上下文压缩：保留关键消息，压缩旧的工具输出。
+
+        策略：
+        1. 始终保留 system 消息
+        2. 保留第一条 user 消息（任务指令）
+        3. 对超出预算的旧消息中的 tool 结果做二次截断
+        4. 从后往前保留尽可能多的最近消息
+        """
+        # 粗略估算：1 token ≈ 3 个字符（考虑 JSON 序列化开销）
+        max_chars = self.max_context_tokens * 3
 
         system_msg = None
+        first_user_msg = None
         other_msgs = []
+
         for msg in messages:
             if msg["role"] == "system":
                 system_msg = msg
+            elif first_user_msg is None and msg["role"] == "user":
+                first_user_msg = msg
             else:
                 other_msgs.append(msg)
 
-        # system 消息始终保留
-        used_chars = len(json.dumps(system_msg, ensure_ascii=False)) if system_msg else 0
+        # 固定成本：system + 第一条 user
+        used_chars = 0
+        if system_msg:
+            used_chars += len(json.dumps(system_msg, ensure_ascii=False))
+        if first_user_msg:
+            used_chars += len(json.dumps(first_user_msg, ensure_ascii=False))
 
-        # 从后往前保留消息
+        # Phase 1: 对旧消息中的 tool 结果做激进截断（创建浅拷贝避免污染原始消息）
+        compressed_msgs = []
+        for msg in other_msgs:
+            if msg["role"] == "tool" and isinstance(msg.get("content"), str):
+                content = msg["content"]
+                if len(content) > 1500:
+                    msg = dict(msg)
+                    msg["content"] = content[:1500] + f"\n[compressed: {len(content)} chars total]"
+            compressed_msgs.append(msg)
+
+        # Phase 2: 从后往前保留消息
         kept = []
-        for msg in reversed(other_msgs):
+        for msg in reversed(compressed_msgs):
             msg_chars = len(json.dumps(msg, ensure_ascii=False))
             if used_chars + msg_chars > max_chars:
                 break
@@ -359,9 +544,13 @@ class AgentClient:
             used_chars += msg_chars
 
         kept.reverse()
+
+        # 构建结果
         result = []
         if system_msg:
             result.append(system_msg)
+        if first_user_msg and (not kept or kept[0] is not first_user_msg):
+            result.append(first_user_msg)
         result.extend(kept)
         return result
 

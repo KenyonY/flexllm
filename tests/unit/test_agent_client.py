@@ -331,12 +331,12 @@ class TestAgentChat:
         assert len(agent._history) == 0
 
 
-class TestContextTruncation:
-    """上下文裁剪测试"""
+class TestContextCompression:
+    """上下文压缩测试"""
 
     @pytest.mark.asyncio
-    async def test_truncate_long_history(self):
-        """超过 max_context_tokens 时裁剪旧消息"""
+    async def test_compress_long_history(self):
+        """超过 max_context_tokens 时压缩旧消息"""
         mock_client = AsyncMock()
         mock_client.chat_completions_or_raise = AsyncMock(
             return_value=ChatCompletionResult(content="ok", tool_calls=None)
@@ -360,8 +360,8 @@ class TestContextTruncation:
         # 应该只包含 system + 少量最近消息
         assert len(sent_messages) < 42  # 远少于 40 历史 + system + new
 
-    def test_truncate_preserves_system(self):
-        """裁剪时始终保留 system message"""
+    def test_compress_preserves_system(self):
+        """压缩时始终保留 system message"""
         agent = AgentClient(client=MagicMock(), system="important system", max_context_tokens=50)
         agent._history = [
             {"role": "user", "content": "a" * 200},
@@ -371,6 +371,47 @@ class TestContextTruncation:
         # system 必须存在
         assert messages[0]["role"] == "system"
         assert messages[0]["content"] == "important system"
+
+    def test_compress_preserves_first_user_msg(self):
+        """压缩时保留第一条 user 消息（任务指令）"""
+        agent = AgentClient(client=MagicMock(), system="sys", max_context_tokens=200)
+        agent._history = [
+            {"role": "user", "content": "initial task instruction"},
+            {"role": "assistant", "content": "ok " + "x" * 100},
+            {"role": "user", "content": "follow up " + "y" * 100},
+            {"role": "assistant", "content": "reply " + "z" * 100},
+        ]
+        messages = agent._build_messages("latest")
+        # system 和第一条 user 都应保留
+        assert messages[0]["role"] == "system"
+        assert any(m.get("content") == "initial task instruction" for m in messages)
+
+    def test_compress_truncates_tool_results(self):
+        """压缩时截断旧的 tool 结果"""
+        agent = AgentClient(client=MagicMock(), max_context_tokens=300)
+        messages = [
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "x" * 5000},
+            {"role": "assistant", "content": "thinking"},
+            {"role": "user", "content": "latest question"},
+        ]
+        compressed = agent._compress_context(messages)
+        # tool 结果应被截断
+        for msg in compressed:
+            if msg["role"] == "tool":
+                assert len(msg["content"]) < 5000
+
+    def test_truncate_tool_output(self):
+        """单个工具输出截断"""
+        agent = AgentClient(client=MagicMock(), max_tool_result_chars=100)
+        long_output = "x" * 500
+        truncated = agent._truncate_tool_output(long_output)
+        assert len(truncated) < 500
+        assert "[truncated:" in truncated
+        # 短输出不截断
+        short_output = "hello"
+        assert agent._truncate_tool_output(short_output) == "hello"
 
 
 class TestStructuredOutput:
@@ -529,6 +570,105 @@ class TestEventCallbacks:
         await agent.run("test")
         assert len(responses) == 1
         assert responses[0].content == "hello"
+
+
+class TestStreamingRun:
+    """流式 run 测试"""
+
+    @pytest.mark.asyncio
+    async def test_stream_simple_response(self):
+        """流式模式：LLM 直接返回内容，不调用工具"""
+        mock_client = AsyncMock()
+
+        async def mock_stream(messages, return_usage=False, **kwargs):
+            for token in ["你", "好", "！"]:
+                yield {"type": "content", "content": token}
+            yield {"type": "usage", "usage": {"prompt_tokens": 10, "completion_tokens": 3}}
+
+        mock_client.chat_completions_stream = mock_stream
+
+        tokens = []
+        agent = AgentClient(client=mock_client, system="你是助手")
+        agent.on_llm_token = lambda t: tokens.append(t)
+
+        result = await agent.run("你好", stream=True)
+
+        assert result.content == "你好！"
+        assert result.rounds == 0
+        assert tokens == ["你", "好", "！"]
+        assert result.usage["prompt_tokens"] == 10
+
+    @pytest.mark.asyncio
+    async def test_stream_with_tool_calls(self):
+        """流式模式：先输出 tool_call，执行工具后再输出最终结果"""
+        mock_client = AsyncMock()
+        call_count = 0
+
+        async def mock_stream(messages, return_usage=False, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # 第一轮：返回 tool_call delta
+                yield {
+                    "type": "tool_call_delta",
+                    "tool_calls": [
+                        {
+                            "index": 0,
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "bash", "arguments": ""},
+                        }
+                    ],
+                }
+                yield {
+                    "type": "tool_call_delta",
+                    "tool_calls": [
+                        {"index": 0, "function": {"arguments": '{"command":"echo hi"}'}}
+                    ],
+                }
+                yield {"type": "usage", "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+            else:
+                # 第二轮：返回最终内容
+                yield {"type": "content", "content": "done"}
+                yield {"type": "usage", "usage": {"prompt_tokens": 20, "completion_tokens": 2}}
+
+        mock_client.chat_completions_stream = mock_stream
+
+        agent = AgentClient(
+            client=mock_client,
+            tools=[{"type": "function", "function": {"name": "bash"}}],
+            tool_executor=lambda n, a: "hi",
+        )
+
+        result = await agent.run("test", stream=True)
+        assert result.content == "done"
+        assert result.rounds == 1
+        assert len(result.tool_calls) == 1
+        assert result.tool_calls[0].name == "bash"
+
+    @pytest.mark.asyncio
+    async def test_stream_fallback_for_structured_output(self):
+        """流式模式遇到 response_format 时回退到非流式"""
+        try:
+            from pydantic import BaseModel
+        except ImportError:
+            pytest.skip("pydantic not installed")
+
+        class MyModel(BaseModel):
+            name: str
+
+        mock_client = AsyncMock()
+        mock_client.chat_completions_or_raise = AsyncMock(
+            return_value=ChatCompletionResult(
+                content='{"name": "test"}',
+                tool_calls=None,
+            )
+        )
+
+        agent = AgentClient(client=mock_client)
+        result = await agent.run("test", stream=True, response_format=MyModel)
+        assert result.parsed is not None
+        assert result.parsed.name == "test"
 
 
 class TestDataTypes:

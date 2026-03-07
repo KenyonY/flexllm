@@ -126,6 +126,10 @@ def register_commands(app):
             list[str] | None,
             Option("--mcp", help="MCP server 命令或 URL（可多次指定，需搭配 --tools）"),
         ] = None,
+        skill: Annotated[
+            str | None,
+            Option("--skill", help="加载 skill 模板（~/.flexllm/skills/ 下的 .md 文件名）"),
+        ] = None,
     ):
         """交互式对话
 
@@ -136,6 +140,7 @@ def register_commands(app):
             flexllm chat --tools code         # 启用代码工具
             flexllm chat --tools code -v      # 详细模式
             flexllm chat --tools code --mcp "npx @mcp/server-github"
+            flexllm chat --tools code --skill code-review
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -160,6 +165,12 @@ def register_commands(app):
         stream = not no_stream
 
         if tools:
+            # 合并配置文件和 CLI 的 MCP servers
+            from .chat_helpers import _merge_mcp_servers
+
+            agent_config = config.get_agent_config()
+            merged_mcp = _merge_mcp_servers(mcp, agent_config["mcp_servers"])
+
             agent_chat(
                 model=model,
                 base_url=base_url,
@@ -171,7 +182,9 @@ def register_commands(app):
                 verbose=verbose,
                 max_rounds=max_rounds,
                 approve=approve,
-                mcp_servers=mcp,
+                mcp_servers=merged_mcp or None,
+                stream=stream,
+                skill=skill,
             )
             return
 
@@ -1376,6 +1389,11 @@ models:
             str,
             Option("--approve", help="审批模式 (auto/manual)"),
         ] = "auto",
+        no_stream: Annotated[bool, Option("--no-stream", help="禁用流式输出")] = False,
+        skill: Annotated[
+            str | None,
+            Option("--skill", help="加载 skill 模板（~/.flexllm/skills/ 下的 .md 文件名）"),
+        ] = None,
     ):
         """Agent 模式（非交互式，执行任务后返回）
 
@@ -1384,6 +1402,7 @@ models:
             flexllm agent "读取 main.py" --tools code -v
             flexllm agent "修复这个 bug" --tools code --validate=python
             flexllm agent --mcp "npx @mcp/server-github" "查看最近的 PR"
+            flexllm agent --skill code-review "审查 main.py"
             echo "列出当前目录文件" | flexllm agent --tools shell
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
@@ -1404,6 +1423,12 @@ models:
         model_params.setdefault("temperature", 0.7)
         model_params.setdefault("max_tokens", 2048)
 
+        # 合并配置文件和 CLI 的 MCP servers
+        from .chat_helpers import _merge_mcp_servers
+
+        agent_config = config.get_agent_config()
+        merged_mcp = _merge_mcp_servers(mcp, agent_config["mcp_servers"])
+
         agent_run(
             message=message,
             model=model,
@@ -1417,5 +1442,7 @@ models:
             validate=validate,
             max_fix_attempts=max_fix_attempts,
             approve=approve,
-            mcp_servers=mcp,
+            mcp_servers=merged_mcp or None,
+            stream=not no_stream,
+            skill=skill,
         )

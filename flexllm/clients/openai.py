@@ -207,6 +207,19 @@ class OpenAIClient(LLMClientBase):
             pass
         return None
 
+    def _extract_stream_tool_calls(self, data: dict) -> list[dict] | None:
+        """从 OpenAI 流式 chunk 中提取 tool_call delta"""
+        try:
+            choices = data.get("choices", [])
+            if choices:
+                delta = choices[0].get("delta", {})
+                tool_calls = delta.get("tool_calls")
+                if tool_calls:
+                    return tool_calls
+        except Exception:
+            pass
+        return None
+
     def _extract_tool_calls(self, response_data: dict):
         """提取 OpenAI 格式的 tool_calls"""
         from .base import ToolCall

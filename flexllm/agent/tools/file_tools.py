@@ -5,6 +5,70 @@ from pathlib import Path
 from .base import register_tool
 
 
+def _fuzzy_find(content: str, old_string: str) -> str | None:
+    """尝试用空白容错匹配 old_string（忽略行尾空白差异）。
+
+    Returns:
+        匹配到的实际文本（原始内容中的），或 None
+    """
+    content_lines = content.split("\n")
+    search_lines = old_string.split("\n")
+    if not search_lines:
+        return None
+
+    norm_search = [line.rstrip() for line in search_lines]
+
+    for i in range(len(content_lines) - len(search_lines) + 1):
+        match = True
+        for j, ns in enumerate(norm_search):
+            if content_lines[i + j].rstrip() != ns:
+                match = False
+                break
+        if match:
+            matched = content_lines[i : i + len(search_lines)]
+            return "\n".join(matched)
+    return None
+
+
+def _find_closest_hint(content: str, old_string: str) -> str:
+    """查找最接近的匹配位置，给出行号提示。"""
+    import re
+
+    first_line = old_string.split("\n")[0].strip()
+    if not first_line:
+        return "  hint: old_string starts with an empty line, check your input"
+
+    content_lines = content.split("\n")
+    matches = []
+
+    # 精确子串匹配
+    for i, line in enumerate(content_lines):
+        if first_line in line:
+            matches.append((i + 1, line.rstrip()))
+            if len(matches) >= 3:
+                break
+
+    # 如果没找到，尝试标识符关键词匹配（提取字母数字标识符，忽略短词）
+    if not matches:
+        identifiers = [w for w in re.findall(r"[a-zA-Z_]\w{2,}", first_line)]
+        if identifiers:
+            keyword = max(identifiers, key=len)
+            for i, line in enumerate(content_lines):
+                if keyword in line:
+                    matches.append((i + 1, line.rstrip()))
+                    if len(matches) >= 3:
+                        break
+
+    if matches:
+        hint_lines = ["  hint: similar content found at:"]
+        for line_num, line_content in matches:
+            preview = line_content[:120] + "..." if len(line_content) > 120 else line_content
+            hint_lines.append(f"    line {line_num}: {preview}")
+        return "\n".join(hint_lines)
+
+    return "  hint: no similar content found in file"
+
+
 @register_tool("read", "读取文件内容，返回带行号的文本", readonly=True)
 def read_file(file_path: str, offset: int = 0, limit: int = 2000) -> str:
     """读取文件，支持分页。
@@ -116,9 +180,30 @@ def edit_file(
     count = content.count(old_string)
 
     if count == 0:
-        # 提供更有帮助的错误信息
+        # 尝试空白容错匹配（忽略行尾空白差异）
+        actual_match = _fuzzy_find(content, old_string)
+        if actual_match:
+            match_count = content.count(actual_match)
+            if match_count > 1 and not replace_all:
+                return (
+                    f"[error: fuzzy match found {match_count} times, "
+                    "set replace_all=true or provide more context to make it unique]"
+                )
+            replaced = match_count if replace_all else 1
+            new_content = content.replace(actual_match, new_string, 0 if replace_all else 1)
+            try:
+                path.write_text(new_content, encoding="utf-8")
+                return (
+                    f"[edited: {file_path}, replaced {replaced} occurrence(s) "
+                    "(fuzzy match: trailing whitespace differences ignored)]"
+                )
+            except Exception as e:
+                return f"[error: write failed: {e}]"
+
+        # 完全找不到，给出定位提示
+        hint = _find_closest_hint(content, old_string)
         preview = old_string[:100] + "..." if len(old_string) > 100 else old_string
-        return f"[error: old_string not found in file]\n  searched for: {repr(preview)}"
+        return f"[error: old_string not found in file]\n  searched for: {repr(preview)}\n{hint}"
 
     if count > 1 and not replace_all:
         return f"[error: old_string found {count} times, set replace_all=true or provide more context to make it unique]"
