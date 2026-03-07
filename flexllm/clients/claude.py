@@ -86,12 +86,27 @@ class ClaudeClient(LLMClientBase):
     def _get_url(self, model: str, stream: bool = False) -> str:
         return f"{self._base_url}/messages"
 
+    def _is_oauth_token(self) -> bool:
+        return isinstance(self._api_key, str) and "sk-ant-oat" in self._api_key
+
     def _get_headers(self) -> dict:
-        return {
+        headers = {
             "Content-Type": "application/json",
-            "x-api-key": self._api_key,
             "anthropic-version": self._api_version,
         }
+        if self._is_oauth_token():
+            headers["Authorization"] = f"Bearer {self._api_key}"
+            headers["anthropic-beta"] = ",".join(
+                [
+                    "oauth-2025-04-20",
+                    "claude-code-20250219",
+                    "fine-grained-tool-streaming-2025-05-14",
+                    "interleaved-thinking-2025-05-14",
+                ]
+            )
+        else:
+            headers["x-api-key"] = self._api_key
+        return headers
 
     def _build_request_body(
         self,
@@ -172,10 +187,40 @@ class ClaudeClient(LLMClientBase):
         elif thinking is False:
             body["thinking"] = {"type": "disabled"}
 
-        # 透传其他参数（如 tools），但排除 response_format（已通过 prompt 注入）
+        # 透传其他参数，但排除 response_format（已通过 prompt 注入）
         kwargs.pop("response_format", None)
+
+        # 将 OpenAI 格式的 tools 转换为 Claude 格式
+        if "tools" in kwargs:
+            kwargs["tools"] = self._convert_tools(kwargs["tools"])
+
         body.update(kwargs)
         return body
+
+    @staticmethod
+    def _convert_tools(tools: list[dict]) -> list[dict]:
+        """将 OpenAI 格式的 tools 转换为 Claude 格式
+
+        OpenAI: [{"type": "function", "function": {"name": ..., "description": ..., "parameters": ...}}]
+        Claude: [{"name": ..., "description": ..., "input_schema": ...}]
+        """
+        converted = []
+        for tool in tools:
+            if tool.get("type") == "function":
+                func = tool["function"]
+                converted.append(
+                    {
+                        "name": func["name"],
+                        "description": func.get("description", ""),
+                        "input_schema": func.get(
+                            "parameters", {"type": "object", "properties": {}}
+                        ),
+                    }
+                )
+            else:
+                # 已经是 Claude 格式，直接透传
+                converted.append(tool)
+        return converted
 
     @staticmethod
     def _build_json_instruction(response_format: dict) -> str | None:
@@ -415,6 +460,10 @@ class ClaudeClient(LLMClientBase):
                     raise Exception(f"HTTP {response.status}: {error_text}")
 
                 usage_data = None
+                # 跟踪流式 tool_use blocks
+                tool_use_blocks = {}  # {block_index: {"id", "name", "arguments"}}
+                current_block_index = -1
+
                 async for line in response.content:
                     line = line.decode("utf-8").strip()
                     if line.startswith("data: "):
@@ -423,26 +472,76 @@ class ClaudeClient(LLMClientBase):
                             break
                         try:
                             data = json.loads(data_str)
+                            event_type = data.get("type")
 
-                            # 提取思考内容
-                            if data.get("type") == "content_block_delta":
+                            # content_block_start: 新 block 开始
+                            if event_type == "content_block_start":
+                                current_block_index = data.get("index", 0)
+                                block = data.get("content_block", {})
+                                if block.get("type") == "tool_use":
+                                    tool_use_blocks[current_block_index] = {
+                                        "id": block.get("id", ""),
+                                        "name": block.get("name", ""),
+                                        "arguments": "",
+                                    }
+                                    if return_usage:
+                                        yield {
+                                            "type": "tool_call_delta",
+                                            "tool_calls": [
+                                                {
+                                                    "index": current_block_index,
+                                                    "id": block.get("id", ""),
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": block.get("name", ""),
+                                                        "arguments": "",
+                                                    },
+                                                }
+                                            ],
+                                        }
+                                continue
+
+                            # content_block_delta
+                            if event_type == "content_block_delta":
+                                idx = data.get("index", current_block_index)
                                 delta = data.get("delta", {})
-                                if delta.get("type") == "thinking_delta":
+                                delta_type = delta.get("type")
+
+                                # 思考内容
+                                if delta_type == "thinking_delta":
                                     thinking = delta.get("thinking")
                                     if thinking and return_usage:
                                         yield {"type": "thinking", "content": thinking}
                                     continue
 
-                            # 提取内容
-                            content = self._extract_stream_content(data)
-                            if content:
-                                if return_usage:
-                                    yield {"type": "content", "content": content}
-                                else:
-                                    yield content
+                                # tool_use 的 input_json_delta
+                                if delta_type == "input_json_delta" and idx in tool_use_blocks:
+                                    partial = delta.get("partial_json", "")
+                                    tool_use_blocks[idx]["arguments"] += partial
+                                    if return_usage:
+                                        yield {
+                                            "type": "tool_call_delta",
+                                            "tool_calls": [
+                                                {
+                                                    "index": idx,
+                                                    "function": {"arguments": partial},
+                                                }
+                                            ],
+                                        }
+                                    continue
 
-                            # 检查 message_delta 中的 usage
-                            if data.get("type") == "message_delta":
+                                # 文本内容
+                                if delta_type == "text_delta":
+                                    text = delta.get("text")
+                                    if text:
+                                        if return_usage:
+                                            yield {"type": "content", "content": text}
+                                        else:
+                                            yield text
+                                continue
+
+                            # message_delta 中的 usage
+                            if event_type == "message_delta":
                                 usage = data.get("usage")
                                 if usage:
                                     usage_data = {
@@ -452,8 +551,8 @@ class ClaudeClient(LLMClientBase):
                                         + usage.get("output_tokens", 0),
                                     }
 
-                            # 检查 message_start 中的 usage（输入 tokens）
-                            if data.get("type") == "message_start":
+                            # message_start 中的 usage（输入 tokens）
+                            if event_type == "message_start":
                                 msg_usage = data.get("message", {}).get("usage", {})
                                 if msg_usage:
                                     usage_data = {
@@ -510,10 +609,10 @@ class ClaudeClient(LLMClientBase):
     def model_list(self) -> list[str]:
         """返回 Claude 模型列表（静态）"""
         return [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
             "claude-sonnet-4-20250514",
             "claude-3-5-sonnet-20241022",
             "claude-3-5-haiku-20241022",
-            "claude-3-opus-20240229",
-            "claude-3-sonnet-20240229",
-            "claude-3-haiku-20240307",
         ]

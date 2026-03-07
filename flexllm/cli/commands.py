@@ -744,6 +744,9 @@ def register_commands(app):
         else:
             provider = "openai"
 
+        if not base_url and provider == "claude":
+            base_url = "https://api.anthropic.com/v1"
+
         if not base_url:
             print("错误: 未配置 base_url", file=sys.stderr)
             raise typer.Exit(1)
@@ -751,7 +754,20 @@ def register_commands(app):
         is_gemini = provider == "gemini" or "generativelanguage.googleapis.com" in base_url
 
         try:
-            if is_gemini:
+            if provider == "claude":
+                headers = {
+                    "Content-Type": "application/json",
+                    "anthropic-version": "2023-06-01",
+                }
+                if isinstance(api_key, str) and "sk-ant-oat" in api_key:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                    headers["anthropic-beta"] = "oauth-2025-04-20"
+                else:
+                    headers["x-api-key"] = api_key
+                response = requests.get(
+                    f"{base_url.rstrip('/')}/models", headers=headers, timeout=10
+                )
+            elif is_gemini:
                 url = f"{base_url.rstrip('/')}/models?key={api_key}"
                 response = requests.get(url, timeout=10)
             else:

@@ -44,6 +44,11 @@ def resolve_model_config(
     resolved_model = model_config.get("id", model)
     resolved_base_url = base_url or model_config.get("base_url")
     resolved_api_key = api_key or model_config.get("api_key", "EMPTY")
+
+    # Claude provider 不需要用户提供 base_url，自动填充默认值
+    if not resolved_base_url and model_config.get("provider") == "claude":
+        resolved_base_url = "https://api.anthropic.com/v1"
+
     return resolved_model, resolved_base_url, resolved_api_key
 
 

@@ -152,6 +152,11 @@ class LLMClientPool:
         self._config_params: dict = {}
         self._config_user_template: str | None = None
 
+        # 根据 api_key 前缀自动推断 provider（当 provider="auto" 且无 base_url 时）
+        if provider == "auto" and not base_url and api_key:
+            if isinstance(api_key, str) and "sk-ant-oat" in api_key:
+                provider = "claude"
+
         # 判断是单 endpoint 还是多 endpoint 模式
         # 单模式：提供了 base_url，或者 provider 是 gemini/claude（它们不需要 base_url）
         # 多模式：提供了 endpoints 或 clients
