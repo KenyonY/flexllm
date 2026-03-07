@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.8.1] - 2026-03-07
+
+### Features
+
+- **claude**: 支持 OAuth token 认证和 models 命令
+
 ## [0.8.0] - 2026-03-07
 
 ### Bug Fixes
