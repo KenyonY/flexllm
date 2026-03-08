@@ -26,8 +26,8 @@ from pathlib import Path
 # OpenRouter API 端点
 OPENROUTER_API = "https://openrouter.ai/api/v1/models"
 
-# 定价文件路径
-PRICING_FILE = Path(__file__).parent / "data.json"
+# 用户数据目录的定价文件
+USER_PRICING_FILE = Path.home() / ".flexllm" / "pricing_data.json"
 
 # 排除的模型模式
 EXCLUDE_PATTERNS = [
@@ -141,17 +141,17 @@ def collect_pricing() -> dict[str, dict[str, float]]:
     return pricing_map
 
 
-def update_pricing_file(pricing_map: dict[str, dict[str, float]]) -> bool:
+def save_pricing_data(pricing_map: dict[str, dict[str, float]], path: Path) -> bool:
     """
-    更新 data.json 文件
+    保存定价数据到指定路径
 
     Args:
         pricing_map: {model_name: {"input": price, "output": price}}
+        path: 目标文件路径
 
     Returns:
-        是否更新成功
+        是否保存成功
     """
-    # 按模型名排序
     sorted_models = dict(sorted(pricing_map.items()))
 
     data = {
@@ -164,12 +164,18 @@ def update_pricing_file(pricing_map: dict[str, dict[str, float]]) -> bool:
     }
 
     try:
-        with open(PRICING_FILE, "w", encoding="utf-8") as f:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         return True
     except Exception as e:
-        print(f"Error writing {PRICING_FILE}: {e}")
+        print(f"Error writing {path}: {e}")
         return False
+
+
+def update_pricing_file(pricing_map: dict[str, dict[str, float]]) -> bool:
+    """更新定价文件到用户目录 ~/.flexllm/pricing_data.json"""
+    return save_pricing_data(pricing_map, USER_PRICING_FILE)
 
 
 def main():
@@ -195,9 +201,9 @@ def main():
         return
 
     if args.apply:
-        print(f"\nUpdating {PRICING_FILE}...")
+        print(f"\nUpdating {USER_PRICING_FILE}...")
         if update_pricing_file(pricing_map):
-            print(f"✓ Successfully updated data.json ({len(pricing_map)} models)")
+            print(f"✓ Successfully updated pricing_data.json ({len(pricing_map)} models)")
         else:
             print("✗ Failed to update data.json")
             exit(1)

@@ -35,13 +35,15 @@ def register_commands(app):
     ):
         """LLM 快速问答（支持管道输入）
 
+        \b
         Examples:
-            flexllm ask "什么是Python"
-            flexllm ask "解释代码" -s "你是代码专家"
-            echo "长文本" | flexllm ask "总结一下"
+        flexllm ask "什么是Python"
+        flexllm ask "解释代码" -s "你是代码专家"
+        echo "长文本" | flexllm ask "总结一下"
 
+        \b
         临时使用未配置的服务:
-            FLEXLLM_BASE_URL="http://localhost:8000/v1" FLEXLLM_MODEL="qwen" flexllm ask "你好"
+        FLEXLLM_BASE_URL="http://localhost:8000/v1" FLEXLLM_MODEL="qwen" flexllm ask "你好"
         """
         stdin_content = None
         if not sys.stdin.isatty():
@@ -133,14 +135,15 @@ def register_commands(app):
     ):
         """交互式对话
 
+        \b
         Examples:
-            flexllm chat                      # 多轮对话
-            flexllm chat "你好"               # 单条对话
-            flexllm chat --model gpt-4 "你好" # 指定模型
-            flexllm chat --tools code         # 启用代码工具
-            flexllm chat --tools code -v      # 详细模式
-            flexllm chat --tools code --mcp "npx @mcp/server-github"
-            flexllm chat --tools code --skill code-review
+        flexllm chat                      # 多轮对话
+        flexllm chat "你好"               # 单条对话
+        flexllm chat --model gpt-4 "你好" # 指定模型
+        flexllm chat --tools code         # 启用代码工具
+        flexllm chat --tools code -v      # 详细模式
+        flexllm chat --tools code --mcp "npx @mcp/server-github"
+        flexllm chat --tools code --skill code-review
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -235,12 +238,13 @@ def register_commands(app):
     ):
         """启动 Web 聊天界面
 
+        \b
         Examples:
-            flexllm chat-web                      # 使用默认模型
-            flexllm chat-web -m gpt-4             # 指定模型
-            flexllm chat-web -p 9090              # 指定端口
-            flexllm chat-web --host 0.0.0.0       # 允许外部访问
-            flexllm chat-web --thinking true      # 启用思考模式
+        flexllm chat-web                      # 使用默认模型
+        flexllm chat-web -m gpt-4             # 指定模型
+        flexllm chat-web -p 9090              # 指定端口
+        flexllm chat-web --host 0.0.0.0       # 允许外部访问
+        flexllm chat-web --thinking true      # 启用思考模式
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -339,20 +343,22 @@ def register_commands(app):
         适用于微调模型部署：固定 system prompt 和 user template，
         调用方只需发送 content 文本，返回解析后的 thinking 和 content。
 
+        \b
         API 端点:
-            POST /api/generate             非流式生成
-            POST /api/generate/stream      流式生成 (SSE)
-            POST /api/generate/batch       批量生成
-            POST /api/agent/run            Agent 单次执行 (需 --tools)
-            POST /api/agent/run/stream     Agent 流式执行 (需 --tools)
-            POST /api/agent/chat           Agent 多轮对话 (需 --tools)
-            GET  /health                   健康检查
-            GET  /api/config               查看当前配置
+        POST /api/generate             非流式生成
+        POST /api/generate/stream      流式生成 (SSE)
+        POST /api/generate/batch       批量生成
+        POST /api/agent/run            Agent 单次执行 (需 --tools)
+        POST /api/agent/run/stream     Agent 流式执行 (需 --tools)
+        POST /api/agent/chat           Agent 多轮对话 (需 --tools)
+        GET  /health                   健康检查
+        GET  /api/config               查看当前配置
 
+        \b
         Examples:
-            flexllm serve -m qwen-finetuned -s "你是助手"
-            flexllm serve --thinking true -c 20 -p 8000
-            flexllm serve --tools code -s "你是代码助手"
+        flexllm serve -m qwen-finetuned -s "你是助手"
+        flexllm serve --thinking true -c 20 -p 8000
+        flexllm serve --tools code -s "你是代码助手"
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -496,13 +502,14 @@ def register_commands(app):
         高级配置可在 ~/.flexllm/config.yaml 的 batch 节中设置。
         CLI 参数优先级高于配置文件。
 
+        \b
         Examples:
-            flexllm batch input.jsonl                  # 自动生成 input.output.jsonl
-            flexllm batch input.jsonl -o output.jsonl  # 指定输出文件
-            flexllm batch input.jsonl -c 20 -m gpt-4   # 自动输出 + 自定义参数
-            flexllm batch input.jsonl --cache --return-usage
-            flexllm batch data.jsonl -o out.jsonl --user-field text --system-field sys_prompt
-            cat input.jsonl | flexllm batch -o output.jsonl  # stdin 需指定 -o
+        flexllm batch input.jsonl                  # 自动生成 input.output.jsonl
+        flexllm batch input.jsonl -o output.jsonl  # 指定输出文件
+        flexllm batch input.jsonl -c 20 -m gpt-4   # 自动输出 + 自定义参数
+        flexllm batch input.jsonl --cache --return-usage
+        flexllm batch data.jsonl -o out.jsonl --user-field text --system-field sys_prompt
+        cat input.jsonl | flexllm batch -o output.jsonl  # stdin 需指定 -o
         """
         has_stdin = not sys.stdin.isatty()
         if not input and not has_stdin:
@@ -858,9 +865,10 @@ def register_commands(app):
     ):
         """设置默认模型
 
+        \b
         Examples:
-            flexllm set-model gpt-4
-            flexllm set-model local-ollama
+        flexllm set-model gpt-4
+        flexllm set-model local-ollama
         """
         config = get_config()
         config_path = config.get_config_path()
@@ -1062,11 +1070,12 @@ models:
     ):
         """查询模型定价信息
 
+        \b
         Examples:
-            flexllm pricing                  # 列出所有模型定价
-            flexllm pricing gpt-4o           # 查询 gpt-4o 定价
-            flexllm pricing claude           # 模糊匹配 claude 相关模型
-            flexllm pricing --update         # 从 OpenRouter 更新定价表
+        flexllm pricing                  # 列出所有模型定价
+        flexllm pricing gpt-4o           # 查询 gpt-4o 定价
+        flexllm pricing claude           # 模糊匹配 claude 相关模型
+        flexllm pricing --update         # 从 OpenRouter 更新定价表
         """
         from ..pricing import get_pricing, reload_pricing
 
@@ -1082,7 +1091,7 @@ models:
 
                 if update_pricing_file(pricing_map):
                     reload_pricing()
-                    print("✓ data.json 已更新")
+                    print("✓ 定价数据已更新")
                 else:
                     print("✗ 更新失败", file=sys.stderr)
                     raise typer.Exit(1)
@@ -1200,12 +1209,13 @@ models:
         """查询 API Key 余额
 
         支持的 provider:
-          - OpenRouter, SiliconFlow, DeepSeek, AI/ML API, OpenAI
+        OpenRouter, SiliconFlow, DeepSeek, AI/ML API, OpenAI
 
+        \b
         Examples:
-            flexllm credits                        # 查询默认模型的 key 余额
-            flexllm credits -m grok-4              # 查询指定模型的 key 余额
-            flexllm credits -k sk-or-v1-xxx...     # 直接查询指定 key 的余额
+        flexllm credits                        # 查询默认模型的 key 余额
+        flexllm credits -m grok-4              # 查询指定模型的 key 余额
+        flexllm credits -k sk-or-v1-xxx...     # 直接查询指定 key 的余额
         """
         if key:
             result = query_credits_by_key(key)
@@ -1283,11 +1293,12 @@ models:
     ):
         """启动 Mock LLM 服务器
 
+        \b
         Examples:
-            flexllm mock                          # 默认配置，端口 8001
-            flexllm mock -p 8080                  # 指定端口
-            flexllm mock -d 0.5                   # 固定延迟 0.5s
-            flexllm mock --error-rate 0.5         # 50% 请求返回错误
+        flexllm mock                          # 默认配置，端口 8001
+        flexllm mock -p 8080                  # 指定端口
+        flexllm mock -d 0.5                   # 固定延迟 0.5s
+        flexllm mock --error-rate 0.5         # 50% 请求返回错误
         """
         try:
             from ..mock import MockLLMServer, MockServerConfig, parse_range
@@ -1413,13 +1424,14 @@ models:
     ):
         """Agent 模式（非交互式，执行任务后返回）
 
+        \b
         Examples:
-            flexllm agent "查一下 cpu 使用率" --tools shell
-            flexllm agent "读取 main.py" --tools code -v
-            flexllm agent "修复这个 bug" --tools code --validate=python
-            flexllm agent --mcp "npx @mcp/server-github" "查看最近的 PR"
-            flexllm agent --skill code-review "审查 main.py"
-            echo "列出当前目录文件" | flexllm agent --tools shell
+        flexllm agent "查一下 cpu 使用率" --tools shell
+        flexllm agent "读取 main.py" --tools code -v
+        flexllm agent "修复这个 bug" --tools code --validate=python
+        flexllm agent --mcp "npx @mcp/server-github" "查看最近的 PR"
+        flexllm agent --skill code-review "审查 main.py"
+        echo "列出当前目录文件" | flexllm agent --tools shell
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()

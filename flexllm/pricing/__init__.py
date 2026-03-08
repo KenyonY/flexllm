@@ -3,11 +3,16 @@
 
 提供模型定价数据加载、成本估算和成本追踪功能。
 定价数据存储在 data.json 中，可通过 `flexllm pricing --update` 更新。
+
+加载优先级：~/.flexllm/pricing_data.json > 打包的 data.json
+每天首次调用 get_pricing() 时自动后台更新。
 """
 
 import json
+import logging
+import threading
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Optional
 
 # 导出 cost_tracker 模块
 from .cost_tracker import BudgetExceededError, CostReport, CostTracker, CostTrackerConfig
@@ -21,29 +26,33 @@ from .token_counter import (
     messages_hash,
 )
 
-# 定价文件路径
-PRICING_FILE = Path(__file__).parent / "data.json"
+logger = logging.getLogger(__name__)
+
+# 打包的定价文件（fallback）
+_BUNDLED_PRICING_FILE = Path(__file__).parent / "data.json"
+
+# 用户数据目录的定价文件（优先）
+_USER_PRICING_FILE = Path.home() / ".flexllm" / "pricing_data.json"
 
 # 缓存的定价数据
 _pricing_cache: dict[str, dict[str, float]] | None = None
 
 
-def _load_pricing() -> dict[str, dict[str, float]]:
-    """
-    从 data.json 加载定价数据
+def _get_pricing_file() -> Path:
+    """返回应读取的定价文件路径（用户目录优先）"""
+    if _USER_PRICING_FILE.exists():
+        return _USER_PRICING_FILE
+    return _BUNDLED_PRICING_FILE
 
-    Returns:
-        {model_name: {"input": price_per_token, "output": price_per_token}}
-    """
-    if not PRICING_FILE.exists():
+
+def _load_pricing_from_file(path: Path) -> dict[str, dict[str, float]]:
+    """从指定文件加载定价数据"""
+    if not path.exists():
         return {}
-
     try:
-        with open(PRICING_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
-
         models = data.get("models", {})
-        # 将 $/1M tokens 转换为 $/token
         return {
             name: {"input": p["input"] / 1e6, "output": p["output"] / 1e6}
             for name, p in models.items()
@@ -52,11 +61,52 @@ def _load_pricing() -> dict[str, dict[str, float]]:
         return {}
 
 
+def _load_pricing() -> dict[str, dict[str, float]]:
+    """加载定价数据（用户目录优先，打包文件兜底）"""
+    return _load_pricing_from_file(_get_pricing_file())
+
+
+def _get_updated_date() -> str | None:
+    """获取当前定价数据的更新日期"""
+    path = _get_pricing_file()
+    if not path.exists():
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("_meta", {}).get("updated_at")
+    except (json.JSONDecodeError, KeyError):
+        return None
+
+
+def _auto_update_if_stale():
+    """若定价数据非今天更新，则后台静默更新"""
+    try:
+        updated = _get_updated_date()
+        today = datetime.now().strftime("%Y-%m-%d")
+        if updated == today:
+            return
+
+        from .updater import collect_pricing, save_pricing_data
+
+        pricing_map = collect_pricing()
+        if pricing_map:
+            save_pricing_data(pricing_map, _USER_PRICING_FILE)
+            # 刷新缓存
+            global _pricing_cache
+            _pricing_cache = _load_pricing()
+            logger.debug("定价数据已自动更新 (%d 个模型)", len(pricing_map))
+    except Exception:
+        pass  # 静默失败，不影响正常使用
+
+
 def get_pricing() -> dict[str, dict[str, float]]:
-    """获取定价数据（带缓存）"""
+    """获取定价数据（带缓存，每日自动更新）"""
     global _pricing_cache
     if _pricing_cache is None:
         _pricing_cache = _load_pricing()
+        # 后台检查是否需要更新
+        threading.Thread(target=_auto_update_if_stale, daemon=True).start()
     return _pricing_cache
 
 
