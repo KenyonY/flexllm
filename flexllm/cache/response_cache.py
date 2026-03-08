@@ -3,10 +3,8 @@
 """
 LLM 响应缓存模块
 
-使用 FlaxKV2 作为存储后端，提供高性能缓存。
-支持两种模式：
-- IPC 模式（默认）：通过 Unix Socket 访问，支持多进程共享缓存
-- 本地模式：直接读写 LevelDB，单进程场景
+使用 FlaxKV2 (LMDB) 作为存储后端，提供高性能缓存。
+LMDB 原生支持多进程并发读写，无需 IPC 中转。
 """
 
 import logging
@@ -32,15 +30,13 @@ class ResponseCacheConfig:
 
     Attributes:
         enabled: 是否启用缓存
-        cache_dir: 缓存目录（本地模式）或数据目录（IPC 模式）
+        cache_dir: 缓存目录
         ttl: 缓存过期时间(秒)，0 表示永不过期
-        use_ipc: 是否使用 IPC 模式（默认 True，多进程共享缓存）
     """
 
     enabled: bool = False
     cache_dir: str = DEFAULT_CACHE_DIR
     ttl: int = 86400  # 24小时
-    use_ipc: bool = True  # 默认使用 IPC 模式
 
     @classmethod
     def disabled(cls) -> "ResponseCacheConfig":
@@ -53,79 +49,31 @@ class ResponseCacheConfig:
         return cls(enabled=False)
 
     @classmethod
-    def with_ttl(
-        cls, ttl: int = 3600, cache_dir: str = None, use_ipc: bool = True
-    ) -> "ResponseCacheConfig":
+    def with_ttl(cls, ttl: int = 3600, cache_dir: str = None) -> "ResponseCacheConfig":
         """
-        启用缓存，自定义 TTL（默认 IPC 模式）
+        启用缓存，自定义 TTL
 
         Args:
             ttl: 过期时间（秒）
             cache_dir: 缓存目录
-            use_ipc: 是否使用 IPC 模式（默认 True）
         """
         return cls(
             enabled=True,
             ttl=ttl,
             cache_dir=cache_dir or DEFAULT_CACHE_DIR,
-            use_ipc=use_ipc,
         )
 
     @classmethod
-    def persistent(
-        cls, cache_dir: str = DEFAULT_CACHE_DIR, use_ipc: bool = True
-    ) -> "ResponseCacheConfig":
-        """持久缓存：永不过期（默认 IPC 模式）"""
-        return cls(enabled=True, cache_dir=cache_dir, ttl=0, use_ipc=use_ipc)
-
-    @classmethod
-    def ipc(cls, ttl: int = 86400, cache_dir: str = None) -> "ResponseCacheConfig":
-        """
-        IPC 模式缓存（多进程共享，默认模式）
-
-        使用 Unix Socket 通信，自动启动守护进程服务器。
-        适用于多进程并发调用 LLM API 的场景。
-
-        Args:
-            ttl: 过期时间（秒），默认 24 小时
-            cache_dir: 数据目录
-        """
-        return cls(
-            enabled=True,
-            ttl=ttl,
-            cache_dir=cache_dir or DEFAULT_CACHE_DIR,
-            use_ipc=True,
-        )
-
-    @classmethod
-    def local(cls, ttl: int = 86400, cache_dir: str = None) -> "ResponseCacheConfig":
-        """
-        本地模式缓存（单进程）
-
-        直接读写 LevelDB，不支持多进程共享。
-        适用于单进程场景，性能略高于 IPC 模式。
-
-        Args:
-            ttl: 过期时间（秒），默认 24 小时
-            cache_dir: 缓存目录
-        """
-        return cls(
-            enabled=True,
-            ttl=ttl,
-            cache_dir=cache_dir or DEFAULT_CACHE_DIR,
-            use_ipc=False,
-        )
+    def persistent(cls, cache_dir: str = DEFAULT_CACHE_DIR) -> "ResponseCacheConfig":
+        """持久缓存：永不过期"""
+        return cls(enabled=True, cache_dir=cache_dir, ttl=0)
 
 
 class ResponseCache:
     """
     LLM 响应缓存
 
-    使用 FlaxKV2 存储，支持 TTL 过期、高性能读写。
-
-    支持两种模式：
-    - IPC 模式（默认）：通过 Unix Socket 通信，自动启动守护进程，支持多进程共享
-    - 本地模式：直接读写 LevelDB，适合单进程
+    使用 FlaxKV2 (LMDB) 存储，支持 TTL 过期、多进程并发读写。
     """
 
     def __init__(self, config: ResponseCacheConfig | None = None):
@@ -141,26 +89,15 @@ class ResponseCache:
 
             ttl = self.config.ttl if self.config.ttl > 0 else None
 
-            if self.config.use_ipc:
-                # IPC 模式：通过 Unix Socket 访问，自动启动守护进程
-                logger.debug(f"使用 IPC 模式缓存: data_dir={self.config.cache_dir}")
-                self._db = FlaxKV(
-                    "llm_cache",
-                    self.config.cache_dir,
-                    use_ipc=True,  # 自动启动守护进程
-                    default_ttl=ttl,
-                )
-            else:
-                # 本地模式：直接读写 LevelDB
-                logger.debug(f"使用本地模式缓存: cache_dir={self.config.cache_dir}")
-                self._db = FlaxKV(
-                    "llm_cache",
-                    self.config.cache_dir,
-                    default_ttl=ttl,
-                    read_cache_size=10000,
-                    write_buffer_size=100,
-                    async_flush=True,
-                )
+            logger.debug(f"使用 LMDB 缓存: cache_dir={self.config.cache_dir}")
+            self._db = FlaxKV(
+                "llm_cache",
+                self.config.cache_dir,
+                default_ttl=ttl,
+                write_buffer_size=100,
+                async_flush=True,
+                auto_nested=False,
+            )
 
     def _make_key(self, messages: list[dict], model: str, **kwargs) -> str:
         """生成缓存键"""
@@ -211,7 +148,7 @@ class ResponseCache:
         self, messages_list: list[list[dict]], model: str = "", **kwargs
     ) -> tuple[list[Any | None], list[int]]:
         """
-        批量获取缓存（单次 IPC 往返）
+        批量获取缓存
 
         Returns:
             (cached_responses, uncached_indices)
@@ -236,7 +173,7 @@ class ResponseCache:
     def set_batch(
         self, messages_list: list[list[dict]], responses: list[Any], model: str = "", **kwargs
     ) -> None:
-        """批量存储缓存（单次 IPC 往返）"""
+        """批量存储缓存"""
         if self._db is None:
             return
         items = {}

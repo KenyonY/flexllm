@@ -113,7 +113,7 @@ class LLMClientBase(ABC):
             cache_image: 是否缓存图片
             cache_dir: 图片缓存目录
             cache: 响应缓存配置
-                   - True: 启用缓存（默认 IPC 模式，24小时 TTL）
+                   - True: 启用缓存（默认 24小时 TTL）
                    - False/None: 禁用缓存（默认）
                    - ResponseCacheConfig: 自定义配置
             cost_tracker: 成本追踪配置
@@ -144,7 +144,7 @@ class LLMClientBase(ABC):
 
         # 响应缓存
         if cache is True:
-            cache = ResponseCacheConfig.ipc()  # 默认 IPC 模式，24小时 TTL
+            cache = ResponseCacheConfig.with_ttl()
         elif cache is None or cache is False:
             cache = ResponseCacheConfig.disabled()
         self._response_cache = ResponseCache(cache) if cache.enabled else None

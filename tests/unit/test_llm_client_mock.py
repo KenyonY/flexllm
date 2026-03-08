@@ -1090,7 +1090,7 @@ class TestResponseCache:
         from flexllm.cache import ResponseCacheConfig
 
         with tempfile.TemporaryDirectory() as cache_dir:
-            cfg = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600, use_ipc=False)
+            cfg = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600)
             async with LLMClient(
                 base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY", cache=cfg
             ) as client:
@@ -1105,7 +1105,7 @@ class TestResponseCache:
         from flexllm.cache import ResponseCacheConfig
 
         with tempfile.TemporaryDirectory() as cache_dir:
-            cfg = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600, use_ipc=False)
+            cfg = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600)
             async with LLMClient(
                 base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY", cache=cfg
             ) as client:
@@ -1121,7 +1121,7 @@ class TestResponseCache:
         from flexllm.cache import ResponseCacheConfig
 
         with tempfile.TemporaryDirectory() as cache_dir:
-            cfg = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600, use_ipc=False)
+            cfg = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600)
             async with LLMClient(
                 base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY", cache=cfg
             ) as client:

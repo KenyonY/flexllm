@@ -382,19 +382,14 @@ client = LLMClient(
 ```python
 from flexllm import ResponseCacheConfig
 
-# IPC 模式（多进程共享，推荐）
 cache = ResponseCacheConfig(
     enabled=True,
     ttl=3600,
-    use_ipc=True,
 )
 
-# 本地模式（单进程，更快）
-cache = ResponseCacheConfig(
-    enabled=True,
-    ttl=3600,
-    use_ipc=False,
-)
+# 或使用快捷方法
+cache = ResponseCacheConfig.with_ttl(3600)
+cache = ResponseCacheConfig.persistent()  # 永不过期
 ```
 
 ### 批量处理最佳实践

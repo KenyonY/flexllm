@@ -638,7 +638,7 @@ def register_commands(app):
 
                 cache_config = None
                 if effective_cache:
-                    cache_config = ResponseCacheConfig.ipc(ttl=batch_config["cache_ttl"])
+                    cache_config = ResponseCacheConfig.with_ttl(ttl=batch_config["cache_ttl"])
 
                 kwargs = config.get_model_params(model)
                 for key in ("temperature", "max_tokens", "top_p", "top_k", "thinking"):

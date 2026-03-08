@@ -11,9 +11,8 @@ from flexllm.cache.response_cache import ResponseCache, ResponseCacheConfig
 class TestCacheBatch:
     @pytest.fixture
     def cache(self):
-        """本地模式缓存（无需 IPC 服务器）"""
         tmp_dir = tempfile.mkdtemp()
-        config = ResponseCacheConfig.local(ttl=3600, cache_dir=tmp_dir)
+        config = ResponseCacheConfig.with_ttl(ttl=3600, cache_dir=tmp_dir)
         cache = ResponseCache(config)
         yield cache
         cache.close()

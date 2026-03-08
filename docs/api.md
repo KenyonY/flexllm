@@ -242,8 +242,7 @@ from flexllm import ResponseCacheConfig
 config = ResponseCacheConfig(
     enabled: bool = False,
     ttl: int = 86400,                    # TTL（秒），0 表示永不过期
-    cache_dir: str = "~/.cache/flexllm/llm_response",
-    use_ipc: bool = True,                # IPC 模式（多进程共享）
+    cache_dir: str = "~/.flexllm/cache/response",
 )
 
 # 快捷方法

@@ -392,9 +392,7 @@ class TestResponseCache:
     async def test_cache_hit(self, mock_llm_server):
         """缓存命中：相同消息第二次请求走缓存"""
         with tempfile.TemporaryDirectory() as cache_dir:
-            cache_config = ResponseCacheConfig(
-                enabled=True, cache_dir=cache_dir, ttl=3600, use_ipc=False
-            )
+            cache_config = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600)
             async with LLMClient(
                 base_url=mock_llm_server.url,
                 model="mock-model",
@@ -415,9 +413,7 @@ class TestResponseCache:
     async def test_cache_different_messages(self, mock_llm_server):
         """不同消息不应命中缓存"""
         with tempfile.TemporaryDirectory() as cache_dir:
-            cache_config = ResponseCacheConfig(
-                enabled=True, cache_dir=cache_dir, ttl=3600, use_ipc=False
-            )
+            cache_config = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600)
             async with LLMClient(
                 base_url=mock_llm_server.url,
                 model="mock-model",
@@ -436,9 +432,7 @@ class TestResponseCache:
     async def test_cache_in_batch(self, mock_llm_server):
         """批量处理中的缓存：第二次批量应全部走缓存"""
         with tempfile.TemporaryDirectory() as cache_dir:
-            cache_config = ResponseCacheConfig(
-                enabled=True, cache_dir=cache_dir, ttl=3600, use_ipc=False
-            )
+            cache_config = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600)
             async with LLMClient(
                 base_url=mock_llm_server.url,
                 model="mock-model",
@@ -696,9 +690,7 @@ class TestCombinedScenarios:
             with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
                 output_path = f.name
 
-            cache_config = ResponseCacheConfig(
-                enabled=True, cache_dir=cache_dir, ttl=3600, use_ipc=False
-            )
+            cache_config = ResponseCacheConfig(enabled=True, cache_dir=cache_dir, ttl=3600)
             messages_list = create_messages(15)
 
             try:
