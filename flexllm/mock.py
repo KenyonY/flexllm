@@ -1169,7 +1169,7 @@ class MockLLMServer:
         self._app = self._create_app()
         self._runner = web.AppRunner(self._app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, "localhost", self.config.port)
+        site = web.TCPSite(self._runner, "0.0.0.0", self.config.port)
         await site.start()
 
     async def stop_async(self):
@@ -1180,7 +1180,7 @@ class MockLLMServer:
     def _run_server(self):
         """在独立进程中运行服务器"""
         app = self._create_app()
-        web.run_app(app, host="localhost", port=self.config.port, print=lambda x: None)
+        web.run_app(app, host="0.0.0.0", port=self.config.port, print=lambda x: None)
 
     def start(self):
         """启动服务器（在独立进程中）"""
@@ -1197,7 +1197,7 @@ class MockLLMServer:
     def run(self):
         """前台运行服务器（阻塞）"""
         app = self._create_app()
-        web.run_app(app, host="localhost", port=self.config.port)
+        web.run_app(app, host="0.0.0.0", port=self.config.port)
 
     def __enter__(self):
         self.start()
