@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.2] - 2026-03-08
+
+### Bug Fixes
+
+- **cli**: 修复 help 文本格式混乱，pricing 支持每日自动更新
+- **ci**: 补充 test 依赖 pytest-aiohttp 和 pyyaml
+
+### Miscellaneous
+
+- Bump version to 0.8.2
+
+### Refactor
+
+- **cache**: 移除 IPC 模式，切换到 LMDB 原生多进程支持
+
 ## [0.8.1] - 2026-03-07
 
 ### Features
