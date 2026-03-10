@@ -930,8 +930,11 @@ class LLMClientPool:
                 results[record["index"]] = record["output"]
 
         # 检查缓存命中（如果启用了缓存）—— 批量查询，单次 IPC 往返
+        # 多 endpoint 不同模型且未指定 model 时，跳过 pool 级缓存（键无法统一），
+        # 由各 base client 的 chat_completions 各自处理缓存
         effective_model = model or self._endpoints[0].model
-        if response_cache is not None:
+        all_same_model = model or len({ep.model for ep in self._endpoints}) == 1
+        if response_cache is not None and all_same_model:
             # 过滤出未完成的 messages
             pending = [
                 (idx, msg) for idx, msg in enumerate(messages_list) if idx not in completed_indices
@@ -952,6 +955,12 @@ class LLMClientPool:
                             results[idx] = cached_result["content"]
                         completed_indices.add(idx)
                         cached_count += 1
+                        # 写入输出文件（断点续传）
+                        writer.write_result(
+                            idx,
+                            cached_result["content"],
+                            usage=cached_result.get("usage"),
+                        )
             if cached_count > 0:
                 logger.info(f"缓存命中: {cached_count}/{n}")
 
@@ -1086,16 +1095,8 @@ class LLMClientPool:
                     results[idx] = result
                     self._router.mark_success(provider)
 
-                    # 写入缓存
-                    if response_cache is not None:
-                        if hasattr(result, "content"):
-                            cache_data = {
-                                "content": result.content,
-                                "usage": getattr(result, "usage", None),
-                            }
-                        else:
-                            cache_data = {"content": result, "usage": None}
-                        response_cache.set(msg, cache_data, model=worker_model, **kwargs)
+                    # 缓存写入由 base client 的 chat_completions 内部处理，
+                    # 无需在 pool 层重复写入
 
                     async with lock:
                         active_tasks -= 1
