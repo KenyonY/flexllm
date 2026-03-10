@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.5] - 2026-03-10
+
+### Bug Fixes
+
+- **cache**: 修复 pool batch 缓存三个问题
+
+### Documentation
+
+- **mock**: CLI help 补充 QA 匹配规则说明
+
+### Features
+
+- **mock**: QA 匹配支持子串包含，多个匹配取最长
+- **mock**: 每个请求无条件在终端打印输入输出摘要，--log 可选写入文件
+
 ## [0.8.4] - 2026-03-10
 
 ### Features
