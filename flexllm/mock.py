@@ -271,9 +271,17 @@ class MockLLMServer:
     def _generate_response_text(self, user_message: str = "") -> str:
         """生成响应文本。如果有 QA 映射且匹配到输入，返回确定性回复；否则随机生成。"""
         if user_message and self._qa_map:
+            # 精确匹配优先
             matched = self._qa_map.get(user_message)
             if matched is not None:
                 return matched
+            # 子串匹配：用户输入包含 QA key 时命中，多个匹配取最长（最具体）
+            best_key = ""
+            for key in self._qa_map:
+                if key in user_message and len(key) > len(best_key):
+                    best_key = key
+            if best_key:
+                return self._qa_map[best_key]
         target_len = random.randint(self.config.response_min_len, self.config.response_max_len)
         result = []
         current_len = 0
