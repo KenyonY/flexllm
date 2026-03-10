@@ -1294,7 +1294,7 @@ models:
             str,
             Option(
                 "--qa",
-                help="QA 数据集路径（JSONL），每行 {input, output}，匹配输入时返回确定性回复",
+                help="QA 数据集路径（JSONL），每行 {input, output}。精确匹配优先，否则子串包含匹配（取最长）",
             ),
         ] = None,
         log: Annotated[
@@ -1309,8 +1309,14 @@ models:
         flexllm mock -p 8080                  # 指定端口
         flexllm mock -d 0.5                   # 固定延迟 0.5s
         flexllm mock --error-rate 0.5         # 50% 请求返回错误
-        flexllm mock --qa qa.jsonl            # 使用 QA 数据集确定性回复
+        flexllm mock --qa qa.jsonl            # QA 数据集确定性回复
         flexllm mock --log requests.jsonl     # 额外将请求日志写入文件
+
+        QA 数据集格式（每行一个 JSON）:
+        {"input": "关键词或完整问题", "output": "对应的回复内容"}
+
+        匹配规则: 精确匹配优先 → 子串包含匹配（多个命中取最长）→ 未匹配则随机生成
+        例: input="天气" 可被 "今天天气怎么样" 触发
         """
         try:
             from ..mock import MockLLMServer, MockServerConfig, parse_range
