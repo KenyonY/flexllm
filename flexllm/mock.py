@@ -136,6 +136,7 @@ class MockServerConfig:
     error_rate: float = 0  # 请求失败率 (0-1)，0 表示不失败
     thinking: bool = False  # 是否在响应中包含思考内容
     qa_path: str | None = None  # QA 数据集路径（JSONL），用于确定性回复
+    log_path: str | None = None  # 请求日志保存路径（JSONL）
 
 
 class MockLLMServer:
@@ -196,6 +197,45 @@ class MockLLMServer:
                             return item.get("text", "")
                 return ""
         return ""
+
+    @staticmethod
+    def _sanitize_request(data: dict) -> dict:
+        """清理请求体，将 base64 图片替换为占位符"""
+        import copy
+        import re
+
+        def _clean(obj):
+            if isinstance(obj, str):
+                # data:image/png;base64,xxxxx... → <image:32.1KB>
+                m = re.match(r"data:image/[^;]+;base64,", obj)
+                if m:
+                    raw_len = len(obj) - len(m.group())
+                    size_kb = raw_len * 3 / 4 / 1024
+                    return f"<image:{size_kb:.1f}KB>"
+                return obj
+            if isinstance(obj, dict):
+                return {k: _clean(v) for k, v in obj.items()}
+            if isinstance(obj, list):
+                return [_clean(v) for v in obj]
+            return obj
+
+        return _clean(copy.deepcopy(data))
+
+    def _log_request(self, api_format: str, request_data: dict, output: str, tokens: dict):
+        """记录请求日志到 JSONL 文件"""
+        if not self.config.log_path:
+            return
+        from datetime import datetime, timezone
+
+        record = {
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+            "api_format": api_format,
+            "request": self._sanitize_request(request_data),
+            "output": output,
+            **tokens,
+        }
+        with open(self.config.log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     @property
     def url(self) -> str:
@@ -608,6 +648,12 @@ class MockLLMServer:
             tool_call_id = f"call_{uuid.uuid4().hex[:24]}"
             args_str = json.dumps(tool_args, ensure_ascii=False)
             completion_tokens = self._estimate_tokens(args_str)
+            self._log_request(
+                "openai",
+                data,
+                f"tool_call:{tool_name}({args_str})",
+                {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+            )
 
             if stream:
                 response = web.StreamResponse(
@@ -665,6 +711,15 @@ class MockLLMServer:
         user_text = self._extract_last_user_text(messages, "openai")
         response_text = self._generate_response_text(user_text)
         thinking_text = self._generate_thinking_text() if include_thinking else None
+        self._log_request(
+            "openai",
+            data,
+            response_text,
+            {
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": self._estimate_tokens(response_text),
+            },
+        )
 
         if stream:
             response = web.StreamResponse(
@@ -955,6 +1010,12 @@ class MockLLMServer:
             tool_use_id = f"toolu_{uuid.uuid4().hex[:24]}"
             args_str = json.dumps(tool_args, ensure_ascii=False)
             completion_tokens = self._estimate_tokens(args_str)
+            self._log_request(
+                "claude",
+                data,
+                f"tool_call:{tool_name}({args_str})",
+                {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+            )
 
             if stream:
                 return await self._claude_stream_tool_use_response(
@@ -990,6 +1051,12 @@ class MockLLMServer:
         completion_tokens = self._estimate_tokens(response_text)
         if thinking_text:
             completion_tokens += self._estimate_tokens(thinking_text)
+        self._log_request(
+            "claude",
+            data,
+            response_text,
+            {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+        )
 
         if stream:
             return await self._claude_stream_response(
@@ -1120,7 +1187,14 @@ class MockLLMServer:
         tools = data.get("tools")
         if tools and self._should_respond_with_tool_call(tools, contents, "gemini"):
             tool_name, tool_args = self._pick_tool(tools, "gemini")
-            output_tokens = self._estimate_tokens(json.dumps(tool_args))
+            args_str = json.dumps(tool_args, ensure_ascii=False)
+            output_tokens = self._estimate_tokens(args_str)
+            self._log_request(
+                "gemini",
+                data,
+                f"tool_call:{tool_name}({args_str})",
+                {"prompt_tokens": prompt_tokens, "completion_tokens": output_tokens},
+            )
 
             func_call_part = {"functionCall": {"name": tool_name, "args": tool_args}}
 
@@ -1172,6 +1246,12 @@ class MockLLMServer:
         completion_tokens = self._estimate_tokens(response_text)
         if thinking_text:
             completion_tokens += self._estimate_tokens(thinking_text)
+        self._log_request(
+            "gemini",
+            data,
+            response_text,
+            {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+        )
 
         if is_stream:
             return await self._gemini_stream_response(

@@ -368,6 +368,19 @@ with MockLLMServer(config) as server:
 {"input": "1+1等于几", "output": "2"}
 ```
 
+### 请求日志
+
+通过 `--log` 记录每个请求的输入输出到 JSONL 文件，base64 图片自动替换为占位符（如 `<image:32.1KB>`）：
+
+```bash
+flexllm mock --log requests.jsonl
+```
+
+日志格式：
+```json
+{"timestamp": "...", "api_format": "openai", "request": {...}, "output": "回复文本", "prompt_tokens": 10, "completion_tokens": 50}
+```
+
 ### CLI
 
 ```bash
@@ -376,6 +389,7 @@ flexllm mock --thinking               # 启用思考内容
 flexllm mock -p 8080 -d 0.1-0.5      # 自定义端口和延迟
 flexllm mock --error-rate 0.3         # 30% 错误率
 flexllm mock --qa qa.jsonl            # 使用 QA 数据集确定性回复
+flexllm mock --log requests.jsonl     # 记录请求日志
 ```
 
 ---

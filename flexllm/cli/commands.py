@@ -1297,6 +1297,9 @@ models:
                 help="QA 数据集路径（JSONL），每行 {input, output}，匹配输入时返回确定性回复",
             ),
         ] = None,
+        log: Annotated[
+            str, Option("--log", help="请求日志保存路径（JSONL），记录每个请求的输入输出")
+        ] = None,
     ):
         """启动 Mock LLM 服务器
 
@@ -1307,6 +1310,7 @@ models:
         flexllm mock -d 0.5                   # 固定延迟 0.5s
         flexllm mock --error-rate 0.5         # 50% 请求返回错误
         flexllm mock --qa qa.jsonl            # 使用 QA 数据集确定性回复
+        flexllm mock --log requests.jsonl     # 记录请求日志
         """
         try:
             from ..mock import MockLLMServer, MockServerConfig, parse_range
@@ -1329,6 +1333,7 @@ models:
             error_rate=error_rate,
             thinking=thinking,
             qa_path=qa,
+            log_path=log,
         )
 
         print(f"Mock LLM Server starting on port {port}")
@@ -1348,6 +1353,8 @@ models:
 
             qa_count = sum(1 for line in pathlib.Path(qa).read_text().splitlines() if line.strip())
             print(f"  QA dataset: {qa} ({qa_count} entries)")
+        if log:
+            print(f"  Log: {log}")
         print(f"  OpenAI: http://localhost:{port}/v1/chat/completions")
         print(f"  Claude: http://localhost:{port}/v1/messages")
         print(f"  Gemini: http://localhost:{port}/models/{{model}}:generateContent")
