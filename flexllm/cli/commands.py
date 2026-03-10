@@ -1290,6 +1290,13 @@ models:
             float, Option("--error-rate", help="请求失败率 (0-1)，0 表示不失败")
         ] = 0,
         thinking: Annotated[bool, Option("--thinking", help="响应中包含思考/推理内容")] = False,
+        qa: Annotated[
+            str,
+            Option(
+                "--qa",
+                help="QA 数据集路径（JSONL），每行 {input, output}，匹配输入时返回确定性回复",
+            ),
+        ] = None,
     ):
         """启动 Mock LLM 服务器
 
@@ -1299,6 +1306,7 @@ models:
         flexllm mock -p 8080                  # 指定端口
         flexllm mock -d 0.5                   # 固定延迟 0.5s
         flexllm mock --error-rate 0.5         # 50% 请求返回错误
+        flexllm mock --qa qa.jsonl            # 使用 QA 数据集确定性回复
         """
         try:
             from ..mock import MockLLMServer, MockServerConfig, parse_range
@@ -1320,6 +1328,7 @@ models:
             token_rate=token_rate,
             error_rate=error_rate,
             thinking=thinking,
+            qa_path=qa,
         )
 
         print(f"Mock LLM Server starting on port {port}")
@@ -1334,6 +1343,11 @@ models:
             print(f"  Error rate: {error_rate * 100:.1f}%")
         if thinking:
             print("  Thinking: enabled")
+        if qa:
+            import pathlib
+
+            qa_count = sum(1 for line in pathlib.Path(qa).read_text().splitlines() if line.strip())
+            print(f"  QA dataset: {qa} ({qa_count} entries)")
         print(f"  OpenAI: http://localhost:{port}/v1/chat/completions")
         print(f"  Claude: http://localhost:{port}/v1/messages")
         print(f"  Gemini: http://localhost:{port}/models/{{model}}:generateContent")

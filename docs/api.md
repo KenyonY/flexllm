@@ -330,6 +330,7 @@ config = MockServerConfig(
     token_rate=0,           # 流式 token 速率，0 不限制
     error_rate=0,           # 错误率 (0-1)
     thinking=False,         # 是否返回思考内容
+    qa_path="qa.jsonl",     # QA 数据集路径，匹配输入时返回确定性回复
 )
 
 # 上下文管理器方式（后台进程）
@@ -358,6 +359,15 @@ with MockLLMServer(config) as server:
 | Claude | `"thinking": {"type": "enabled", "budget_tokens": 10000}` |
 | Gemini | `"generationConfig": {"thinkingConfig": {"includeThoughts": true}}` |
 
+### QA 数据集（确定性回复）
+
+通过 `--qa` 指定 JSONL 文件，当用户输入精确匹配时返回预设回复，未匹配则回退随机生成：
+
+```jsonl
+{"input": "你好", "output": "你好！有什么可以帮你的？"}
+{"input": "1+1等于几", "output": "2"}
+```
+
 ### CLI
 
 ```bash
@@ -365,6 +375,7 @@ flexllm mock                          # 默认配置
 flexllm mock --thinking               # 启用思考内容
 flexllm mock -p 8080 -d 0.1-0.5      # 自定义端口和延迟
 flexllm mock --error-rate 0.3         # 30% 错误率
+flexllm mock --qa qa.jsonl            # 使用 QA 数据集确定性回复
 ```
 
 ---

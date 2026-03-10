@@ -22,6 +22,11 @@
     flexllm mock --rps 10                 # 每秒最多 10 个请求
     flexllm mock --token-rate 50          # 流式返回每秒 50 个 token
     flexllm mock --thinking               # 响应包含思考内容
+    flexllm mock --qa qa.jsonl            # 使用 QA 数据集确定性回复
+
+    # QA 数据集格式（JSONL，每行一个 JSON）:
+    # {"input": "你好", "output": "你好！有什么可以帮你的？"}
+    # {"input": "1+1等于几", "output": "2"}
 
     # Python
     from flexllm.mock import MockLLMServer, MockServerConfig
@@ -130,6 +135,7 @@ class MockServerConfig:
     token_rate: float = 0  # 流式返回时每秒 token 数，0 表示不限制
     error_rate: float = 0  # 请求失败率 (0-1)，0 表示不失败
     thinking: bool = False  # 是否在响应中包含思考内容
+    qa_path: str | None = None  # QA 数据集路径（JSONL），用于确定性回复
 
 
 class MockLLMServer:
@@ -144,6 +150,52 @@ class MockLLMServer:
         self._runner = None
         self._process = None
         self._rps_limiter = RPSLimiter(self.config.rps)
+        self._qa_map: dict[str, str] = self._load_qa_data(self.config.qa_path)
+
+    @staticmethod
+    def _load_qa_data(qa_path: str | None) -> dict[str, str]:
+        """从 JSONL 文件加载 QA 映射，每行格式: {"input": "...", "output": "..."}"""
+        if not qa_path:
+            return {}
+        import pathlib
+
+        path = pathlib.Path(qa_path)
+        if not path.exists():
+            raise FileNotFoundError(f"QA 数据文件不存在: {qa_path}")
+        qa_map = {}
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                item = json.loads(line)
+                qa_map[item["input"]] = item["output"]
+        return qa_map
+
+    def _extract_last_user_text(self, messages: list[dict], api_format: str = "openai") -> str:
+        """从消息列表中提取最后一条用户消息的文本"""
+        if api_format == "gemini":
+            for msg in reversed(messages):
+                if msg.get("role") == "user":
+                    parts = msg.get("parts", [])
+                    for part in reversed(parts):
+                        text = part.get("text")
+                        if text:
+                            return text
+            return ""
+
+        # OpenAI / Claude 格式
+        for msg in reversed(messages):
+            if msg.get("role") == "user":
+                content = msg.get("content", "")
+                if isinstance(content, str):
+                    return content
+                if isinstance(content, list):
+                    for item in reversed(content):
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            return item.get("text", "")
+                return ""
+        return ""
 
     @property
     def url(self) -> str:
@@ -166,8 +218,12 @@ class MockLLMServer:
             return self.config.delay_min
         return random.uniform(self.config.delay_min, self.config.delay_max)
 
-    def _generate_response_text(self) -> str:
-        """生成随机长度的响应文本"""
+    def _generate_response_text(self, user_message: str = "") -> str:
+        """生成响应文本。如果有 QA 映射且匹配到输入，返回确定性回复；否则随机生成。"""
+        if user_message and self._qa_map:
+            matched = self._qa_map.get(user_message)
+            if matched is not None:
+                return matched
         target_len = random.randint(self.config.response_min_len, self.config.response_max_len)
         result = []
         current_len = 0
@@ -606,7 +662,8 @@ class MockLLMServer:
                 }
             )
 
-        response_text = self._generate_response_text()
+        user_text = self._extract_last_user_text(messages, "openai")
+        response_text = self._generate_response_text(user_text)
         thinking_text = self._generate_thinking_text() if include_thinking else None
 
         if stream:
@@ -927,7 +984,8 @@ class MockLLMServer:
                 }
             )
 
-        response_text = self._generate_response_text()
+        user_text = self._extract_last_user_text(messages, "claude")
+        response_text = self._generate_response_text(user_text)
         thinking_text = self._generate_thinking_text() if include_thinking else None
         completion_tokens = self._estimate_tokens(response_text)
         if thinking_text:
@@ -1108,7 +1166,8 @@ class MockLLMServer:
                 }
             )
 
-        response_text = self._generate_response_text()
+        user_text = self._extract_last_user_text(contents, "gemini")
+        response_text = self._generate_response_text(user_text)
         thinking_text = self._generate_thinking_text() if include_thinking else None
         completion_tokens = self._estimate_tokens(response_text)
         if thinking_text:

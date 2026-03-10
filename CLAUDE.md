@@ -33,6 +33,7 @@ flexllm set-model gpt-4               # 设置默认模型
 flexllm test                          # 测试连接
 flexllm init                          # 初始化配置文件
 flexllm mock                          # 启动 Mock LLM 服务器（测试用）
+flexllm mock --qa qa.jsonl            # Mock 服务使用 QA 数据集确定性回复
 flexllm pricing gpt-4                 # 查询模型定价
 flexllm credits                       # 查询 API Key 余额
 
