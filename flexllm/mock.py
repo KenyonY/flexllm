@@ -222,20 +222,30 @@ class MockLLMServer:
         return _clean(copy.deepcopy(data))
 
     def _log_request(self, api_format: str, request_data: dict, output: str, tokens: dict):
-        """记录请求日志到 JSONL 文件"""
-        if not self.config.log_path:
-            return
+        """记录请求日志：终端打印摘要，可选写入 JSONL 文件"""
         from datetime import datetime, timezone
 
-        record = {
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-            "api_format": api_format,
-            "request": self._sanitize_request(request_data),
-            "output": output,
-            **tokens,
-        }
-        with open(self.config.log_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        fmt = "gemini" if api_format == "gemini" else "openai"
+        messages = request_data.get("contents" if fmt == "gemini" else "messages", [])
+        user_text = self._extract_last_user_text(messages, fmt)
+        input_summary = user_text[:50] + ("..." if len(user_text) > 50 else "")
+        output_summary = output[:50] + ("..." if len(output) > 50 else "")
+        pt, ct = tokens.get("prompt_tokens", 0), tokens.get("completion_tokens", 0)
+        print(
+            f'[{now}] {api_format} | input: "{input_summary}" | output: "{output_summary}" | tokens: {pt}→{ct}'
+        )
+
+        if self.config.log_path:
+            record = {
+                "timestamp": now,
+                "api_format": api_format,
+                "request": self._sanitize_request(request_data),
+                "output": output,
+                **tokens,
+            }
+            with open(self.config.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     @property
     def url(self) -> str:

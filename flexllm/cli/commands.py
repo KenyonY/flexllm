@@ -1298,7 +1298,7 @@ models:
             ),
         ] = None,
         log: Annotated[
-            str, Option("--log", help="请求日志保存路径（JSONL），记录每个请求的输入输出")
+            str, Option("--log", help="请求日志保存路径（JSONL），记录每个请求的完整输入输出")
         ] = None,
     ):
         """启动 Mock LLM 服务器
@@ -1310,7 +1310,7 @@ models:
         flexllm mock -d 0.5                   # 固定延迟 0.5s
         flexllm mock --error-rate 0.5         # 50% 请求返回错误
         flexllm mock --qa qa.jsonl            # 使用 QA 数据集确定性回复
-        flexllm mock --log requests.jsonl     # 记录请求日志
+        flexllm mock --log requests.jsonl     # 额外将请求日志写入文件
         """
         try:
             from ..mock import MockLLMServer, MockServerConfig, parse_range
