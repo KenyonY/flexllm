@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.8.3] - 2026-03-10
+
+### Bug Fixes
+
+- **mock**: 将 mock server 监听地址改为 0.0.0.0 以支持远程访问
+
+### Features
+
+- **mock**: 支持通过 QA 数据集实现确定性回复
+
 ## [0.8.2] - 2026-03-08
 
 ### Bug Fixes
