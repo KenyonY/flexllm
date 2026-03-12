@@ -9,6 +9,7 @@
 - Token 速率控制（流式返回时每秒 token 数）
 - 支持 OpenAI / Claude / Gemini 三种 API 格式
 - 支持 Embeddings 端点（/v1/embeddings），确定性伪向量
+- 支持 MCP (Model Context Protocol) JSON-RPC 端点（/mcp），支持 Streamable HTTP (SSE)
 - 支持流式和非流式响应
 - 可选的思考/推理内容返回
 - Tool Call 支持：请求含 tools 时自动返回 tool_call 响应（OpenAI tool_calls / Claude tool_use / Gemini functionCall）
@@ -93,6 +94,63 @@ THINKING_SENTENCES = [
     "我需要验证一下这个结论是否正确。",
     "综合以上分析，我得出了以下结论。",
     "让我重新审视一下这个问题的前提条件。",
+]
+
+
+# MCP Mock 预定义工具
+MCP_MOCK_TOOLS = [
+    {
+        "name": "get_weather",
+        "description": "获取指定城市的天气信息",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "city": {"type": "string", "description": "城市名称"},
+            },
+            "required": ["city"],
+        },
+    },
+    {
+        "name": "search",
+        "description": "搜索信息",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "搜索关键词"},
+                "limit": {"type": "integer", "description": "结果数量限制"},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "read_file",
+        "description": "读取文件内容",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "文件路径"},
+            },
+            "required": ["path"],
+        },
+    },
+]
+
+MCP_MOCK_RESOURCES = [
+    {"uri": "file:///workspace/README.md", "name": "README.md", "mimeType": "text/markdown"},
+    {"uri": "file:///workspace/config.yaml", "name": "config.yaml", "mimeType": "text/yaml"},
+]
+
+MCP_MOCK_PROMPTS = [
+    {
+        "name": "summarize",
+        "description": "总结文本内容",
+        "arguments": [{"name": "text", "required": True}],
+    },
+    {
+        "name": "translate",
+        "description": "翻译文本",
+        "arguments": [{"name": "text", "required": True}, {"name": "language", "required": True}],
+    },
 ]
 
 
@@ -1471,6 +1529,166 @@ class MockLLMServer:
             }
         )
 
+    # ── MCP (Model Context Protocol) JSON-RPC ──
+
+    async def _handle_mcp(self, request: web.Request) -> web.StreamResponse:
+        """处理 MCP JSON-RPC 请求，支持 JSON 和 SSE 响应"""
+        self.request_count += 1
+        await self._rps_limiter.acquire()
+        await asyncio.sleep(self._get_delay())
+
+        try:
+            data = await request.json()
+        except json.JSONDecodeError:
+            return web.json_response(
+                {"jsonrpc": "2.0", "error": {"code": -32700, "message": "Parse error"}, "id": None},
+                status=400,
+            )
+
+        # 批量请求
+        if isinstance(data, list):
+            results = [self._handle_mcp_single(item) for item in data]
+            return web.json_response(results)
+
+        # 错误模拟
+        if self.config.error_rate > 0 and random.random() < self.config.error_rate:
+            return web.json_response(
+                {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32603, "message": "Mock MCP server simulated error"},
+                    "id": data.get("id"),
+                },
+                status=500,
+            )
+
+        # 检查 Accept 头决定是否用 SSE
+        accept = request.headers.get("Accept", "")
+        use_sse = "text/event-stream" in accept
+
+        result = self._handle_mcp_single(data)
+
+        if use_sse and data.get("id") is not None:
+            # Streamable HTTP: SSE 响应
+            response = web.StreamResponse(
+                status=200,
+                headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
+            )
+            await response.prepare(request)
+            sse_data = json.dumps(result, ensure_ascii=False)
+            await response.write(f"data: {sse_data}\n\n".encode())
+            await response.write_eof()
+            return response
+
+        return web.json_response(result)
+
+    def _handle_mcp_single(self, data: dict) -> dict:
+        """处理单条 MCP JSON-RPC 请求"""
+        method = data.get("method", "")
+        params = data.get("params", {})
+        req_id = data.get("id")
+
+        # Notification（无 id）不需要响应
+        if req_id is None and method.startswith("notifications/"):
+            return {}
+
+        handler = {
+            "initialize": self._mcp_initialize,
+            "tools/list": self._mcp_tools_list,
+            "tools/call": self._mcp_tools_call,
+            "resources/list": self._mcp_resources_list,
+            "resources/read": self._mcp_resources_read,
+            "prompts/list": self._mcp_prompts_list,
+            "prompts/get": self._mcp_prompts_get,
+            "ping": self._mcp_ping,
+        }.get(method)
+
+        if handler is None:
+            return {
+                "jsonrpc": "2.0",
+                "error": {"code": -32601, "message": f"Method not found: {method}"},
+                "id": req_id,
+            }
+
+        result = handler(params)
+        return {"jsonrpc": "2.0", "result": result, "id": req_id}
+
+    def _mcp_initialize(self, params: dict) -> dict:
+        return {
+            "protocolVersion": params.get("protocolVersion", "2025-03-26"),
+            "serverInfo": {"name": "mock-mcp-server", "version": "1.0.0"},
+            "capabilities": {
+                "tools": {"listChanged": False},
+                "resources": {"subscribe": False, "listChanged": False},
+                "prompts": {"listChanged": False},
+            },
+        }
+
+    def _mcp_ping(self, params: dict) -> dict:
+        return {}
+
+    def _mcp_tools_list(self, params: dict) -> dict:
+        return {"tools": MCP_MOCK_TOOLS}
+
+    def _mcp_tools_call(self, params: dict) -> dict:
+        tool_name = params.get("name", "")
+        arguments = params.get("arguments", {})
+
+        # 根据 tool 名称返回 mock 结果
+        if tool_name == "get_weather":
+            city = arguments.get("city", "未知城市")
+            text = f"{city}：晴，28°C，湿度 65%，东南风 3 级"
+        elif tool_name == "search":
+            query = arguments.get("query", "")
+            text = f"搜索 '{query}' 找到 3 个结果：\n1. {query} 简介\n2. {query} 详细说明\n3. {query} 最新动态"
+        elif tool_name == "read_file":
+            path = arguments.get("path", "")
+            text = (
+                f"# Mock File Content\n\nThis is mock content for: {path}\n\nLine 1\nLine 2\nLine 3"
+            )
+        else:
+            text = self._generate_response_text()
+
+        return {
+            "content": [{"type": "text", "text": text}],
+            "isError": False,
+        }
+
+    def _mcp_resources_list(self, params: dict) -> dict:
+        return {"resources": MCP_MOCK_RESOURCES}
+
+    def _mcp_resources_read(self, params: dict) -> dict:
+        uri = params.get("uri", "")
+        return {
+            "contents": [
+                {
+                    "uri": uri,
+                    "mimeType": "text/plain",
+                    "text": f"Mock content for resource: {uri}",
+                }
+            ],
+        }
+
+    def _mcp_prompts_list(self, params: dict) -> dict:
+        return {"prompts": MCP_MOCK_PROMPTS}
+
+    def _mcp_prompts_get(self, params: dict) -> dict:
+        name = params.get("name", "")
+        arguments = params.get("arguments", {})
+        if name == "summarize":
+            text = arguments.get("text", "")
+            content = f"摘要：{text[:50]}..." if len(text) > 50 else f"摘要：{text}"
+        elif name == "translate":
+            text = arguments.get("text", "")
+            lang = arguments.get("language", "English")
+            content = f"[翻译为 {lang}] {text}"
+        else:
+            content = f"Mock prompt response for: {name}"
+
+        return {
+            "description": f"Mock prompt: {name}",
+            "messages": [{"role": "user", "content": {"type": "text", "text": content}}],
+        }
+
     def _create_app(self) -> web.Application:
         """创建 aiohttp 应用"""
         app = web.Application()
@@ -1482,6 +1700,8 @@ class MockLLMServer:
         app.router.add_post("/v1/messages", self._handle_claude_messages)
         # Gemini（model 名称中含冒号，用正则匹配）
         app.router.add_route("POST", r"/models/{model_action:.+}", self._handle_gemini)
+        # MCP (JSON-RPC over HTTP)
+        app.router.add_post("/mcp", self._handle_mcp)
         return app
 
     async def start_async(self):

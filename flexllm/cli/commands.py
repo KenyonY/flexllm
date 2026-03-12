@@ -1365,6 +1365,7 @@ models:
         print(f"  OpenAI: http://localhost:{port}/v1/chat/completions")
         print(f"  Claude: http://localhost:{port}/v1/messages")
         print(f"  Gemini: http://localhost:{port}/models/{{model}}:generateContent")
+        print(f"  MCP:    http://localhost:{port}/mcp")
         print("\nPress Ctrl+C to stop")
 
         try:
