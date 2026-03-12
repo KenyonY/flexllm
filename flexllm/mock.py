@@ -8,6 +8,7 @@
 - RPS 限制（每秒请求数）
 - Token 速率控制（流式返回时每秒 token 数）
 - 支持 OpenAI / Claude / Gemini 三种 API 格式
+- 支持 Embeddings 端点（/v1/embeddings），确定性伪向量
 - 支持流式和非流式响应
 - 可选的思考/推理内容返回
 - Tool Call 支持：请求含 tools 时自动返回 tool_call 响应（OpenAI tool_calls / Claude tool_use / Gemini functionCall）
@@ -200,23 +201,43 @@ class MockLLMServer:
 
     @staticmethod
     def _sanitize_request(data: dict) -> dict:
-        """清理请求体，将 base64 图片替换为占位符"""
+        """清理请求体，将 base64 媒体数据替换为占位符"""
         import copy
         import re
 
-        def _clean(obj):
+        # 需要清理 base64 的字段：(父级 key, media_type 来源 key)
+        # - OpenAI image_url: {"url": "data:image/png;base64,..."}
+        # - OpenAI input_audio: {"data": "base64...", "format": "wav"}
+        # - Gemini inline_data: {"mime_type": "video/mp4", "data": "base64..."}
+        # - Claude source: {"type": "base64", "media_type": "image/png", "data": "base64..."}
+        _BASE64_FIELDS = {"inline_data", "source", "input_audio"}
+
+        def _b64_size(s: str) -> str:
+            size_kb = len(s) * 3 / 4 / 1024
+            if size_kb >= 1024:
+                return f"{size_kb / 1024:.1f}MB"
+            return f"{size_kb:.1f}KB"
+
+        def _clean(obj, parent_key=None):
             if isinstance(obj, str):
                 # data:image/png;base64,xxxxx... → <image:32.1KB>
-                m = re.match(r"data:image/[^;]+;base64,", obj)
+                m = re.match(r"data:([\w/+.-]+);base64,", obj)
                 if m:
-                    raw_len = len(obj) - len(m.group())
-                    size_kb = raw_len * 3 / 4 / 1024
-                    return f"<image:{size_kb:.1f}KB>"
+                    raw = obj[len(m.group()) :]
+                    return f"<{m.group(1)}:{_b64_size(raw)}>"
                 return obj
             if isinstance(obj, dict):
-                return {k: _clean(v) for k, v in obj.items()}
+                # inline_data/source/input_audio 中的 data 字段
+                if parent_key in _BASE64_FIELDS and "data" in obj:
+                    obj = dict(obj)
+                    media_type = (
+                        obj.get("mime_type") or obj.get("media_type") or obj.get("format", "binary")
+                    )
+                    obj["data"] = f"<{media_type}:{_b64_size(obj['data'])}>"
+                    return {k: _clean(v, k) for k, v in obj.items()}
+                return {k: _clean(v, k) for k, v in obj.items()}
             if isinstance(obj, list):
-                return [_clean(v) for v in obj]
+                return [_clean(v, parent_key) for v in obj]
             return obj
 
         return _clean(copy.deepcopy(data))
@@ -268,7 +289,9 @@ class MockLLMServer:
             return self.config.delay_min
         return random.uniform(self.config.delay_min, self.config.delay_max)
 
-    def _generate_response_text(self, user_message: str = "") -> str:
+    def _generate_response_text(
+        self, user_message: str = "", response_format: dict | None = None
+    ) -> str:
         """生成响应文本。如果有 QA 映射且匹配到输入，返回确定性回复；否则随机生成。"""
         if user_message and self._qa_map:
             # 精确匹配优先
@@ -282,6 +305,11 @@ class MockLLMServer:
                     best_key = key
             if best_key:
                 return self._qa_map[best_key]
+
+        # response_format: json_object 或 json_schema → 返回合法 JSON
+        if response_format and response_format.get("type") in ("json_object", "json_schema"):
+            return self._generate_json_response(response_format)
+
         target_len = random.randint(self.config.response_min_len, self.config.response_max_len)
         result = []
         current_len = 0
@@ -298,6 +326,46 @@ class MockLLMServer:
                 text = text[: cut_pos + 1]
 
         return text
+
+    def _generate_json_response(self, response_format: dict) -> str:
+        """根据 response_format 生成合法 JSON 响应"""
+        fmt_type = response_format.get("type")
+
+        if fmt_type == "json_schema":
+            schema = response_format.get("json_schema", {}).get("schema", {})
+            if schema:
+                return json.dumps(self._generate_from_schema(schema), ensure_ascii=False)
+
+        # json_object 或无 schema 的 fallback：返回通用 JSON
+        return json.dumps(
+            {"result": random.choice(SENTENCES), "status": "ok"},
+            ensure_ascii=False,
+        )
+
+    def _generate_from_schema(self, schema: dict) -> any:
+        """根据 JSON Schema 递归生成 mock 数据"""
+        schema_type = schema.get("type", "object")
+
+        if schema_type == "object":
+            obj = {}
+            for prop_name, prop_schema in schema.get("properties", {}).items():
+                obj[prop_name] = self._generate_from_schema(prop_schema)
+            return obj
+        elif schema_type == "array":
+            items_schema = schema.get("items", {"type": "string"})
+            return [self._generate_from_schema(items_schema) for _ in range(2)]
+        elif schema_type == "string":
+            if "enum" in schema:
+                return random.choice(schema["enum"])
+            return random.choice(SENTENCES)
+        elif schema_type == "integer":
+            return random.randint(0, 100)
+        elif schema_type == "number":
+            return round(random.uniform(0, 100), 2)
+        elif schema_type == "boolean":
+            return random.choice([True, False])
+        else:
+            return None
 
     def _generate_thinking_text(self) -> str:
         """生成随机的思考过程文本"""
@@ -727,7 +795,8 @@ class MockLLMServer:
             )
 
         user_text = self._extract_last_user_text(messages, "openai")
-        response_text = self._generate_response_text(user_text)
+        response_format = data.get("response_format")
+        response_text = self._generate_response_text(user_text, response_format)
         thinking_text = self._generate_thinking_text() if include_thinking else None
         self._log_request(
             "openai",
@@ -1064,6 +1133,7 @@ class MockLLMServer:
             )
 
         user_text = self._extract_last_user_text(messages, "claude")
+        # Claude 没有 response_format，但如果请求中带了也兼容处理
         response_text = self._generate_response_text(user_text)
         thinking_text = self._generate_thinking_text() if include_thinking else None
         completion_tokens = self._estimate_tokens(response_text)
@@ -1259,7 +1329,16 @@ class MockLLMServer:
             )
 
         user_text = self._extract_last_user_text(contents, "gemini")
-        response_text = self._generate_response_text(user_text)
+        # Gemini: responseMimeType=application/json + responseSchema → JSON 模式
+        gen_config = data.get("generationConfig", {})
+        gemini_rf = None
+        if gen_config.get("responseMimeType") == "application/json":
+            response_schema = gen_config.get("responseSchema")
+            if response_schema:
+                gemini_rf = {"type": "json_schema", "json_schema": {"schema": response_schema}}
+            else:
+                gemini_rf = {"type": "json_object"}
+        response_text = self._generate_response_text(user_text, gemini_rf)
         thinking_text = self._generate_thinking_text() if include_thinking else None
         completion_tokens = self._estimate_tokens(response_text)
         if thinking_text:
@@ -1298,6 +1377,89 @@ class MockLLMServer:
             }
         )
 
+    # ── Embeddings ──
+
+    @staticmethod
+    def _generate_embedding(text: str, dimensions: int) -> list[float]:
+        """基于文本内容生成确定性的伪向量（相同文本 → 相同向量）"""
+        import hashlib
+
+        seed = int(hashlib.md5(text.encode()).hexdigest(), 16) & 0xFFFFFFFF
+        rng = random.Random(seed)
+        vec = [rng.gauss(0, 1) for _ in range(dimensions)]
+        # L2 归一化
+        norm = sum(x * x for x in vec) ** 0.5
+        return [x / norm for x in vec]
+
+    async def _handle_embeddings(self, request: web.Request) -> web.Response:
+        """处理 /v1/embeddings 请求（OpenAI 格式）"""
+        await self._rps_limiter.acquire()
+        self.request_count += 1
+
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+
+        model = data.get("model", self.config.model)
+        input_data = data.get("input", "")
+        dimensions = data.get("dimensions", 128)
+
+        await asyncio.sleep(self._get_delay())
+
+        if self.config.error_rate > 0 and random.random() < self.config.error_rate:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": f"Mock server simulated error (error_rate={self.config.error_rate})",
+                        "type": "server_error",
+                        "code": "mock_error",
+                    }
+                },
+                status=500,
+            )
+
+        # input 可以是 str 或 list[str]
+        if isinstance(input_data, str):
+            texts = [input_data]
+        else:
+            texts = input_data
+
+        embeddings = []
+        total_tokens = 0
+        for i, text in enumerate(texts):
+            vec = self._generate_embedding(text, dimensions)
+            embeddings.append({"object": "embedding", "index": i, "embedding": vec})
+            total_tokens += self._estimate_tokens(text)
+
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        input_summary = str(texts[0])[:50] + ("..." if len(str(texts[0])) > 50 else "")
+        print(
+            f'[{now}] embedding | input: "{input_summary}" | count: {len(texts)} | dim: {dimensions}'
+        )
+
+        if self.config.log_path:
+            record = {
+                "timestamp": now,
+                "api_format": "embedding",
+                "input_count": len(texts),
+                "dimensions": dimensions,
+                "prompt_tokens": total_tokens,
+            }
+            with open(self.config.log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+        return web.json_response(
+            {
+                "object": "list",
+                "data": embeddings,
+                "model": model,
+                "usage": {"prompt_tokens": total_tokens, "total_tokens": total_tokens},
+            }
+        )
+
     # ── 通用路由和服务器生命周期 ──
 
     async def _handle_models(self, request: web.Request) -> web.Response:
@@ -1314,6 +1476,7 @@ class MockLLMServer:
         app = web.Application()
         # OpenAI
         app.router.add_post("/v1/chat/completions", self._handle_chat_completions)
+        app.router.add_post("/v1/embeddings", self._handle_embeddings)
         app.router.add_get("/v1/models", self._handle_models)
         # Claude（共享 /v1 前缀）
         app.router.add_post("/v1/messages", self._handle_claude_messages)
