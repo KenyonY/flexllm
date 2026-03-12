@@ -29,6 +29,8 @@ def register_commands(app):
         prompt: Annotated[str | None, Argument(help="用户问题")] = None,
         system: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
         model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
@@ -40,10 +42,7 @@ def register_commands(app):
         flexllm ask "什么是Python"
         flexllm ask "解释代码" -s "你是代码专家"
         echo "长文本" | flexllm ask "总结一下"
-
-        \b
-        临时使用未配置的服务:
-        FLEXLLM_BASE_URL="http://localhost:8000/v1" FLEXLLM_MODEL="qwen" flexllm ask "你好"
+        flexllm ask "你好" --base-url http://localhost:8000/v1 -m qwen
         """
         stdin_content = None
         if not sys.stdin.isatty():
@@ -58,7 +57,9 @@ def register_commands(app):
         else:
             full_prompt = prompt
 
-        model_id, base_url, api_key = resolve_model_config(model, required=True)
+        model_id, base_url, api_key = resolve_model_config(
+            model, base_url=base_url, api_key=api_key, required=True
+        )
 
         config = get_config()
         if not system:
