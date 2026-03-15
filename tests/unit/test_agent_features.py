@@ -51,9 +51,10 @@ class TestProjectInstructions:
             from flexllm.cli.chat_helpers import build_agent_system
 
             result = build_agent_system("你是助手")
-            assert "你是助手" in result
-            assert "这是项目指令" in result
-            assert "# Project Instructions" in result
+            system = result["system"]
+            assert "你是助手" in system
+            assert "这是项目指令" in system
+            assert "# Project Instructions" in system
 
     def test_build_agent_system_without_project_instructions(self, tmp_path):
         """没有 .flexllm.md 时不影响 system prompt"""
@@ -61,8 +62,8 @@ class TestProjectInstructions:
             from flexllm.cli.chat_helpers import build_agent_system
 
             result = build_agent_system("你是助手")
-            assert result == "你是助手"
-            assert "Project Instructions" not in result
+            assert result["system"] == "你是助手"
+            assert "Project Instructions" not in result["system"]
 
 
 class TestSkills:
@@ -74,7 +75,7 @@ class TestSkills:
         skills_dir.mkdir()
         (skills_dir / "code-review.md").write_text("你是代码审查专家，关注安全性和性能。")
 
-        with patch("flexllm.cli.chat_helpers.SKILLS_DIR", skills_dir):
+        with patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [skills_dir]):
             from flexllm.cli.chat_helpers import load_skill
 
             result = load_skill("code-review")
@@ -91,7 +92,7 @@ class TestSkills:
             "---\nname: code-review\ndescription: 代码审核专家\n---\n\n你是代码审查专家。"
         )
 
-        with patch("flexllm.cli.chat_helpers.SKILLS_DIR", skills_dir):
+        with patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [skills_dir]):
             from flexllm.cli.chat_helpers import load_skill
 
             result = load_skill("code-review")
@@ -109,7 +110,7 @@ class TestSkills:
         sub.mkdir()
         (sub / "SKILL.md").write_text("目录版本")
 
-        with patch("flexllm.cli.chat_helpers.SKILLS_DIR", skills_dir):
+        with patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [skills_dir]):
             from flexllm.cli.chat_helpers import load_skill
 
             result = load_skill("review")
@@ -120,7 +121,7 @@ class TestSkills:
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
 
-        with patch("flexllm.cli.chat_helpers.SKILLS_DIR", skills_dir):
+        with patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [skills_dir]):
             from flexllm.cli.chat_helpers import load_skill
 
             result = load_skill("nonexistent")
@@ -139,7 +140,7 @@ class TestSkills:
         # 非 skill 文件
         (skills_dir / "not-a-skill.txt").write_text("忽略")
 
-        with patch("flexllm.cli.chat_helpers.SKILLS_DIR", skills_dir):
+        with patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [skills_dir]):
             from flexllm.cli.chat_helpers import list_skills
 
             result = list_skills()
@@ -147,7 +148,7 @@ class TestSkills:
 
     def test_list_skills_empty(self, tmp_path):
         """skills 目录不存在时返回空列表"""
-        with patch("flexllm.cli.chat_helpers.SKILLS_DIR", tmp_path / "nonexistent"):
+        with patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [tmp_path / "nonexistent"]):
             from flexllm.cli.chat_helpers import list_skills
 
             result = list_skills()
@@ -187,15 +188,16 @@ class TestSkills:
         (sub / "SKILL.md").write_text("---\nname: review\n---\n\n审查代码时关注以下要点...")
 
         with (
-            patch("flexllm.cli.chat_helpers.SKILLS_DIR", skills_dir),
+            patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [skills_dir]),
             patch("pathlib.Path.cwd", return_value=tmp_path),
         ):
             from flexllm.cli.chat_helpers import build_agent_system
 
             result = build_agent_system("你是助手", skill="review")
-            assert "你是助手" in result
-            assert "审查代码时关注以下要点" in result
-            assert "# Skill: review" in result
+            system = result["system"]
+            assert "你是助手" in system
+            assert "审查代码时关注以下要点" in system
+            assert "# Skill: review" in system
 
     def test_build_agent_system_unknown_skill(self, tmp_path):
         """未知 skill 应抛出 ValueError"""
@@ -203,7 +205,7 @@ class TestSkills:
         skills_dir.mkdir()
 
         with (
-            patch("flexllm.cli.chat_helpers.SKILLS_DIR", skills_dir),
+            patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [skills_dir]),
             patch("pathlib.Path.cwd", return_value=tmp_path),
         ):
             from flexllm.cli.chat_helpers import build_agent_system
@@ -221,15 +223,16 @@ class TestSkills:
         (skills_dir / "debug.md").write_text("调试指导")
 
         with (
-            patch("flexllm.cli.chat_helpers.SKILLS_DIR", skills_dir),
+            patch("flexllm.cli.chat_helpers.SKILLS_DIRS", [skills_dir]),
             patch("pathlib.Path.cwd", return_value=tmp_path),
         ):
             from flexllm.cli.chat_helpers import build_agent_system
 
             result = build_agent_system("基础系统提示", skill="debug")
-            assert "基础系统提示" in result
-            assert "项目：flexllm" in result
-            assert "调试指导" in result
+            system = result["system"]
+            assert "基础系统提示" in system
+            assert "项目：flexllm" in system
+            assert "调试指导" in system
 
 
 class TestMCPConfigMerge:
@@ -272,6 +275,7 @@ class TestMCPConfigMerge:
         with (
             patch.object(FlexLLMConfig, "_load_config", return_value={}),
             patch.object(FlexLLMConfig, "_load_project_settings", return_value={}),
+            patch.object(FlexLLMConfig, "_load_claude_mcp_servers", return_value={}),
         ):
             config = FlexLLMConfig()
             agent_config = config.get_agent_config()
@@ -292,6 +296,7 @@ class TestMCPConfigMerge:
         with (
             patch.object(FlexLLMConfig, "_load_config", return_value=mock_config),
             patch.object(FlexLLMConfig, "_load_project_settings", return_value={}),
+            patch.object(FlexLLMConfig, "_load_claude_mcp_servers", return_value={}),
         ):
             config = FlexLLMConfig()
             agent_config = config.get_agent_config()
@@ -313,6 +318,7 @@ class TestMCPConfigMerge:
 
         with (
             patch.object(FlexLLMConfig, "_load_config", return_value={}),
+            patch.object(FlexLLMConfig, "_load_claude_mcp_servers", return_value={}),
             patch("pathlib.Path.cwd", return_value=tmp_path),
         ):
             config = FlexLLMConfig()
@@ -348,6 +354,7 @@ class TestMCPConfigMerge:
 
         with (
             patch.object(FlexLLMConfig, "_load_config", return_value=mock_config),
+            patch.object(FlexLLMConfig, "_load_claude_mcp_servers", return_value={}),
             patch("pathlib.Path.cwd", return_value=tmp_path),
         ):
             config = FlexLLMConfig()
@@ -377,6 +384,7 @@ class TestMCPConfigMerge:
         with (
             patch.object(FlexLLMConfig, "_load_config", return_value=mock_config),
             patch.object(FlexLLMConfig, "_load_project_settings", return_value={}),
+            patch.object(FlexLLMConfig, "_load_claude_mcp_servers", return_value={}),
         ):
             config = FlexLLMConfig()
             agent_config = config.get_agent_config()
@@ -404,6 +412,7 @@ class TestMCPConfigMerge:
         with (
             patch.object(FlexLLMConfig, "_load_config", return_value=mock_config),
             patch.object(FlexLLMConfig, "_load_project_settings", return_value={}),
+            patch.object(FlexLLMConfig, "_load_claude_mcp_servers", return_value={}),
         ):
             config = FlexLLMConfig()
             agent_config = config.get_agent_config()

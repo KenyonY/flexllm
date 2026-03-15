@@ -42,6 +42,8 @@ class MCPConnection:
         url: str | None = None,
         env: dict[str, str] | None = None,
         name: str | None = None,
+        headers: dict[str, str] | None = None,
+        cwd: str | None = None,
     ):
         if not command and not url:
             raise ValueError("必须提供 command (stdio) 或 url (SSE)")
@@ -52,6 +54,8 @@ class MCPConnection:
         self.url = url
         self.env = env
         self.name = name or self._infer_name()
+        self.headers = headers
+        self.cwd = cwd
 
         self._session: ClientSession | None = None
         self._exit_stack: AsyncExitStack | None = None
@@ -96,11 +100,14 @@ class MCPConnection:
         else:
             parts = list(self.command)
 
-        server_params = StdioServerParameters(
-            command=parts[0],
-            args=parts[1:],
-            env=self.env,
-        )
+        params_kwargs = {
+            "command": parts[0],
+            "args": parts[1:],
+            "env": self.env,
+        }
+        if self.cwd:
+            params_kwargs["cwd"] = self.cwd
+        server_params = StdioServerParameters(**params_kwargs)
 
         transport = await self._exit_stack.enter_async_context(stdio_client(server_params))
         read_stream, write_stream = transport
@@ -113,7 +120,10 @@ class MCPConnection:
         from mcp import ClientSession
         from mcp.client.sse import sse_client
 
-        transport = await self._exit_stack.enter_async_context(sse_client(self.url))
+        sse_kwargs = {"url": self.url}
+        if self.headers:
+            sse_kwargs["headers"] = self.headers
+        transport = await self._exit_stack.enter_async_context(sse_client(**sse_kwargs))
         read_stream, write_stream = transport
         self._session = await self._exit_stack.enter_async_context(
             ClientSession(read_stream, write_stream)

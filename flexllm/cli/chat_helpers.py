@@ -19,23 +19,29 @@ Rules:
 - Never give up after a single failure — try different methods, URLs, or commands.
 - After finishing, summarize what you did and the results."""
 
-SKILLS_DIR = Path("~/.flexllm/skills").expanduser()
+SKILLS_DIRS = [
+    Path("~/.flexllm/skills").expanduser(),  # flexllm 全局
+    Path(".flexllm/skills"),  # flexllm 项目级
+    Path(".claude/skills"),  # Claude Code 项目级
+    Path("~/.claude/skills").expanduser(),  # Claude Code 全局
+]
 
 
 def load_project_instructions() -> str | None:
-    """从当前目录向上搜索 .flexllm.md 文件，返回内容。
+    """从当前目录向上搜索项目指令文件，返回内容。
 
-    搜索顺序：cwd → parent → ... → /
-    找到第一个即返回。
+    搜索顺序（每层目录）：.flexllm.md 优先，fallback 到 CLAUDE.md
+    从 cwd → parent → ... → / 找到第一个即返回。
     """
     current = Path.cwd()
     for parent in [current, *current.parents]:
-        candidate = parent / ".flexllm.md"
-        if candidate.is_file():
-            try:
-                return candidate.read_text(encoding="utf-8").strip()
-            except Exception:
-                return None
+        for filename in (".flexllm.md", "CLAUDE.md"):
+            candidate = parent / filename
+            if candidate.is_file():
+                try:
+                    return candidate.read_text(encoding="utf-8").strip()
+                except Exception:
+                    return None
     return None
 
 
@@ -90,23 +96,31 @@ def _parse_skill_frontmatter(content: str) -> tuple[dict, str]:
 
 
 def load_skill(skill_name: str) -> dict | None:
-    """从 ~/.flexllm/skills/ 加载 skill。
+    """从多个 skills 目录加载 skill。
 
-    支持两种目录结构：
-    1. ~/.flexllm/skills/{name}/SKILL.md  (Claude Code 风格，推荐)
-    2. ~/.flexllm/skills/{name}.md        (简单模式)
+    搜索路径（按优先级）：SKILLS_DIRS 中的每个目录
+    每个目录支持两种结构：
+    1. {dir}/{name}/SKILL.md  (Claude Code 风格，推荐)
+    2. {dir}/{name}.md        (简单模式)
 
     Returns:
-        {"name": ..., "description": ..., "content": ..., "metadata": {...}} 或 None
+        {"name": ..., "description": ..., "content": ..., "metadata": {...},
+         "allowed_tools": list[str] | None, "model": str | None} 或 None
     """
-    # 优先查找目录模式
-    skill_dir = SKILLS_DIR / skill_name
-    skill_file = skill_dir / "SKILL.md"
-    if not skill_file.is_file():
-        # 回退到扁平模式
-        skill_file = SKILLS_DIR / f"{skill_name}.md"
+    skill_file = None
+    for skills_dir in SKILLS_DIRS:
+        # 目录模式
+        candidate = skills_dir / skill_name / "SKILL.md"
+        if candidate.is_file():
+            skill_file = candidate
+            break
+        # 扁平模式
+        candidate = skills_dir / f"{skill_name}.md"
+        if candidate.is_file():
+            skill_file = candidate
+            break
 
-    if not skill_file.is_file():
+    if not skill_file:
         return None
 
     try:
@@ -115,36 +129,56 @@ def load_skill(skill_name: str) -> dict | None:
         return None
 
     metadata, body = _parse_skill_frontmatter(raw)
+
+    # 解析 allowed-tools（如 "Read, Grep, Bash(git *)" → ["read", "grep", "bash"]）
+    allowed_tools = None
+    allowed_tools_str = metadata.get("allowed-tools") or metadata.get("allowed_tools")
+    if allowed_tools_str:
+        # 按逗号分割，去除工具名后的括号参数，转小写
+        import re
+
+        allowed_tools = []
+        for part in allowed_tools_str.split(","):
+            tool_name = re.sub(r"\(.*\)", "", part).strip().lower()
+            if tool_name and tool_name not in allowed_tools:
+                allowed_tools.append(tool_name)
+
     return {
         "name": metadata.get("name", skill_name),
         "description": metadata.get("description", ""),
         "content": body,
         "metadata": metadata,
+        "allowed_tools": allowed_tools,
+        "model": metadata.get("model"),
     }
 
 
 def list_skills() -> list[str]:
-    """列出所有可用的 skill 名称"""
-    if not SKILLS_DIR.is_dir():
-        return []
+    """列出所有可用的 skill 名称（去重，按优先级保留第一个）"""
     names = set()
-    # 目录模式：skills/{name}/SKILL.md
-    for d in SKILLS_DIR.iterdir():
-        if d.is_dir() and (d / "SKILL.md").is_file():
-            names.add(d.name)
-    # 扁平模式：skills/{name}.md
-    for f in SKILLS_DIR.glob("*.md"):
-        names.add(f.stem)
+    for skills_dir in SKILLS_DIRS:
+        if not skills_dir.is_dir():
+            continue
+        # 目录模式：skills/{name}/SKILL.md
+        for d in skills_dir.iterdir():
+            if d.is_dir() and (d / "SKILL.md").is_file():
+                names.add(d.name)
+        # 扁平模式：skills/{name}.md
+        for f in skills_dir.glob("*.md"):
+            names.add(f.stem)
     return sorted(names)
 
 
-def build_agent_system(system_prompt: str | None, skill: str | None = None) -> str:
+def build_agent_system(system_prompt: str | None, skill: str | None = None) -> dict:
     """构建 agent 的最终 system prompt。
 
     优先级叠加：
     1. 基础 system (用户指定 or 默认)
-    2. .flexllm.md 项目指令
+    2. .flexllm.md / CLAUDE.md 项目指令
     3. skill 模板（如果指定）
+
+    Returns:
+        {"system": str, "allowed_tools": list[str] | None, "model": str | None}
     """
     parts = []
 
@@ -157,17 +191,26 @@ def build_agent_system(system_prompt: str | None, skill: str | None = None) -> s
     if project_instructions:
         parts.append(f"# Project Instructions\n\n{project_instructions}")
 
+    allowed_tools = None
+    skill_model = None
+
     # Skill
     if skill:
         skill_data = load_skill(skill)
         if skill_data:
             parts.append(f"# Skill: {skill_data['name']}\n\n{skill_data['content']}")
+            allowed_tools = skill_data.get("allowed_tools")
+            skill_model = skill_data.get("model")
         else:
             available = list_skills()
             hint = f"，可用: {', '.join(available)}" if available else "（~/.flexllm/skills/ 为空）"
             raise ValueError(f"未知的 skill: {skill}{hint}")
 
-    return "\n\n".join(parts)
+    return {
+        "system": "\n\n".join(parts),
+        "allowed_tools": allowed_tools,
+        "model": skill_model,
+    }
 
 
 def _parse_validators(validate_str: str) -> list:
@@ -357,8 +400,15 @@ def agent_chat(
 
         from .agent_console import AgentConsole
 
-        effective_system = build_agent_system(system_prompt, skill=skill)
-        registry = _build_registry(tools_name, mcp_servers)
+        agent_system = build_agent_system(system_prompt, skill=skill)
+        effective_system = agent_system["system"]
+        # skill 的 allowed_tools 覆盖 --tools 参数
+        effective_tools = (
+            ",".join(agent_system["allowed_tools"])
+            if agent_system.get("allowed_tools")
+            else tools_name
+        )
+        registry = _build_registry(effective_tools, mcp_servers)
         ui = AgentConsole(verbose=verbose)
 
         mcp_conns = []
@@ -499,6 +549,8 @@ async def _connect_mcp_servers(mcp_servers):
                 url=server_spec.get("url"),
                 env=server_spec.get("env"),
                 name=server_spec.get("name"),
+                headers=server_spec.get("headers"),
+                cwd=server_spec.get("cwd"),
             )
         elif server_spec.startswith("http://") or server_spec.startswith("https://"):
             conn = MCPConnection(url=server_spec)
@@ -525,6 +577,8 @@ def agent_run(
     mcp_servers=None,
     stream=True,
     skill=None,
+    enable_tasks=False,
+    enable_todo=False,
 ):
     """Agent 非交互式执行
 
@@ -533,6 +587,8 @@ def agent_run(
         max_fix_attempts: 验证失败时最大修复尝试次数
         mcp_servers: MCP server 命令或 URL 列表
         skill: skill 名称
+        enable_tasks: 启用任务系统
+        enable_todo: 启用 todo 追踪
     """
 
     async def _run():
@@ -540,8 +596,14 @@ def agent_run(
 
         from .agent_console import AgentConsole
 
-        effective_system = build_agent_system(system_prompt, skill=skill)
-        registry = _build_registry(tools_name)
+        agent_system = build_agent_system(system_prompt, skill=skill)
+        effective_system = agent_system["system"]
+        effective_tools = (
+            ",".join(agent_system["allowed_tools"])
+            if agent_system.get("allowed_tools")
+            else tools_name
+        )
+        registry = _build_registry(effective_tools)
         validators = _parse_validators(validate) if validate else None
         ui = AgentConsole(verbose=verbose)
 
@@ -562,6 +624,8 @@ def agent_run(
                     tool_registry=registry,
                     max_rounds=max_rounds,
                     enable_subagent=enable_subagent,
+                    enable_tasks=enable_tasks,
+                    enable_todo=enable_todo,
                 )
 
                 if approve == "manual":

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 from pathlib import Path
 
 
@@ -246,12 +248,24 @@ class FlexLLMConfig:
                 name = item.get("name", f"project-server-{i}")
                 merged_mcp[name] = item
 
+        # Claude Code 兼容：读取 Claude Code MCP 配置作为 fallback
+        claude_mcp = self._load_claude_mcp_servers()
+        for name, spec in claude_mcp.items():
+            if name not in merged_mcp:
+                merged_mcp[name] = spec
+
         # 转换为 list[dict] 格式，name 字段来自 key
         mcp_list = []
         for name, spec in merged_mcp.items():
             if isinstance(spec, dict):
                 entry = dict(spec)
                 entry.setdefault("name", name)
+                # 展开 env 中的 ${VAR} 语法
+                if "env" in entry and isinstance(entry["env"], dict):
+                    entry["env"] = {
+                        k: self._expand_env_vars(v) if isinstance(v, str) else v
+                        for k, v in entry["env"].items()
+                    }
                 mcp_list.append(entry)
 
         return {"mcp_servers": mcp_list}
@@ -271,6 +285,56 @@ class FlexLLMConfig:
                 except Exception:
                     return {}
         return {}
+
+    @staticmethod
+    def _load_claude_mcp_servers() -> dict:
+        """从 Claude Code 配置读取 MCP servers
+
+        读取顺序（低 → 高优先级）：
+        1. ~/.claude.json → mcpServers（全局）
+        2. ~/.claude.json → projects[cwd].mcpServers（项目级）
+        3. .mcp.json（项目根目录，向上搜索）
+        """
+        merged = {}
+
+        # 1 & 2: ~/.claude.json
+        claude_json = Path("~/.claude.json").expanduser()
+        if claude_json.is_file():
+            try:
+                data = json.loads(claude_json.read_text(encoding="utf-8"))
+                # 全局 mcpServers
+                merged.update(data.get("mcpServers", {}))
+                # 项目级 mcpServers
+                cwd = str(Path.cwd())
+                project = data.get("projects", {}).get(cwd, {})
+                merged.update(project.get("mcpServers", {}))
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # 3: .mcp.json（从 cwd 向上搜索）
+        current = Path.cwd()
+        for parent in [current, *current.parents]:
+            mcp_json = parent / ".mcp.json"
+            if mcp_json.is_file():
+                try:
+                    data = json.loads(mcp_json.read_text(encoding="utf-8"))
+                    merged.update(data.get("mcpServers", {}))
+                except (json.JSONDecodeError, OSError):
+                    pass
+                break
+
+        return merged
+
+    @staticmethod
+    def _expand_env_vars(value: str) -> str:
+        """展开 ${VAR} 和 ${VAR:-default} 语法"""
+
+        def _replace(match):
+            var_name = match.group(1)
+            default = match.group(3)  # group(3) 是 :- 后的默认值
+            return os.environ.get(var_name, default if default is not None else match.group(0))
+
+        return re.sub(r"\$\{([^}:]+)(?:(:-)(.*?))?\}", _replace, value)
 
     def get_batch_config(self) -> dict:
         """获取 batch 命令的配置（配置文件中的 batch 节 + 默认值）"""
