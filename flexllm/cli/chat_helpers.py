@@ -4,20 +4,49 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform
 import sys
 from pathlib import Path
 
 from .utils import apply_user_template
 
-AGENT_DEFAULT_SYSTEM = f"""You are an autonomous agent at {os.getcwd()}.
 
-Loop: think briefly → use tools → observe results → continue until done.
+def _build_default_system() -> str:
+    """动态构建默认 system prompt（包含运行时环境信息）"""
+    cwd = os.getcwd()
+    today = __import__("datetime").date.today().isoformat()
+    plat = platform.system()
 
-Rules:
-- Prefer tools over prose. Act, don't just explain.
-- If a tool call fails, analyze the error and try alternative approaches.
-- Never give up after a single failure — try different methods, URLs, or commands.
-- After finishing, summarize what you did and the results."""
+    return f"""You are an autonomous agent that helps users with tasks.
+
+# Environment
+<env>
+Working directory: {cwd}
+Platform: {plat}
+Today's date: {today}
+</env>
+
+# Core Loop
+Think → use tools → observe → repeat until done.
+
+# Rules
+- ALWAYS use tools to take action. Never just explain — do it.
+- Prefer specialized tools over bash for file operations:
+  - Read files: use read (not cat/head/tail)
+  - Edit files: use edit (not sed/awk)
+  - Write files: use write (not echo/cat heredoc)
+  - Search files: use glob (not find/ls)
+  - Search content: use grep (not grep/rg)
+  - Shell commands: use bash for git, curl, pip, docker, etc.
+- Use bash for any shell/network operation: curl/wget for HTTP, pip for packages, git for version control, etc.
+- If a tool call fails, analyze the error and try alternative approaches. Never give up after a single failure.
+- When running multiple independent commands, make parallel tool calls for efficiency.
+
+# Style
+- Be concise and direct. Respond in 1-4 lines unless the task requires more detail.
+- Do not add unnecessary preamble or postamble. Get straight to the action or answer.
+- After finishing, give a brief summary of what you did and the results."""
+
 
 SKILLS_DIRS = [
     Path("~/.flexllm/skills").expanduser(),  # flexllm 全局
@@ -183,7 +212,7 @@ def build_agent_system(system_prompt: str | None, skill: str | None = None) -> d
     parts = []
 
     # 基础 system
-    base = system_prompt or AGENT_DEFAULT_SYSTEM
+    base = system_prompt or _build_default_system()
     parts.append(base)
 
     # 项目指令
@@ -488,7 +517,8 @@ def _build_registry(tools_name, mcp_servers=None):
 
     names = [t.strip() for t in tools_name.split(",") if t.strip()]
 
-    # 处理特殊值
+    # 处理特殊值和别名
+    ALIASES = {"shell": "bash"}
     expanded_names = []
     for name in names:
         if name == "all":
@@ -496,7 +526,7 @@ def _build_registry(tools_name, mcp_servers=None):
         elif name == "code":
             expanded_names.extend(["read", "edit", "glob", "grep", "bash"])
         else:
-            expanded_names.append(name)
+            expanded_names.append(ALIASES.get(name, name))
     names = list(dict.fromkeys(expanded_names))
 
     # 检查未知工具

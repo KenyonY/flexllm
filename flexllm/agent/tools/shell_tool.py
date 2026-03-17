@@ -5,7 +5,11 @@ import subprocess
 from .base import register_tool
 
 
-@register_tool("bash", "执行 shell 命令并返回输出", readonly=False)
+@register_tool(
+    "bash",
+    "执行 shell 命令并返回输出。可运行任意命令，包括 curl/wget 访问网络、pip 安装包等。",
+    readonly=False,
+)
 def bash_exec(command: str, timeout: int = 60) -> str:
     """执行 shell 命令。
 
