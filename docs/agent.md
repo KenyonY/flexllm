@@ -505,6 +505,236 @@ def handler(name: str, args: str, readonly: bool) -> bool:
 
 ---
 
+## 9. 任务系统 (TaskManager) — 持久化任务管理
+
+将复杂工作拆解为可追踪的子任务，状态持久化到文件，支持依赖关系和断点恢复。
+
+### CLI
+
+```bash
+# 启用任务系统
+flexllm agent --tasks --tools code "重构认证模块"
+
+# 同时启用 todo 追踪
+flexllm agent --tasks --todo --tools code "实现用户注册功能"
+```
+
+### Python API
+
+```python
+agent = AgentClient(
+    client=llm,
+    tool_registry=registry,
+    enable_tasks=True,       # 启用任务系统
+    tasks_dir=".tasks",      # 任务文件存放目录（默认 .tasks/）
+)
+result = await agent.run("实现完整的用户注册功能")
+```
+
+启用后 agent 自动获得 4 个工具：`task_create`、`task_update`、`task_list`、`task_get`。
+
+### 独立使用
+
+```python
+from flexllm.agent.task_manager import TaskManager
+
+tm = TaskManager(".tasks")
+
+# 创建任务
+tm.create("实现登录接口", "POST /api/login，JWT 认证")
+tm.create("编写登录测试")
+tm.create("更新 API 文档")
+
+# 设置依赖：测试依赖接口完成
+tm.update(2, add_blocked_by=[1])
+
+# 开始工作
+tm.update(1, status="in_progress")
+
+# 完成后自动解除下游阻塞
+tm.update(1, status="completed")  # 任务2 的 blockedBy 自动清除
+
+# 查看进度
+print(tm.list_all())
+# [x] #1: 实现登录接口
+# [ ] #2: 编写登录测试
+# [ ] #3: 更新 API 文档
+# (1/3 completed)
+```
+
+### 使用场景与示例
+
+#### 示例 1：多步骤功能开发
+
+```bash
+flexllm agent --tasks --tools code "实现一个 REST API 的用户 CRUD 模块：
+1. 创建 models/user.py 定义 User 模型
+2. 创建 routes/user.py 实现增删改查接口
+3. 编写单元测试
+4. 更新 README"
+```
+
+Agent 会自动调用 `task_create` 拆分为 4 个任务，逐个推进并更新状态。中断后重新运行，`.tasks/` 目录保留了进度，agent 通过 `task_list` 查看剩余工作继续执行。
+
+#### 示例 2：代码审查 + 修复
+
+```bash
+flexllm agent --tasks --tools code "审查 src/ 下所有 Python 文件：
+- 找出安全问题
+- 找出性能问题
+- 逐个修复并记录"
+```
+
+Agent 先扫描文件创建审查任务，发现问题后为每个问题创建修复任务，设置依赖关系（修复依赖审查完成），然后逐个修复。
+
+#### 示例 3：断点续传
+
+```bash
+# 第一次运行，处理到一半中断
+flexllm agent --tasks --tools code "迁移数据库 schema：
+1. 备份现有 schema
+2. 创建迁移脚本
+3. 执行迁移
+4. 验证数据完整性"
+# Ctrl+C 中断
+
+# 再次运行，自动从中断处继续
+flexllm agent --tasks --tools code "继续完成 .tasks/ 中的未完成任务"
+```
+
+### 任务文件格式
+
+任务存储在 `{tasks_dir}/task_{id}.json`：
+
+```json
+{
+  "id": 1,
+  "subject": "实现登录接口",
+  "description": "POST /api/login，使用 JWT 认证",
+  "status": "in_progress",
+  "blockedBy": [],
+  "blocks": [2],
+  "owner": ""
+}
+```
+
+---
+
+## 10. Todo 追踪 (TodoTracker) — 轻量进度提醒
+
+内存级待办列表，Agent 长时间未更新进度时自动发送提醒（纠缠模式），防止 agent 跑偏或遗忘目标。
+
+### CLI
+
+```bash
+# 启用 todo 追踪
+flexllm agent --todo --tools code "修复这 3 个 bug"
+
+# 配合任务系统一起用
+flexllm agent --tasks --todo --tools code "重构认证模块"
+```
+
+### Python API
+
+```python
+agent = AgentClient(
+    client=llm,
+    tool_registry=registry,
+    enable_todo=True,          # 启用 todo 追踪
+    todo_nag_interval=3,       # 每 3 轮未更新就提醒（默认 3）
+)
+result = await agent.run("修复 issue #42, #43, #44")
+```
+
+启用后 agent 获得 `todo` 工具，用于维护进度列表。每轮 tool-use 结束后，如果超过 `nag_interval` 轮未调用 `todo` 工具，系统自动注入提醒消息。
+
+### 独立使用
+
+```python
+from flexllm.agent.todo_tracker import TodoTracker
+
+tracker = TodoTracker(nag_interval=3)
+
+# agent 初始化 todo
+tracker.update([
+    {"id": 1, "text": "修复 issue #42", "status": "pending"},
+    {"id": 2, "text": "修复 issue #43", "status": "pending"},
+    {"id": 3, "text": "修复 issue #44", "status": "pending"},
+])
+
+# 每轮调用 tick()
+tracker.tick()  # 第 1 轮，返回 None
+tracker.tick()  # 第 2 轮，返回 None
+reminder = tracker.tick()  # 第 3 轮，返回提醒文本：
+# "[reminder] 你有 3 个未完成的 todo 项。请使用 todo 工具更新进度。"
+
+# agent 调用 todo 工具后重置计数器
+tracker.notify_used()
+```
+
+### 使用场景与示例
+
+#### 示例 4：多 bug 修复
+
+```bash
+flexllm agent --todo --tools code "修复以下 3 个 bug：
+1. 登录页面 500 错误
+2. 搜索结果分页不正确
+3. 头像上传超时"
+```
+
+Agent 会先用 `todo` 工具创建待办列表，修复每个 bug 后更新状态。如果 agent 在修复一个 bug 时陷入复杂调试，3 轮没更新进度，系统自动提醒：
+
+```
+[reminder] 你有 2 个未完成的 todo 项。请使用 todo 工具更新进度。
+
+当前状态:
+[x] #1: 登录页面 500 错误
+[>] #2: 搜索结果分页不正确
+[ ] #3: 头像上传超时
+
+(1/3 completed)
+```
+
+#### 示例 5：长任务进度可视化
+
+```bash
+flexllm agent --todo --tools code "对 src/ 下的代码做以下优化：
+- 移除未使用的 import
+- 统一异常处理风格
+- 补充缺失的类型注解
+- 添加 docstring"
+```
+
+Agent 在处理过程中持续更新 todo 状态，用户通过工具输出可以实时看到进度。`nag_interval` 确保 agent 不会忘记更新。
+
+#### 示例 6：任务系统 + Todo 联合使用
+
+```bash
+flexllm agent --tasks --todo --tools code "实现完整的文件上传功能：
+后端：接口开发 + 存储逻辑
+前端：上传组件 + 进度条
+测试：单元测试 + 集成测试"
+```
+
+TaskManager 负责宏观任务拆分和持久化（断点续传），TodoTracker 负责当前工作项的微观进度追踪和提醒。两者互补：
+
+- `task_create/update` — 管理大任务的生命周期和依赖
+- `todo` — 追踪当前正在做的具体步骤
+
+### TaskManager vs TodoTracker 选择指南
+
+| 特性 | TaskManager (`--tasks`) | TodoTracker (`--todo`) |
+|------|------------------------|----------------------|
+| 存储 | 文件持久化（断点续传） | 内存（会话内） |
+| 粒度 | 宏观任务拆分 | 微观步骤追踪 |
+| 依赖管理 | 支持 blockedBy/blocks | 无 |
+| 提醒机制 | 无 | 定时纠缠提醒 |
+| 适用场景 | 多步骤项目、需要中断恢复 | 单次执行、防止跑偏 |
+| 推荐 | 复杂多步任务 | 简单多项工作 |
+
+---
+
 ## AgentClient 完整参数
 
 ```python
@@ -522,6 +752,10 @@ agent = AgentClient(
     memory=store,                   # 持久化记忆
     session_id="my-session",        # 会话 ID
     enable_subagent=True,           # 启用子代理（task 工具）
+    enable_tasks=True,              # 启用任务系统（TaskManager）
+    tasks_dir=".tasks",             # 任务文件存放目录
+    enable_todo=True,               # 启用 todo 进度追踪
+    todo_nag_interval=3,            # todo 提醒间隔轮数
 )
 
 # 流式输出（通过 on_llm_token 回调实时输出）

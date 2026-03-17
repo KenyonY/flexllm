@@ -1450,6 +1450,14 @@ models:
             str | None,
             Option("--skill", help="加载 skill 模板（~/.flexllm/skills/ 下的 .md 文件名）"),
         ] = None,
+        tasks: Annotated[
+            bool,
+            Option("--tasks", help="启用任务系统（持久化任务管理）"),
+        ] = False,
+        todo: Annotated[
+            bool,
+            Option("--todo", help="启用 todo 进度追踪"),
+        ] = False,
     ):
         """Agent 模式（非交互式，执行任务后返回）
 
@@ -1502,4 +1510,6 @@ models:
             mcp_servers=merged_mcp or None,
             stream=not no_stream,
             skill=skill,
+            enable_tasks=tasks,
+            enable_todo=todo,
         )

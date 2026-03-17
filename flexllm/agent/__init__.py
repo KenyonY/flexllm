@@ -41,6 +41,16 @@ def __getattr__(name):
 
         globals()["MemoryStore"] = MemoryStore
         return MemoryStore
+    if name == "TaskManager":
+        from .task_manager import TaskManager
+
+        globals()["TaskManager"] = TaskManager
+        return TaskManager
+    if name == "TodoTracker":
+        from .todo_tracker import TodoTracker
+
+        globals()["TodoTracker"] = TodoTracker
+        return TodoTracker
     if name == "mcp":
         mod = importlib.import_module(".mcp", __name__)
         sys.modules[f"{__name__}.mcp"] = mod

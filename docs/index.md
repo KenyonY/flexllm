@@ -8,6 +8,7 @@
 docs/
 ├── index.md              # 本文档（主入口）
 ├── agent.md              # Agent 模块（v0.6.0 新增）
+├── agent-architecture.md # Agent 架构文档（开发者向）
 ├── api.md                # API 详细参考
 ├── advanced.md           # 高级用法
 └── roadmap.md            # 开发路线图
@@ -97,3 +98,4 @@ results = await client.chat_completions_batch(
 - [API 详细参考](api.md) - 完整的 API 文档
 - [高级用法](advanced.md) - 负载均衡、多模态、链式推理等
 - [Agent 模块](agent.md) - 工具注册、MCP 集成、记忆、可观测性
+- [Agent 架构](agent-architecture.md) - 内部架构、模块职责、扩展点（开发者向）

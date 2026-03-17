@@ -46,6 +46,8 @@ from .types import AgentResult, ToolCallRecord
 if TYPE_CHECKING:
     from ..clients.base import LLMClientBase
     from .memory import MemoryStore
+    from .task_manager import TaskManager
+    from .todo_tracker import TodoTracker
     from .tracing import TraceExporter
     from .validators.base import ValidationResult, Validator
 
@@ -81,6 +83,10 @@ class AgentClient:
         trace_exporter: Trace 导出器（可观测性）
         memory: MemoryStore 实例（持久化记忆）
         session_id: 会话 ID，配合 memory 使用
+        enable_tasks: 启用任务系统（TaskManager）
+        tasks_dir: 任务存储目录
+        enable_todo: 启用 todo 进度追踪（TodoTracker）
+        todo_nag_interval: todo 提醒间隔轮数
     """
 
     def __init__(
@@ -98,6 +104,10 @@ class AgentClient:
         memory: "MemoryStore | None" = None,
         session_id: str | None = None,
         enable_subagent: bool = False,
+        enable_tasks: bool = False,
+        tasks_dir: str = ".tasks",
+        enable_todo: bool = False,
+        todo_nag_interval: int = 3,
     ):
         self.client = client
         self.system = system
@@ -127,6 +137,16 @@ class AgentClient:
         # Subagent 支持
         if enable_subagent and self._tool_registry is not None:
             self._inject_task_tool()
+
+        # 任务系统
+        self._task_manager: "TaskManager | None" = None
+        if enable_tasks and self._tool_registry is not None:
+            self._inject_task_tools(tasks_dir)
+
+        # Todo 追踪
+        self._todo_tracker: "TodoTracker | None" = None
+        if enable_todo and self._tool_registry is not None:
+            self._inject_todo_tool(todo_nag_interval)
 
         # 事件回调（可选）
         self.on_tool_call: Callable[[str, str], Any] | None = None
@@ -308,6 +328,14 @@ class AgentClient:
                     }
                 )
 
+            # Todo 提醒注入
+            if self._todo_tracker:
+                if any(fn_name == "todo" for _, fn_name, _ in tool_calls_info):
+                    self._todo_tracker.notify_used()
+                reminder = self._todo_tracker.tick()
+                if reminder:
+                    messages.append({"role": "user", "content": reminder})
+
             rounds += 1
 
             # 循环内上下文压缩
@@ -401,6 +429,14 @@ class AgentClient:
 
                 output = self._truncate_tool_output(output)
                 messages.append({"role": "tool", "tool_call_id": tc.id, "content": output})
+
+            # Todo 提醒注入
+            if self._todo_tracker:
+                if any(fn_name == "todo" for _, fn_name, _ in tool_calls_info):
+                    self._todo_tracker.notify_used()
+                reminder = self._todo_tracker.tick()
+                if reminder:
+                    messages.append({"role": "user", "content": reminder})
 
             rounds += 1
 
@@ -646,6 +682,26 @@ class AgentClient:
                 asyncio.ensure_future(result)
         except Exception as e:
             logger.warning(f"Callback 执行失败: {e}")
+
+    # ========== TaskManager / TodoTracker ==========
+
+    def _inject_task_tools(self, tasks_dir: str):
+        """注入 4 个任务管理工具到 ToolRegistry"""
+        from .task_manager import TaskManager
+        from .tools.task_tools import register_task_tools
+
+        self._task_manager = TaskManager(tasks_dir)
+        register_task_tools(self._tool_registry, self._task_manager)
+        self.tools = self._tool_registry.get_tool_defs()
+
+    def _inject_todo_tool(self, nag_interval: int):
+        """注入 todo 工具到 ToolRegistry"""
+        from .todo_tracker import TodoTracker
+        from .tools.task_tools import register_todo_tool
+
+        self._todo_tracker = TodoTracker(nag_interval=nag_interval)
+        register_todo_tool(self._tool_registry, self._todo_tracker)
+        self.tools = self._tool_registry.get_tool_defs()
 
     # ========== Subagent 支持 ==========
 
