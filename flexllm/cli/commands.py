@@ -111,9 +111,7 @@ def register_commands(app):
         ] = None,
         tools: Annotated[
             str | None,
-            Option(
-                "--tools", help="内置工具集（all/code/read,edit,glob,grep,bash/shell,dtflow...）"
-            ),
+            Option("--tools", help="工具集: all/code/bash 或逗号分隔 (read,edit,glob,grep,bash)"),
         ] = None,
         verbose: Annotated[
             bool, Option("-v", "--verbose", help="显示详细执行过程（仅 --tools 模式）")
@@ -335,7 +333,7 @@ def register_commands(app):
         verbose: Annotated[bool, Option("--verbose", "-v", help="打印请求日志")] = False,
         tools: Annotated[
             str | None,
-            Option("--tools", help="Agent 工具集 (all/code/read,edit,glob,grep,bash)"),
+            Option("--tools", help="Agent 工具集: all/code/bash 或逗号分隔"),
         ] = None,
         max_rounds: Annotated[int, Option("--max-rounds", help="Agent 最大 tool 调用轮数")] = 10,
     ):
@@ -1421,10 +1419,8 @@ models:
         system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
         tools: Annotated[
             str,
-            Option(
-                "--tools", help="内置工具集（all/code/read,edit,glob,grep,bash/shell,dtflow...）"
-            ),
-        ] = "shell",
+            Option("--tools", help="工具集: all/code/bash 或逗号分隔 (read,edit,glob,grep,bash)"),
+        ] = "bash",
         mcp: Annotated[
             list[str] | None,
             Option("--mcp", help="MCP server 命令或 URL（可多次指定）"),
@@ -1463,12 +1459,12 @@ models:
 
         \b
         Examples:
-        flexllm agent "查一下 cpu 使用率" --tools shell
-        flexllm agent "读取 main.py" --tools code -v
+        flexllm agent "查一下 cpu 使用率"                   # 默认 bash 工具
+        flexllm agent "读取 main.py" --tools code -v         # code 工具组
         flexllm agent "修复这个 bug" --tools code --validate=python
         flexllm agent --mcp "npx @mcp/server-github" "查看最近的 PR"
         flexllm agent --skill code-review "审查 main.py"
-        echo "列出当前目录文件" | flexllm agent --tools shell
+        echo "列出当前目录文件" | flexllm agent               # 支持 stdin
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
