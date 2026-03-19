@@ -35,7 +35,6 @@ def _fallback_cli():
         print("  set-model <name>  设置默认模型")
         print("  test              测试连接")
         print("  init              初始化配置")
-        print("  agent             Agent 模式")
         print("  version           显示版本")
         print("\n安装 typer 获得更好的 CLI 体验: pip install typer")
         return

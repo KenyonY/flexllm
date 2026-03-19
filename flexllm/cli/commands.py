@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Annotated
 
-from .chat_helpers import agent_chat, agent_run, interactive_chat, single_chat
+from .chat_helpers import interactive_chat, single_chat
 from .config import get_config
 from .utils import (
     apply_user_template,
@@ -109,28 +109,6 @@ def register_commands(app):
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
-        tools: Annotated[
-            str | None,
-            Option("--tools", help="工具集: all/code/bash 或逗号分隔 (read,edit,glob,grep,bash)"),
-        ] = None,
-        verbose: Annotated[
-            bool, Option("-v", "--verbose", help="显示详细执行过程（仅 --tools 模式）")
-        ] = False,
-        max_rounds: Annotated[
-            int, Option("--max-rounds", help="最大 tool 调用轮数（仅 --tools 模式）")
-        ] = 10,
-        approve: Annotated[
-            str,
-            Option("--approve", help="审批模式 (auto/manual)，仅 --tools 模式"),
-        ] = "auto",
-        mcp: Annotated[
-            list[str] | None,
-            Option("--mcp", help="MCP server 命令或 URL（可多次指定，需搭配 --tools）"),
-        ] = None,
-        skill: Annotated[
-            str | None,
-            Option("--skill", help="加载 skill 模板（~/.flexllm/skills/ 下的 .md 文件名）"),
-        ] = None,
     ):
         """交互式对话
 
@@ -139,10 +117,6 @@ def register_commands(app):
         flexllm chat                      # 多轮对话
         flexllm chat "你好"               # 单条对话
         flexllm chat --model gpt-4 "你好" # 指定模型
-        flexllm chat --tools code         # 启用代码工具
-        flexllm chat --tools code -v      # 详细模式
-        flexllm chat --tools code --mcp "npx @mcp/server-github"
-        flexllm chat --tools code --skill code-review
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -165,30 +139,6 @@ def register_commands(app):
         model_params.setdefault("max_tokens", 2048)
 
         stream = not no_stream
-
-        if tools:
-            # 合并配置文件和 CLI 的 MCP servers
-            from .chat_helpers import _merge_mcp_servers
-
-            agent_config = config.get_agent_config()
-            merged_mcp = _merge_mcp_servers(mcp, agent_config["mcp_servers"])
-
-            agent_chat(
-                model=model,
-                base_url=base_url,
-                api_key=api_key,
-                system_prompt=system_prompt,
-                model_params=model_params,
-                tools_name=tools,
-                message=message,
-                verbose=verbose,
-                max_rounds=max_rounds,
-                approve=approve,
-                mcp_servers=merged_mcp or None,
-                stream=stream,
-                skill=skill,
-            )
-            return
 
         if message:
             single_chat(
@@ -331,11 +281,6 @@ def register_commands(app):
         port: Annotated[int, Option("-p", "--port", help="监听端口")] = 8000,
         host: Annotated[str, Option("--host", help="监听地址")] = "0.0.0.0",
         verbose: Annotated[bool, Option("--verbose", "-v", help="打印请求日志")] = False,
-        tools: Annotated[
-            str | None,
-            Option("--tools", help="Agent 工具集: all/code/bash 或逗号分隔"),
-        ] = None,
-        max_rounds: Annotated[int, Option("--max-rounds", help="Agent 最大 tool 调用轮数")] = 10,
     ):
         """启动 HTTP API 服务，将 LLM 包装为 REST API
 
@@ -347,9 +292,6 @@ def register_commands(app):
         POST /api/generate             非流式生成
         POST /api/generate/stream      流式生成 (SSE)
         POST /api/generate/batch       批量生成
-        POST /api/agent/run            Agent 单次执行 (需 --tools)
-        POST /api/agent/run/stream     Agent 流式执行 (需 --tools)
-        POST /api/agent/chat           Agent 多轮对话 (需 --tools)
         GET  /health                   健康检查
         GET  /api/config               查看当前配置
 
@@ -357,7 +299,6 @@ def register_commands(app):
         Examples:
         flexllm serve -m qwen-finetuned -s "你是助手"
         flexllm serve --thinking true -c 20 -p 8000
-        flexllm serve --tools code -s "你是代码助手"
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -402,8 +343,6 @@ def register_commands(app):
             max_qps=max_qps,
             timeout=timeout,
             verbose=verbose,
-            tools=tools,
-            max_rounds=max_rounds,
         )
 
         effective_temperature = model_params.get("temperature")
@@ -426,16 +365,9 @@ def register_commands(app):
         print(f"  Concurrency: {concurrency}")
         if max_qps is not None:
             print(f"  Max QPS: {max_qps}")
-        if tools:
-            print(f"  Agent tools: {tools}")
-            print(f"  Agent max rounds: {max_rounds}")
         print(f"\n  POST /api/generate             非流式生成")
         print(f"  POST /api/generate/stream      流式生成")
         print(f"  POST /api/generate/batch       批量生成")
-        if tools:
-            print(f"  POST /api/agent/run            Agent 执行")
-            print(f"  POST /api/agent/run/stream     Agent 流式执行")
-            print(f"  POST /api/agent/chat           Agent 多轮对话")
         print(f"  GET  /health                   健康检查")
         print(f"  GET  /api/config               查看配置")
         if verbose:
@@ -1409,103 +1341,3 @@ models:
         except Exception as e:
             print(f"安装失败: {e}", file=sys.stderr)
             raise typer.Exit(1)
-
-    @app.command()
-    def agent(
-        message: Annotated[str | None, Argument(help="任务描述")] = None,
-        model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
-        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
-        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
-        system_prompt: Annotated[str | None, Option("-s", "--system", help="系统提示词")] = None,
-        tools: Annotated[
-            str,
-            Option("--tools", help="工具集: all/code/bash 或逗号分隔 (read,edit,glob,grep,bash)"),
-        ] = "bash",
-        mcp: Annotated[
-            list[str] | None,
-            Option("--mcp", help="MCP server 命令或 URL（可多次指定）"),
-        ] = None,
-        max_rounds: Annotated[int, Option("--max-rounds", help="最大 tool 调用轮数")] = 10,
-        verbose: Annotated[bool, Option("-v", "--verbose", help="显示详细执行过程")] = False,
-        validate: Annotated[
-            str | None,
-            Option(
-                "--validate",
-                help="代码验证器（python/syntax,lint,type,pytest），验证失败自动修复",
-            ),
-        ] = None,
-        max_fix_attempts: Annotated[
-            int, Option("--max-fix-attempts", help="验证失败时最大修复尝试次数")
-        ] = 3,
-        approve: Annotated[
-            str,
-            Option("--approve", help="审批模式 (auto/manual)"),
-        ] = "auto",
-        no_stream: Annotated[bool, Option("--no-stream", help="禁用流式输出")] = False,
-        skill: Annotated[
-            str | None,
-            Option("--skill", help="加载 skill 模板（~/.flexllm/skills/ 下的 .md 文件名）"),
-        ] = None,
-        tasks: Annotated[
-            bool,
-            Option("--tasks", help="启用任务系统（持久化任务管理）"),
-        ] = False,
-        todo: Annotated[
-            bool,
-            Option("--todo", help="启用 todo 进度追踪"),
-        ] = False,
-    ):
-        """Agent 模式（非交互式，执行任务后返回）
-
-        \b
-        Examples:
-        flexllm agent "查一下 cpu 使用率"                   # 默认 bash 工具
-        flexllm agent "读取 main.py" --tools code -v         # code 工具组
-        flexllm agent "修复这个 bug" --tools code --validate=python
-        flexllm agent --mcp "npx @mcp/server-github" "查看最近的 PR"
-        flexllm agent --skill code-review "审查 main.py"
-        echo "列出当前目录文件" | flexllm agent               # 支持 stdin
-        """
-        model, base_url, api_key = resolve_model_config(model, base_url, api_key)
-        config = get_config()
-
-        if not base_url:
-            print("错误: 未配置 base_url", file=sys.stderr)
-            raise typer.Exit(1)
-
-        if not message:
-            if not sys.stdin.isatty():
-                message = sys.stdin.read().strip()
-            if not message:
-                print("错误: 请提供任务描述（参数或 stdin）", file=sys.stderr)
-                raise typer.Exit(1)
-
-        model_params = config.get_model_params(model)
-        model_params.setdefault("temperature", 0.7)
-        model_params.setdefault("max_tokens", 2048)
-
-        # 合并配置文件和 CLI 的 MCP servers
-        from .chat_helpers import _merge_mcp_servers
-
-        agent_config = config.get_agent_config()
-        merged_mcp = _merge_mcp_servers(mcp, agent_config["mcp_servers"])
-
-        agent_run(
-            message=message,
-            model=model,
-            base_url=base_url,
-            api_key=api_key,
-            system_prompt=system_prompt,
-            model_params=model_params,
-            tools_name=tools,
-            max_rounds=max_rounds,
-            verbose=verbose,
-            validate=validate,
-            max_fix_attempts=max_fix_attempts,
-            approve=approve,
-            mcp_servers=merged_mcp or None,
-            stream=not no_stream,
-            skill=skill,
-            enable_tasks=tasks,
-            enable_todo=todo,
-        )

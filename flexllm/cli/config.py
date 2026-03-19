@@ -34,12 +34,13 @@ class FlexLLMConfig:
             if path.exists():
                 try:
                     import yaml
-
-                    with open(path, encoding="utf-8") as f:
-                        config = yaml.safe_load(f) or {}
-                    return config
                 except ImportError:
-                    pass
+                    raise ImportError(
+                        f"找到配置文件 {path}，但缺少 PyYAML。" "请安装: pip install pyyaml"
+                    )
+                with open(path, encoding="utf-8") as f:
+                    config = yaml.safe_load(f) or {}
+                return config
 
         # 从环境变量构建配置
         return self._config_from_env()

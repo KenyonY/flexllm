@@ -153,9 +153,6 @@ __version__ = "0.9.1"
 
 # 客户端（从 clients/ 模块导入）
 # 批量处理工具
-# Agent
-from .agent import AgentClient, AgentResult, ToolCallRecord
-from .agent.tools.base import ToolDef, ToolRegistry
 from .batch_tools import MllmFolderProcessor, MllmTableProcessor
 
 # 响应缓存
@@ -235,10 +232,4 @@ __all__ = [
     # Chain of Thought
     "ChainOfThoughtClient",
     "Step",
-    # Agent
-    "AgentClient",
-    "AgentResult",
-    "ToolCallRecord",
-    "ToolRegistry",
-    "ToolDef",
 ]

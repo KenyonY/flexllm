@@ -7,7 +7,6 @@ flexllm CLI - LLM 客户端命令行工具
     flexllm batch input.jsonl -o output.jsonl
     flexllm models
     flexllm test
-    flexllm agent "任务描述" --tools shell
 """
 
 from .cli import main

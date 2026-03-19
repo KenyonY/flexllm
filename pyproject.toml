@@ -37,7 +37,6 @@ dependencies = [
     "aiolimiter>=1.1.0",
     "numpy",
     "pillow",
-    "mcp>=1.0",
     "python-dotenv>=0.19.0",
 ]
 
@@ -70,9 +69,8 @@ cli = [
 token = [
     "tiktoken>=0.5.0",
 ]
-agent = []
 all = [
-    "flexllm[vertex,cache,memory,image,audio,cli,token,agent]",
+    "flexllm[vertex,cache,memory,image,audio,cli,token]",
 ]
 dev = [
     "pytest>=7.0.0",
