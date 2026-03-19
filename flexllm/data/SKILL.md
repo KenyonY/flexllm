@@ -1,6 +1,6 @@
 ---
 name: flexllm
-description: LLM API 客户端 - 批量处理、断点续传、响应缓存、负载均衡、成本追踪、Agent tool-use
+description: LLM API 客户端 - 批量处理、断点续传、响应缓存、负载均衡、成本追踪
 ---
 
 # flexllm
@@ -49,44 +49,6 @@ client = LLMClient(
 results = await client.chat_completions_batch(messages_list, output_jsonl="results.jsonl")
 ```
 
-### AgentClient（tool-use 循环）
-
-组合 LLMClient，自动执行 tool-calling 循环：LLM 调用 → 执行工具 → 回传结果 → 循环直到完成。
-
-```python
-from flexllm import AgentClient, LLMClient
-
-client = LLMClient(model="gpt-4", base_url="...", api_key="...")
-agent = AgentClient(
-    client=client,
-    system="你是一个助手",
-    tools=[{"type":"function","function":{"name":"get_weather","parameters":{...}}}],
-    tool_executor=my_fn,    # (name, arguments_json) -> result（同步/异步均可）
-    max_rounds=10,
-)
-
-# 单次任务（无状态）
-result = await agent.run("查北京天气")
-# result.content, result.rounds, result.tool_calls, result.usage
-
-# 多轮对话（有状态，自动维护历史）
-r1 = await agent.chat("你好")
-r2 = await agent.chat("帮我查天气")  # 带 r1 上下文
-agent.reset()
-
-# Structured output（Pydantic 绑定）
-from pydantic import BaseModel
-class Decision(BaseModel):
-    action: str
-    reason: str
-result = await agent.run("分析需求", response_format=Decision)
-result.parsed  # Decision(action="approve", reason="...")
-
-# 事件回调
-agent.on_tool_call = lambda name, args: print(f"调用: {name}")
-agent.on_tool_result = lambda name, result: print(f"结果: {result[:100]}")
-```
-
 ## CLI
 
 ```bash
@@ -99,40 +61,6 @@ flexllm credits                        # 查询余额
 flexllm mock                           # Mock 服务器（测试用）
 flexllm serve                          # 启动 HTTP API 服务
 ```
-
-### Agent 模式
-
-内置细粒度工具，支持并行执行和 verbose 模式：
-
-```bash
-# 工具集
-# - code: read, edit, glob, grep, bash（代码操作，无 write）
-# - all: read, write, edit, glob, grep, bash（所有工具）
-# - 旧版: shell, dtflow, maque, flexllm（CLI 工具）
-
-# 单次任务
-flexllm agent --tools code "读取 main.py 前 20 行"
-flexllm agent --tools all "创建 hello.py 并写入 hello world"
-flexllm agent --tools code -v "调试问题"     # -v 显示详细执行过程
-
-# 多轮交互
-flexllm chat --tools code                    # 交互式 Agent
-flexllm chat --tools code -v                 # 详细模式
-
-# 混合工具
-flexllm agent --tools "read,dtflow" "读取并处理数据"
-```
-
-**工具说明：**
-
-| 工具 | 功能 | 只读 |
-|-----|------|------|
-| read | 读取文件（带行号、分页） | ✓ |
-| write | 创建或覆盖文件 | ✗ |
-| edit | 精确字符串替换（支持 replace_all） | ✗ |
-| glob | 文件模式匹配（如 `**/*.py`） | ✓ |
-| grep | 内容搜索（支持正则，优先用 ripgrep） | ✓ |
-| bash | 执行 shell 命令 | ✗ |
 
 ### serve 命令
 

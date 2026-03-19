@@ -37,13 +37,6 @@ flexllm mock --qa qa.jsonl            # Mock 服务使用 QA 数据集确定性�
 flexllm pricing gpt-4                 # 查询模型定价
 flexllm credits                       # 查询 API Key 余额
 
-# Agent 模式（内置工具 + tool-use 循环）
-flexllm agent --tools code "读取 main.py 并分析"   # code 工具组：read/edit/glob/grep/bash
-flexllm agent --tools all "创建并修改文件"          # all 工具组：包含 write
-flexllm chat --tools code                          # 交互式多轮 agent
-flexllm agent --skill code-review "审查 main.py"   # 使用 skill 模板
-flexllm agent --mcp "npx @mcp/server-github" "查看 PR"  # 临时 MCP（也可配置在 config.yaml）
-
 # HTTP API 服务器（微调模型部署）
 flexllm serve -m model-name -s "System prompt" -p 8000
 ```
@@ -68,8 +61,6 @@ LLMClient = LLMClientPool (统一入口，单/多 endpoint 均使用此类)
             └── ImageProcessor (msg_processors/ 图片处理)
 
 高级客户端：
-    ├── AgentClient (tool-use 循环 + 多轮对话)
-    │       └── 内置工具：read/write/edit/glob/grep/bash
     ├── MllmClient (多模态 LLM，支持图片/视频输入)
     ├── ChainOfThoughtClient (思维链推理)
     └── batch_tools/ (MllmTableProcessor, MllmFolderProcessor)
