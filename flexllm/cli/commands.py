@@ -34,6 +34,12 @@ def register_commands(app):
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
+        thinking: Annotated[
+            str | None,
+            Option(
+                "--thinking", help="思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
+            ),
+        ] = None,
     ):
         """LLM 快速问答（支持管道输入）
 
@@ -42,7 +48,7 @@ def register_commands(app):
         flexllm ask "什么是Python"
         flexllm ask "解释代码" -s "你是代码专家"
         echo "长文本" | flexllm ask "总结一下"
-        flexllm ask "你好" --base-url http://localhost:8000/v1 -m qwen
+        flexllm ask "你好" --thinking false -m 242-model
         """
         stdin_content = None
         if not sys.stdin.isatty():
@@ -68,6 +74,10 @@ def register_commands(app):
             user_template = config.get_user_template(model)
 
         model_params = config.get_model_params(model)
+
+        thinking_value = parse_thinking(thinking)
+        if thinking_value is not None:
+            model_params["thinking"] = thinking_value
 
         async def _ask():
             from flexllm import LLMClient
@@ -109,6 +119,12 @@ def register_commands(app):
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
+        thinking: Annotated[
+            str | None,
+            Option(
+                "--thinking", help="思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
+            ),
+        ] = None,
     ):
         """交互式对话
 
@@ -138,6 +154,11 @@ def register_commands(app):
         model_params.setdefault("temperature", 0.7)
         model_params.setdefault("max_tokens", 2048)
 
+        thinking_value = parse_thinking(thinking)
+        if thinking_value is not None:
+            model_params["thinking"] = thinking_value
+        resolved_thinking = model_params.pop("thinking", None)
+
         stream = not no_stream
 
         if message:
@@ -151,6 +172,7 @@ def register_commands(app):
                 model_params["max_tokens"],
                 stream,
                 user_template,
+                thinking=resolved_thinking,
             )
         else:
             interactive_chat(
@@ -162,6 +184,7 @@ def register_commands(app):
                 model_params["max_tokens"],
                 stream,
                 user_template,
+                thinking=resolved_thinking,
             )
 
     @app.command(name="chat-web")
@@ -184,12 +207,16 @@ def register_commands(app):
             ),
         ] = None,
         title: Annotated[str, Option("--title", help="页面 Logo 文本")] = "flexllm",
+        multi_turn: Annotated[
+            bool, Option("--multi-turn", help="多轮对话模式（携带上下文）")
+        ] = False,
     ):
         """启动 Web 聊天界面
 
         \b
         Examples:
-        flexllm chat-web                      # 使用默认模型
+        flexllm chat-web                      # 使用默认模型（单轮对话）
+        flexllm chat-web --multi-turn         # 多轮对话模式
         flexllm chat-web -m gpt-4             # 指定模型
         flexllm chat-web -p 9090              # 指定端口
         flexllm chat-web --host 0.0.0.0       # 允许外部访问
@@ -236,6 +263,7 @@ def register_commands(app):
             max_tokens=model_params["max_tokens"],
             user_template=user_template,
             thinking=thinking_value,
+            multi_turn=multi_turn,
             title=title,
         )
 

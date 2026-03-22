@@ -959,6 +959,7 @@ class LLMClientBase(ABC):
                     error_text = await response.text()
                     raise Exception(f"HTTP {response.status}: {error_text}")
 
+                _thinking_started = False
                 async for line in response.content:
                     line = line.decode("utf-8").strip()
                     if line.startswith("data: "):
@@ -980,6 +981,11 @@ class LLMClientBase(ABC):
                             if thinking:
                                 if return_usage:
                                     yield {"type": "thinking", "content": thinking}
+                                else:
+                                    if not _thinking_started:
+                                        yield "<think>\n"
+                                        _thinking_started = True
+                                    yield thinking
                                 continue
 
                             # 提取 tool_call delta
@@ -994,6 +1000,9 @@ class LLMClientBase(ABC):
 
                             content = self._extract_stream_content(data)
                             if content:
+                                if _thinking_started:
+                                    yield "</think>"
+                                    _thinking_started = False
                                 if return_usage:
                                     yield {"type": "content", "content": content}
                                 else:

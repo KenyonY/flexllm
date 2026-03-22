@@ -154,38 +154,59 @@ class OpenAIClient(LLMClientBase):
 
         Args:
             thinking: 统一的思考控制参数
-                - False: 禁用思考（Ollama: think=False, vLLM/Qwen3: /no_think）
-                - True: 启用思考（Ollama: think=True）
+                - False: 禁用思考（Ollama: think=False, vLLM: enable_thinking=False）
+                - True: 启用思考（Ollama: think=True, vLLM: enable_thinking=True）
                 - None: 使用模型默认行为
         """
         processed_messages = self._convert_audio_url_to_input_audio(messages)
-
-        # 禁用思考时，添加 /no_think 标签（vLLM/Qwen3 格式）
-        if thinking is False:
-            processed_messages = [m.copy() for m in messages]
-            for i in range(len(processed_messages) - 1, -1, -1):
-                if processed_messages[i].get("role") == "user":
-                    content = processed_messages[i].get("content", "")
-                    if isinstance(content, str) and "/no_think" not in content:
-                        processed_messages[i]["content"] = content + " /no_think"
-                    break
 
         body = {"messages": processed_messages, "model": model, "stream": stream}
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
 
-        # Ollama 格式：think 参数
+        # 思考模式控制：同时发送多种格式，由服务端选择性处理
         if thinking is True:
-            body["think"] = True
+            body["think"] = True  # Ollama
+            body["chat_template_kwargs"] = {"enable_thinking": True}  # vLLM
+            self._keep_thinking = True
         elif thinking is False:
-            body["think"] = False
+            body["think"] = False  # Ollama
+            body["chat_template_kwargs"] = {"enable_thinking": False}  # vLLM
+            self._keep_thinking = False
+        else:
+            self._keep_thinking = False
 
         body.update(kwargs)
         return body
 
+    @staticmethod
+    def _strip_think_tags(content: str) -> str:
+        """剥离 vLLM/Qwen 思考模型返回的 <think>...</think> 内容"""
+        import re
+
+        return re.sub(r"^.*?</think>\s*", "", content, count=1, flags=re.DOTALL)
+
     def _extract_content(self, response_data: dict) -> str | None:
         try:
-            return response_data["choices"][0]["message"]["content"]
+            message = response_data["choices"][0]["message"]
+            content = message.get("content") or ""
+            keep_thinking = getattr(self, "_keep_thinking", False)
+
+            # reasoning-parser 模式：思考内容在独立的 reasoning 字段
+            reasoning = message.get("reasoning") or message.get("reasoning_content")
+            if reasoning:
+                if not content:
+                    # parser 误判：正式回答被放入 reasoning（如 Qwen3.5 默认不思考时）
+                    return reasoning
+                if keep_thinking:
+                    return f"<think>\n{reasoning}\n</think>\n\n{content.strip()}"
+                return content.strip() or content
+
+            # 无 reasoning-parser：思考内容内嵌在 content 中
+            if content and "</think>" in content and not keep_thinking:
+                content = self._strip_think_tags(content)
+
+            return content
         except (KeyError, IndexError) as e:
             logger.warning(f"Failed to extract content: {e}")
             return None

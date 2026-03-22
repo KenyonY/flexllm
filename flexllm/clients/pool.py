@@ -270,9 +270,18 @@ class LLMClientPool:
                 "请检查 ~/.flexllm/config.yaml 或设置环境变量 FLEXLLM_BASE_URL"
             )
 
+        # 模型 ID 为空时，自动从 /v1/models 获取（仅 openai provider）
+        model_id = model_config.get("id")
+        if not model_id and model_config.get("provider", "openai") == "openai":
+            base_url = model_config.get("base_url")
+            if base_url:
+                from ..cli.utils import _fetch_model_id
+
+                model_id = _fetch_model_id(base_url, model_config.get("api_key", "EMPTY"))
+
         # 构造 LLMClientPool 的参数
         init_kwargs = {
-            "model": model_config.get("id"),
+            "model": model_id,
             "base_url": model_config.get("base_url"),
             "api_key": model_config.get("api_key", "EMPTY"),
         }

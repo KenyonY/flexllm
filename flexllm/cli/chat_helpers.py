@@ -20,6 +20,7 @@ def single_chat(
     max_tokens,
     stream,
     user_template=None,
+    thinking=None,
 ):
     """单次对话"""
 
@@ -33,17 +34,17 @@ def single_chat(
             user_content = apply_user_template(message, user_template)
             messages.append({"role": "user", "content": user_content})
 
+            kwargs = {"temperature": temperature, "max_tokens": max_tokens}
+            if thinking is not None:
+                kwargs["thinking"] = thinking
+
             if stream:
                 print("Assistant: ", end="", flush=True)
-                async for chunk in client.chat_completions_stream(
-                    messages, temperature=temperature, max_tokens=max_tokens
-                ):
+                async for chunk in client.chat_completions_stream(messages, **kwargs):
                     print(chunk, end="", flush=True)
                 print()
             else:
-                result = await client.chat_completions(
-                    messages, temperature=temperature, max_tokens=max_tokens
-                )
+                result = await client.chat_completions(messages, **kwargs)
                 print(f"Assistant: {result}")
 
     try:
@@ -55,7 +56,15 @@ def single_chat(
 
 
 def interactive_chat(
-    model, base_url, api_key, system_prompt, temperature, max_tokens, stream, user_template=None
+    model,
+    base_url,
+    api_key,
+    system_prompt,
+    temperature,
+    max_tokens,
+    stream,
+    user_template=None,
+    thinking=None,
 ):
     """多轮交互对话"""
 
@@ -72,6 +81,10 @@ def interactive_chat(
             print(f"服务器: {base_url}")
             print("输入 'quit' 或 Ctrl+C 退出")
             print("-" * 50)
+
+            kwargs = {"temperature": temperature, "max_tokens": max_tokens}
+            if thinking is not None:
+                kwargs["thinking"] = thinking
 
             while True:
                 try:
@@ -90,17 +103,13 @@ def interactive_chat(
                     if stream:
                         print("Assistant: ", end="", flush=True)
                         full_response = ""
-                        async for chunk in client.chat_completions_stream(
-                            messages, temperature=temperature, max_tokens=max_tokens
-                        ):
+                        async for chunk in client.chat_completions_stream(messages, **kwargs):
                             print(chunk, end="", flush=True)
                             full_response += chunk
                         print()
                         messages.append({"role": "assistant", "content": full_response})
                     else:
-                        result = await client.chat_completions(
-                            messages, temperature=temperature, max_tokens=max_tokens
-                        )
+                        result = await client.chat_completions(messages, **kwargs)
                         print(f"Assistant: {result}")
                         messages.append({"role": "assistant", "content": result})
 

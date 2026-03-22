@@ -41,7 +41,6 @@ def resolve_model_config(
             raise typer.Exit(1)
         return model, base_url, api_key
 
-    resolved_model = model_config.get("id", model)
     resolved_base_url = base_url or model_config.get("base_url")
     resolved_api_key = api_key or model_config.get("api_key", "EMPTY")
 
@@ -49,7 +48,34 @@ def resolve_model_config(
     if not resolved_base_url and model_config.get("provider") == "claude":
         resolved_base_url = "https://api.anthropic.com/v1"
 
+    # model id 为空时，自动从 /v1/models 获取（仅 openai provider）
+    resolved_model = model_config.get("id")
+    if not resolved_model and resolved_base_url:
+        provider = model_config.get("provider", "openai")
+        if provider == "openai":
+            resolved_model = _fetch_model_id(resolved_base_url, resolved_api_key)
+    resolved_model = resolved_model or model
+
     return resolved_model, resolved_base_url, resolved_api_key
+
+
+def _fetch_model_id(base_url: str, api_key: str = "EMPTY") -> str | None:
+    """从 /v1/models 接口获取第一个可用的模型 ID"""
+    import urllib.request
+
+    url = f"{base_url.rstrip('/')}/models"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+            models = data.get("data", [])
+            if models:
+                model_id = models[0].get("id")
+                print(f"[auto-detect] 从 {base_url} 获取到模型: {model_id}", file=sys.stderr)
+                return model_id
+    except Exception as e:
+        print(f"[auto-detect] 从 {base_url}/models 获取模型失败: {e}", file=sys.stderr)
+    return None
 
 
 def apply_user_template(content: str, template: str | None) -> str:
