@@ -1,5 +1,44 @@
 # Changelog
 
+## [0.10.0] - 2026-03-22
+
+### Documentation
+
+- 移除 SKILL.md 和 CLAUDE.md 中的 agent 相关内容
+
+### Features
+
+- **chat-web/deps**: 支持 multi_turn 配置，核心依赖调整
+- **cli/client**: 支持 model id 自动获取和 thinking 参数
+
+### Miscellaneous
+
+- Bump version to 0.10.0
+
+### Refactor
+
+- 移除 agent 模块，已独立为 openagent 包
+
+## [0.9.1] - 2026-03-17
+
+### Bug Fixes
+
+- **cli**: 修正 agent/chat/serve --tools 帮助文档
+
+### Features
+
+- **agent**: 完善 agent 系统提示词，修复 shell 工具别名
+- **agent**: 新增 TaskManager 任务系统和 TodoTracker 进度追踪
+
+## [0.9.0] - 2026-03-15
+
+### Features
+
+- **compat**: 兼容 Claude Code 配置（MCP/项目指令/Skills）
+- **mock**: 新增 MCP (Model Context Protocol) JSON-RPC 端点
+- **cli**: Ask 命令支持 --base-url 和 --api-key 参数
+- **mock**: 新增 embeddings 端点、response_format 支持和多模态日志清理
+
 ## [0.8.5] - 2026-03-10
 
 ### Bug Fixes
