@@ -32,6 +32,7 @@ class ChatWebConfig:
     max_tokens: int = 2048
     user_template: str | None = None
     thinking: bool | str | int | None = None
+    multi_turn: bool = False
     title: str = "flexllm"
 
 
@@ -156,6 +157,7 @@ class ChatWebServer:
                 "model": self.config.model,
                 "temperature": self.config.temperature,
                 "title": self.config.title,
+                "multi_turn": self.config.multi_turn,
             }
         )
 

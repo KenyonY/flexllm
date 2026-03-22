@@ -151,6 +151,10 @@ fetch('/api/config').then(r => r.json()).then(cfg => {
     document.querySelector('.logo').textContent = cfg.title;
     document.title = cfg.title + ' Chat';
   }
+  if (cfg.multi_turn !== undefined) {
+    withContext = cfg.multi_turn;
+    ctxBtn.classList.toggle('active', withContext);
+  }
 }).catch(() => {
   modelNameEl.textContent = 'offline';
 });
