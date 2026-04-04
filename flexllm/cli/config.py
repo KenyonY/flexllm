@@ -36,7 +36,7 @@ class FlexLLMConfig:
                     import yaml
                 except ImportError:
                     raise ImportError(
-                        f"找到配置文件 {path}，但缺少 PyYAML。" "请安装: pip install pyyaml"
+                        f"找到配置文件 {path}，但缺少 PyYAML。请安装: pip install pyyaml"
                     )
                 with open(path, encoding="utf-8") as f:
                     config = yaml.safe_load(f) or {}
