@@ -1380,9 +1380,183 @@ class LLMClientPool:
                 yield result
             return
 
-        # 多 endpoint 模式：暂不支持，使用批量方法
-        # TODO: 未来可以实现分布式迭代
-        raise NotImplementedError("多 endpoint 模式暂不支持 iter_chat_completions_batch")
+        # 多 endpoint 模式：分布式迭代，边完成边 yield
+        from types import SimpleNamespace
+
+        n = len(messages_list)
+        all_endpoints_set = {ep.base_url for ep in self._endpoints}
+        num_endpoints = len(all_endpoints_set)
+
+        # 结果队列：worker 完成一条就 put 一条，主循环 get 并 yield
+        result_queue: asyncio.Queue = asyncio.Queue()
+
+        # 共享任务队列
+        task_queue: asyncio.Queue = asyncio.Queue()
+        for idx, msg in enumerate(messages_list):
+            task_queue.put_nowait((idx, msg, set()))
+
+        total_pending = n
+        active_tasks = 0
+        lock = asyncio.Lock()
+        all_done = asyncio.Event()
+
+        async def worker(client_idx: int):
+            nonlocal active_tasks
+
+            client = self._clients[client_idx]
+            provider = self._router._providers[client_idx].config
+            my_endpoint = provider.base_url
+            worker_model = model or provider.model
+
+            while not all_done.is_set():
+                try:
+                    idx, msg, tried = task_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    async with lock:
+                        if active_tasks == 0 and task_queue.empty():
+                            all_done.set()
+                            break
+                    await asyncio.sleep(0.05)
+                    continue
+
+                async with lock:
+                    active_tasks += 1
+
+                if my_endpoint in tried:
+                    if len(tried) >= num_endpoints:
+                        # 所有 endpoint 都失败
+                        await result_queue.put(
+                            SimpleNamespace(
+                                content=None,
+                                error="All endpoints failed",
+                                original_idx=idx,
+                                latency=0.0,
+                                status="error",
+                                data=None,
+                                usage=None,
+                                summary=None,
+                            )
+                        )
+                        async with lock:
+                            active_tasks -= 1
+                        continue
+                    await task_queue.put((idx, msg, tried))
+                    async with lock:
+                        active_tasks -= 1
+                    await asyncio.sleep(0.01)
+                    continue
+
+                task_start = time.time()
+                try:
+                    result = await client.chat_completions(
+                        messages=msg,
+                        model=worker_model,
+                        return_raw=return_raw,
+                        return_usage=return_usage,
+                        **kwargs,
+                    )
+
+                    if hasattr(result, "status") and result.status != "success":
+                        error_detail = ""
+                        if hasattr(result, "data") and isinstance(result.data, dict):
+                            error_detail = result.data.get("error", "unknown")
+                        raise RuntimeError(error_detail or "unknown error")
+
+                    latency = time.time() - task_start
+                    self._router.mark_success(provider)
+
+                    # 提取 content
+                    if hasattr(result, "content"):
+                        content = result.content
+                        usage = getattr(result, "usage", None)
+                    else:
+                        content = result
+                        usage = None
+
+                    await result_queue.put(
+                        SimpleNamespace(
+                            content=content,
+                            error=None,
+                            original_idx=idx,
+                            latency=latency,
+                            status="success",
+                            data=result,
+                            usage=usage,
+                            summary=None,
+                        )
+                    )
+                    async with lock:
+                        active_tasks -= 1
+
+                except Exception as e:
+                    latency = time.time() - task_start
+                    self._router.mark_failed(provider)
+                    tried = tried | {my_endpoint}
+
+                    if self._fallback and len(tried) < num_endpoints:
+                        await task_queue.put((idx, msg, tried))
+                        async with lock:
+                            active_tasks -= 1
+                    else:
+                        await result_queue.put(
+                            SimpleNamespace(
+                                content=None,
+                                error=str(e),
+                                original_idx=idx,
+                                latency=latency,
+                                status="error",
+                                data=None,
+                                usage=None,
+                                summary=None,
+                            )
+                        )
+                        async with lock:
+                            active_tasks -= 1
+
+        # 启动所有 worker
+        workers = []
+        for client_idx, client in enumerate(self._clients):
+            concurrency = getattr(client, "_concurrency_limit", 10)
+            for _ in range(concurrency):
+                workers.append(asyncio.ensure_future(worker(client_idx)))
+
+        # 边完成边 yield
+        yielded = 0
+        success_count = 0
+        start_time = time.time()
+        total_latency = 0.0
+
+        try:
+            while yielded < total_pending:
+                try:
+                    result = await asyncio.wait_for(result_queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    if all_done.is_set() and result_queue.empty():
+                        break
+                    continue
+
+                yielded += 1
+                if result.status == "success":
+                    success_count += 1
+                    total_latency += result.latency
+
+                # 最后一条附带 summary
+                if yielded == total_pending:
+                    elapsed = time.time() - start_time
+                    result.summary = {
+                        "total": n,
+                        "success": success_count,
+                        "failed": n - success_count,
+                        "cached": 0,
+                        "elapsed": elapsed,
+                        "avg_latency": total_latency / success_count if success_count else 0,
+                    }
+
+                yield result
+
+        finally:
+            all_done.set()
+            await asyncio.gather(*workers, return_exceptions=True)
 
     def model_list(self) -> list[str]:
         """获取可用模型列表"""

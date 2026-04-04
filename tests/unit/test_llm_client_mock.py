@@ -811,18 +811,29 @@ class TestPoolMethods:
 
     @pytest.mark.asyncio
     async def test_pool_multi_iter_not_supported(self):
-        """Pool 多 endpoint iter_chat_completions_batch 不支持"""
+        """Pool 多 endpoint iter_chat_completions_batch 支持"""
         configs = [
             MockServerConfig(port=19447, delay_min=0.01, delay_max=0.01),
             MockServerConfig(port=19448, delay_min=0.01, delay_max=0.01),
         ]
         with MockLLMServerGroup(configs) as group:
             async with LLMClientPool(endpoints=group.endpoints, fallback=True) as pool:
-                with pytest.raises(NotImplementedError):
-                    async for _ in pool.iter_chat_completions_batch(
-                        _batch_msgs(3), show_progress=False
-                    ):
-                        pass
+                results = []
+                async for r in pool.iter_chat_completions_batch(
+                    _batch_msgs(3), show_progress=False
+                ):
+                    results.append(r)
+                assert len(results) == 3
+                # 每条都有 original_idx, content, status
+                indices = sorted(r.original_idx for r in results)
+                assert indices == [0, 1, 2]
+                for r in results:
+                    assert r.status == "success"
+                    assert r.content is not None
+                # 最后一条有 summary
+                last = results[-1]
+                assert last.summary is not None
+                assert last.summary["total"] == 3
 
     @pytest.mark.asyncio
     async def test_pool_properties(self, mock_llm_server):
