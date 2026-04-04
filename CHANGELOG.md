@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.1] - 2026-04-04
+
+### Features
+
+- Pool 多 endpoint 支持 iter_chat_completions_batch
+
+### Miscellaneous
+
+- Bump version to 0.10.1
+
 ## [0.10.0] - 2026-03-22
 
 ### Documentation
