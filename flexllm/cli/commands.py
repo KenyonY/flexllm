@@ -60,14 +60,22 @@ def register_commands(app):
         """LLM 快速问答（支持管道输入）
 
         \b
-        Examples:
-        flexllm ask "什么是Python"
-        flexllm ask "解释代码" -s "你是代码专家"
-        echo "长文本" | flexllm ask "总结一下"
-        flexllm ask "你好" --thinking false -m 242-model
-        flexllm ask "列出3种语言" --schema json
-        flexllm ask "写个hello world" -x
-        flexllm ask -f code.py "解释这段代码"
+        基本用法:
+          flexllm ask "什么是Python"
+          flexllm ask "解释代码" -s "你是代码专家"
+          echo "长文本" | flexllm ask "总结一下"
+
+        附加文件 (-f):  读取文件内容拼接到 prompt 前面
+          flexllm ask -f main.py "这段代码有什么问题？"
+          flexllm ask -f a.py -f b.py "对比这两个文件的实现"
+
+        结构化输出 (--schema):  强制模型返回 JSON
+          flexllm ask "列出3种编程语言及其特点" --schema json
+          flexllm ask "提取姓名和年龄" --schema @schema.json
+
+        代码提取 (-x):  只输出回复中的第一个代码块
+          flexllm ask "用 Python 写个快排" -x
+          flexllm ask "用 Python 写个快排" -x > sort.py
         """
         stdin_content = None
         if not sys.stdin.isatty():
@@ -171,11 +179,17 @@ def register_commands(app):
         """交互式对话
 
         \b
-        Examples:
-        flexllm chat                      # 多轮对话
-        flexllm chat "你好"               # 单条对话
-        flexllm chat --model gpt-4 "你好" # 指定模型
-        flexllm chat -f code.py "解释这段代码"
+        基本用法:
+          flexllm chat                        # 多轮对话
+          flexllm chat "你好"                 # 单条对话
+          flexllm chat -m gpt-4 "你好"        # 指定模型
+
+        附加文件 (-f):  读取文件内容作为对话上下文
+          flexllm chat -f code.py "这段代码有什么问题？"
+          flexllm chat -f a.py -f b.py "对比这两个文件"
+
+        代码提取 (-x):  只输出回复中的代码块（仅单条模式）
+          flexllm chat "写个 hello world" -x
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -520,18 +534,23 @@ def register_commands(app):
 
         自动检测输入格式：openai_chat, alpaca, simple (q/question/prompt/input/user)
         也可用 --user-field 和 --system-field 指定任意字段名。
-
-        高级配置可在 ~/.flexllm/config.yaml 的 batch 节中设置。
-        CLI 参数优先级高于配置文件。
+        高级配置可在 ~/.flexllm/config.yaml 的 batch 节中设置，CLI 参数优先级更高。
 
         \b
-        Examples:
-        flexllm batch input.jsonl                  # 自动生成 input.output.jsonl
-        flexllm batch input.jsonl -o output.jsonl  # 指定输出文件
-        flexllm batch input.jsonl -c 20 -m gpt-4   # 自动输出 + 自定义参数
-        flexllm batch input.jsonl --cache --return-usage
-        flexllm batch data.jsonl -o out.jsonl --user-field text --system-field sys_prompt
-        cat input.jsonl | flexllm batch -o output.jsonl  # stdin 需指定 -o
+        基本用法:
+          flexllm batch input.jsonl                    # 自动生成 input.output.jsonl
+          flexllm batch input.jsonl -o output.jsonl    # 指定输出文件
+          flexllm batch input.jsonl -c 20 -m gpt-4     # 并发数 + 模型
+          cat input.jsonl | flexllm batch -o out.jsonl  # stdin 输入（需指定 -o）
+
+        结构化输出 (--schema):  所有记录统一使用结构化输出
+          flexllm batch input.jsonl -o out.jsonl --schema json
+          flexllm batch input.jsonl -o out.jsonl --schema @schema.json
+
+        其他常用参数:
+          flexllm batch input.jsonl --cache --return-usage --track-cost
+          flexllm batch data.jsonl -o out.jsonl -uf text -sf sys_prompt
+          flexllm batch input.jsonl -n 5               # 只处理前5条（试跑）
         """
         has_stdin = not sys.stdin.isatty()
         if not input and not has_stdin:
