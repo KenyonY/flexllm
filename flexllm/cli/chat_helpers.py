@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 
-from .utils import apply_user_template
+from .utils import apply_user_template, extract_code_block
 
 # ========== Chat 辅助函数 ==========
 
@@ -21,6 +21,7 @@ def single_chat(
     stream,
     user_template=None,
     thinking=None,
+    extract=False,
 ):
     """单次对话"""
 
@@ -38,14 +39,30 @@ def single_chat(
             if thinking is not None:
                 kwargs["thinking"] = thinking
 
-            if stream:
+            if stream and not extract:
                 print("Assistant: ", end="", flush=True)
                 async for chunk in client.chat_completions_stream(messages, **kwargs):
                     print(chunk, end="", flush=True)
                 print()
             else:
-                result = await client.chat_completions(messages, **kwargs)
-                print(f"Assistant: {result}")
+                # extract 模式需要完整响应，不能流式
+                if stream:
+                    full_response = ""
+                    async for chunk in client.chat_completions_stream(messages, **kwargs):
+                        full_response += chunk
+                    result = full_response
+                else:
+                    result = await client.chat_completions(messages, **kwargs)
+                output = str(result)
+                if extract:
+                    code = extract_code_block(output)
+                    if code is not None:
+                        print(code)
+                    else:
+                        print("提示: 回复中未找到代码块，输出原始内容", file=sys.stderr)
+                        print(f"Assistant: {output}")
+                else:
+                    print(f"Assistant: {output}")
 
     try:
         asyncio.run(_run())

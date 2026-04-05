@@ -11,7 +11,8 @@ docs/
 ├── agent-architecture.md # Agent 架构文档（开发者向）
 ├── api.md                # API 详细参考
 ├── advanced.md           # 高级用法
-└── roadmap.md            # 开发路线图
+├── roadmap.md            # 开发路线图
+└── plans/                # 实现计划
 ```
 
 > 安装、CLI 用法、配置文件等基础内容见项目根目录 [README.md](../README.md)。

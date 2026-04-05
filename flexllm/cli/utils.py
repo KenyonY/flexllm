@@ -232,6 +232,85 @@ def parse_batch_input(
     return records, format_type, message_fields
 
 
+def parse_schema(value: str | None) -> dict | None:
+    """解析 --schema 参数值
+
+    支持:
+    - "json" → {"type": "json_object"}
+    - "@file.json" → 从文件读取 JSON Schema
+    - JSON 字符串 → 解析为 dict，自动包装为 {"type": "json_schema", "json_schema": {"schema": ...}}
+    """
+    if value is None:
+        return None
+    if value.lower() == "json":
+        return {"type": "json_object"}
+    if value.startswith("@"):
+        path = value[1:]
+        try:
+            with open(path, encoding="utf-8") as f:
+                schema = json.loads(f.read())
+        except FileNotFoundError:
+            print(f"错误: schema 文件不存在: {path}", file=sys.stderr)
+            raise SystemExit(1)
+        except json.JSONDecodeError as e:
+            print(f"错误: schema 文件 JSON 解析失败: {e}", file=sys.stderr)
+            raise SystemExit(1)
+        return {"type": "json_schema", "json_schema": {"schema": schema}}
+    try:
+        schema = json.loads(value)
+    except json.JSONDecodeError as e:
+        print(f"错误: --schema JSON 解析失败: {e}", file=sys.stderr)
+        raise SystemExit(1)
+    # 如果已经是 response_format 格式（含 type 字段），直接返回
+    if (
+        isinstance(schema, dict)
+        and "type" in schema
+        and schema["type"]
+        in (
+            "json_object",
+            "json_schema",
+        )
+    ):
+        return schema
+    # 否则视为 JSON Schema，包装为 json_schema 格式
+    return {"type": "json_schema", "json_schema": {"schema": schema}}
+
+
+def extract_code_block(text: str) -> str | None:
+    """从文本中提取第一个 fenced code block 的内容
+
+    Returns:
+        提取的代码内容，无 code block 时返回 None
+    """
+    import re
+
+    pattern = re.compile(r"```(?:\w*)\n(.*?)```", re.DOTALL)
+    match = pattern.search(text)
+    if match:
+        return match.group(1).rstrip("\n")
+    return None
+
+
+def read_file_contents(paths: list[str]) -> str:
+    """读取多个文件内容并拼接"""
+    parts = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8") as f:
+                content = f.read()
+            size = len(content.encode("utf-8"))
+            if size > 100 * 1024:
+                print(f"警告: 文件 {path} 较大 ({size // 1024}KB)", file=sys.stderr)
+            parts.append(content)
+        except FileNotFoundError:
+            print(f"错误: 文件不存在: {path}", file=sys.stderr)
+            raise SystemExit(1)
+        except UnicodeDecodeError:
+            print(f"错误: 文件编码不支持 (非 UTF-8): {path}", file=sys.stderr)
+            raise SystemExit(1)
+    return "\n\n".join(parts)
+
+
 def parse_thinking(value: str | None) -> bool | str | int | None:
     """解析 --thinking 参数值
 

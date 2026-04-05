@@ -11,10 +11,13 @@ from .config import get_config
 from .utils import (
     apply_user_template,
     convert_to_messages,
+    extract_code_block,
     parse_batch_input,
+    parse_schema,
     parse_thinking,
     query_credits,
     query_credits_by_key,
+    read_file_contents,
     resolve_model_config,
 )
 
@@ -40,6 +43,19 @@ def register_commands(app):
                 "--thinking", help="思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
             ),
         ] = None,
+        schema: Annotated[
+            str | None,
+            Option(
+                "--schema",
+                help="结构化输出 (json=JSON模式, @file.json=从文件读取, 或 JSON Schema 字符串)",
+            ),
+        ] = None,
+        extract: Annotated[
+            bool, Option("-x", "--extract", help="从回复中提取第一个代码块")
+        ] = False,
+        files: Annotated[
+            list[str] | None, Option("-f", "--file", help="附加文件内容到 prompt（可多次指定）")
+        ] = None,
     ):
         """LLM 快速问答（支持管道输入）
 
@@ -49,19 +65,22 @@ def register_commands(app):
         flexllm ask "解释代码" -s "你是代码专家"
         echo "长文本" | flexllm ask "总结一下"
         flexllm ask "你好" --thinking false -m 242-model
+        flexllm ask "列出3种语言" --schema json
+        flexllm ask "写个hello world" -x
+        flexllm ask -f code.py "解释这段代码"
         """
         stdin_content = None
         if not sys.stdin.isatty():
             stdin_content = sys.stdin.read().strip()
 
-        if not prompt and not stdin_content:
+        file_content = read_file_contents(files) if files else None
+
+        if not prompt and not stdin_content and not file_content:
             print("错误: 请提供问题", file=sys.stderr)
             raise typer.Exit(1)
 
-        if stdin_content:
-            full_prompt = f"{stdin_content}\n\n{prompt}" if prompt else stdin_content
-        else:
-            full_prompt = prompt
+        parts = [p for p in [file_content, stdin_content, prompt] if p]
+        full_prompt = "\n\n".join(parts)
 
         model_id, base_url, api_key = resolve_model_config(
             model, base_url=base_url, api_key=api_key, required=True
@@ -79,6 +98,10 @@ def register_commands(app):
         if thinking_value is not None:
             model_params["thinking"] = thinking_value
 
+        response_format = parse_schema(schema)
+        if response_format is not None:
+            model_params["response_format"] = response_format
+
         async def _ask():
             from flexllm import LLMClient
 
@@ -94,14 +117,20 @@ def register_commands(app):
             result = asyncio.run(_ask())
             if result is None:
                 return
-            if isinstance(result, str):
-                print(result)
-                return
+            output = str(result) if not isinstance(result, str) else result
             if hasattr(result, "status") and result.status == "error":
                 error_msg = result.data.get("detail", result.data.get("error", "未知错误"))
                 print(f"错误: {error_msg}", file=sys.stderr)
                 return
-            print(str(result))
+            if extract:
+                code = extract_code_block(output)
+                if code is not None:
+                    print(code)
+                else:
+                    print("提示: 回复中未找到代码块，输出原始内容", file=sys.stderr)
+                    print(output)
+            else:
+                print(output)
         except Exception as e:
             print(f"错误: {e}", file=sys.stderr)
             raise typer.Exit(1)
@@ -125,6 +154,19 @@ def register_commands(app):
                 "--thinking", help="思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
             ),
         ] = None,
+        schema: Annotated[
+            str | None,
+            Option(
+                "--schema",
+                help="结构化输出 (json=JSON模式, @file.json=从文件读取, 或 JSON Schema 字符串)",
+            ),
+        ] = None,
+        extract: Annotated[
+            bool, Option("-x", "--extract", help="从回复中提取第一个代码块")
+        ] = False,
+        files: Annotated[
+            list[str] | None, Option("-f", "--file", help="附加文件内容到 prompt（可多次指定）")
+        ] = None,
     ):
         """交互式对话
 
@@ -133,6 +175,7 @@ def register_commands(app):
         flexllm chat                      # 多轮对话
         flexllm chat "你好"               # 单条对话
         flexllm chat --model gpt-4 "你好" # 指定模型
+        flexllm chat -f code.py "解释这段代码"
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
@@ -157,9 +200,21 @@ def register_commands(app):
         thinking_value = parse_thinking(thinking)
         if thinking_value is not None:
             model_params["thinking"] = thinking_value
+
+        response_format = parse_schema(schema)
+        if response_format is not None:
+            model_params["response_format"] = response_format
+
         resolved_thinking = model_params.pop("thinking", None)
 
         stream = not no_stream
+
+        # 如果提供了文件，拼接到 message 前面
+        if files and message:
+            file_content = read_file_contents(files)
+            message = f"{file_content}\n\n{message}"
+        elif files and not message:
+            message = read_file_contents(files)
 
         if message:
             single_chat(
@@ -173,6 +228,7 @@ def register_commands(app):
                 stream,
                 user_template,
                 thinking=resolved_thinking,
+                extract=extract,
             )
         else:
             interactive_chat(
@@ -452,6 +508,13 @@ def register_commands(app):
             str | None,
             Option("--user-template", help="user content 模板 (使用 {content} 占位符)"),
         ] = None,
+        schema: Annotated[
+            str | None,
+            Option(
+                "--schema",
+                help="结构化输出 (json=JSON模式, @file.json=从文件读取, 或 JSON Schema 字符串)",
+            ),
+        ] = None,
     ):
         """批量处理 JSONL 文件（支持断点续传）
 
@@ -614,6 +677,10 @@ def register_commands(app):
                     kwargs["temperature"] = temperature
                 if max_tokens is not None:
                     kwargs["max_tokens"] = max_tokens
+
+                response_format = parse_schema(schema)
+                if response_format is not None:
+                    kwargs["response_format"] = response_format
 
                 if use_pool:
                     pool_kwargs = {

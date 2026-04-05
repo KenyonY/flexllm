@@ -26,8 +26,12 @@ ruff format flexllm tests        # 格式化
 
 # CLI 使用（别名 xllm）
 flexllm ask "问题"                    # 快速问答
+flexllm ask "列出3种语言" --schema json  # 结构化 JSON 输出
+flexllm ask "写个快排" -x             # 提取代码块
+flexllm ask -f code.py "解释代码"     # 附加文件内容
 flexllm chat                          # 交互式聊天
 flexllm batch in.jsonl -o out.jsonl   # 批量处理（支持断点续传）
+flexllm batch in.jsonl -o out.jsonl --schema @schema.json  # 批量结构化输出
 flexllm list                          # 列出配置模型
 flexllm set-model gpt-4               # 设置默认模型
 flexllm test                          # 测试连接

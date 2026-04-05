@@ -53,6 +53,9 @@ results = await client.chat_completions_batch(messages_list, output_jsonl="resul
 
 ```bash
 flexllm ask "问题"                     # 快速问答
+flexllm ask "列出3种语言" --schema json  # 结构化 JSON 输出
+flexllm ask "写个快排" -x              # 提取代码块
+flexllm ask -f code.py "解释代码"      # 附加文件内容
 flexllm chat                           # 交互式聊天
 flexllm list                           # 已配置模型
 flexllm test                           # 测试连接
@@ -82,6 +85,8 @@ flexllm batch input.jsonl -o output.jsonl -m gpt-4 -c 20 # 指定模型和并发
 flexllm batch data.jsonl -o out.jsonl -uf text -sf sys_prompt  # 指定任意字段名
 flexllm batch input.jsonl -o output.jsonl -s "You are helpful" # 全局 system prompt
 flexllm batch input.jsonl -o output.jsonl --save-input false   # 不保存 input
+flexllm batch input.jsonl -o output.jsonl --schema json       # 批量结构化输出
+flexllm batch input.jsonl -o output.jsonl --schema @schema.json  # 从文件读取 schema
 ```
 
 **参数速查：**
@@ -95,6 +100,7 @@ flexllm batch input.jsonl -o output.jsonl --save-input false   # 不保存 input
 | `--system` | `-s` | 全局 system prompt |
 | `--user-field` | `-uf` | 指定 user content 的字段名 |
 | `--system-field` | `-sf` | 指定 system prompt 的字段名 |
+| `--schema` | | 结构化输出 (json/@file.json/JSON Schema) |
 | `--save-input` | | 输出 input 保存策略：true/last/false |
 | `--track-cost` | | 进度条显示实时成本 |
 | `--cache/--no-cache` | | 启用/禁用响应缓存 |

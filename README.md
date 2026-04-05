@@ -356,13 +356,19 @@ result.parsed  # -> Decision(action="approve", reason="...")
 ```bash
 # Quick ask
 flexllm ask "What is Python?"
+flexllm ask "List 3 languages" --schema json     # Structured JSON output
+flexllm ask "Write a quicksort" -x               # Extract code block from response
+flexllm ask -f code.py "Explain this code"       # Attach file content to prompt
+flexllm ask -f a.py -f b.py "Compare these"      # Multiple files
 
 # Interactive chat
 flexllm chat
+flexllm chat -f data.csv "Analyze this data"
 
 # Batch processing with cost tracking
 flexllm batch input.jsonl -o output.jsonl --track-cost
 flexllm batch input.jsonl -o output.jsonl -n 5           # First 5 records only
+flexllm batch input.jsonl -o output.jsonl --schema @schema.json  # Structured output
 flexllm batch data.jsonl -o out.jsonl -uf text -sf sys   # Custom field names
 
 # Model management
