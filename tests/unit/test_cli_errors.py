@@ -104,6 +104,124 @@ class TestCliError:
         assert data["suggestion"] == "修复建议"
         assert data["retryable"] is True
 
+    def test_non_tty_context_and_doc(self, monkeypatch):
+        """context 和 doc 字段应作为一等字段输出到 JSON"""
+        import io
+
+        fake_stderr = io.StringIO()
+        fake_stderr.isatty = lambda: False
+        monkeypatch.setattr("sys.stderr", fake_stderr)
+
+        from click.exceptions import Exit
+
+        with pytest.raises(Exit):
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--format 参数值无效",
+                context={
+                    "arg": "--format",
+                    "received": "xml",
+                    "expected": ["json", "table", "csv"],
+                },
+                suggestion="使用 --format json",
+                doc="flexllm ask --help",
+            )
+
+        data = json.loads(fake_stderr.getvalue())
+        # Agent 可直接按字段读取，无需正则 message
+        assert data["context"]["arg"] == "--format"
+        assert data["context"]["received"] == "xml"
+        assert data["context"]["expected"] == ["json", "table", "csv"]
+        assert data["doc"] == "flexllm ask --help"
+        # 字段顺序：error/message/retryable 在前，扩展字段在后
+        assert list(data.keys())[:3] == ["error", "message", "retryable"]
+
+    def test_non_tty_single_line_json(self, monkeypatch):
+        """JSON 必须是单行输出，便于 Agent 逐行解析 stderr"""
+        import io
+
+        fake_stderr = io.StringIO()
+        fake_stderr.isatty = lambda: False
+        monkeypatch.setattr("sys.stderr", fake_stderr)
+
+        from click.exceptions import Exit
+
+        with pytest.raises(Exit):
+            cli_error(
+                ErrorType.IO_ERROR,
+                "文件不存在",
+                context={"path": "/tmp/missing.json", "exception_type": "FileNotFoundError"},
+            )
+
+        output = fake_stderr.getvalue().rstrip("\n")
+        assert "\n" not in output, "JSON 输出不应包含换行"
+        # 确保是合法 JSON
+        assert json.loads(output)["context"]["path"] == "/tmp/missing.json"
+
+    def test_non_tty_no_context_omits_field(self, monkeypatch):
+        """不传 context/doc 时 JSON 中不应出现这些字段"""
+        import io
+
+        fake_stderr = io.StringIO()
+        fake_stderr.isatty = lambda: False
+        monkeypatch.setattr("sys.stderr", fake_stderr)
+
+        from click.exceptions import Exit
+
+        with pytest.raises(Exit):
+            cli_error(ErrorType.GENERAL, "一般错误")
+
+        data = json.loads(fake_stderr.getvalue())
+        assert "context" not in data
+        assert "doc" not in data
+        assert "suggestion" not in data
+        # 必选字段一直都在
+        assert data["error"] == "general_error"
+        assert data["retryable"] is False
+
+    def test_tty_context_rendering(self, capsys, monkeypatch):
+        """TTY 模式下 context 应缩进键值对显示"""
+
+        class FakeTTY:
+            def __init__(self, capsys):
+                self._buf = []
+
+            def isatty(self):
+                return True
+
+            def write(self, s):
+                self._buf.append(s)
+                return len(s)
+
+            def flush(self):
+                pass
+
+            def fileno(self):
+                return 2
+
+        import sys as _sys
+
+        fake = FakeTTY(capsys)
+        monkeypatch.setattr(_sys, "stderr", fake)
+
+        from click.exceptions import Exit
+
+        with pytest.raises(Exit):
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "参数错误",
+                context={"arg": "--format", "expected": ["json", "csv"]},
+                suggestion="改用 --format json",
+                doc="flexllm ask --help",
+            )
+
+        output = "".join(fake._buf)
+        assert "错误: 参数错误" in output
+        assert "arg: --format" in output
+        assert "expected: json, csv" in output  # 列表应被展平为逗号分隔
+        assert "提示: 改用 --format json" in output
+        assert "详见: flexllm ask --help" in output
+
 
 class TestDryRunOutput:
     def test_json_output(self, capsys):

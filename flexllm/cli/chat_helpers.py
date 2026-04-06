@@ -71,7 +71,17 @@ def single_chat(
     except Exception as e:
         from .errors import ErrorType, cli_error
 
-        cli_error(ErrorType.GENERAL, str(e))
+        cli_error(
+            ErrorType.GENERAL,
+            str(e),
+            context={
+                "exception_type": type(e).__name__,
+                "model": model,
+                "base_url": base_url,
+            },
+            suggestion="使用 flexllm test 验证连接，或 flexllm chat --dry-run 检查请求",
+            doc="flexllm chat --help",
+        )
 
 
 def interactive_chat(

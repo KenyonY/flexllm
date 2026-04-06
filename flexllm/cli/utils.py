@@ -32,11 +32,18 @@ def resolve_model_config(
         if required:
             from .errors import ErrorType, cli_error
 
+            available = [m.get("name", m.get("id", "?")) for m in config.config.get("models", [])]
             cli_error(
                 ErrorType.NOT_FOUND,
                 "未找到模型配置",
-                suggestion="使用 'flexllm list' 查看可用模型，"
-                "或设置环境变量 FLEXLLM_BASE_URL, FLEXLLM_API_KEY, FLEXLLM_MODEL",
+                context={
+                    "arg": "-m/--model",
+                    "received": model,
+                    "available_models": available,
+                    "default_model": config.config.get("default"),
+                },
+                suggestion="使用 flexllm list 查看模型，或设置 FLEXLLM_BASE_URL/FLEXLLM_API_KEY/FLEXLLM_MODEL 环境变量",
+                doc="flexllm --help",
             )
         return model, base_url, api_key
 
@@ -251,18 +258,42 @@ def parse_schema(value: str | None) -> dict | None:
         except FileNotFoundError:
             from .errors import ErrorType, cli_error
 
-            cli_error(ErrorType.IO_ERROR, f"schema 文件不存在: {path}")
+            cli_error(
+                ErrorType.IO_ERROR,
+                "schema 文件不存在",
+                context={"arg": "--schema", "received": value, "path": path},
+                suggestion="检查路径是否正确，schema 文件应为合法 JSON Schema",
+            )
         except json.JSONDecodeError as e:
             from .errors import ErrorType, cli_error
 
-            cli_error(ErrorType.INVALID_ARGS, f"schema 文件 JSON 解析失败: {e}")
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "schema 文件 JSON 解析失败",
+                context={
+                    "path": path,
+                    "line": getattr(e, "lineno", None),
+                    "column": getattr(e, "colno", None),
+                    "parser_message": e.msg if hasattr(e, "msg") else str(e),
+                },
+                suggestion=f"确认 schema 文件是合法 JSON，使用 python -m json.tool {path} 验证",
+            )
         return {"type": "json_schema", "json_schema": {"schema": schema}}
     try:
         schema = json.loads(value)
     except json.JSONDecodeError as e:
         from .errors import ErrorType, cli_error
 
-        cli_error(ErrorType.INVALID_ARGS, f"--schema JSON 解析失败: {e}")
+        cli_error(
+            ErrorType.INVALID_ARGS,
+            "--schema JSON 解析失败",
+            context={
+                "arg": "--schema",
+                "received": value[:100] + ("..." if len(value) > 100 else ""),
+                "parser_message": e.msg if hasattr(e, "msg") else str(e),
+            },
+            suggestion="使用 json / @file.json / 合法 JSON 字符串三种形式之一",
+        )
     # 如果已经是 response_format 格式（含 type 字段），直接返回
     if (
         isinstance(schema, dict)
@@ -307,11 +338,21 @@ def read_file_contents(paths: list[str]) -> str:
         except FileNotFoundError:
             from .errors import ErrorType, cli_error
 
-            cli_error(ErrorType.IO_ERROR, f"文件不存在: {path}")
+            cli_error(
+                ErrorType.IO_ERROR,
+                "附加文件不存在",
+                context={"arg": "-f/--file", "received": path, "all_files": paths},
+                suggestion="检查路径是否正确，支持绝对或相对路径",
+            )
         except UnicodeDecodeError:
             from .errors import ErrorType, cli_error
 
-            cli_error(ErrorType.IO_ERROR, f"文件编码不支持 (非 UTF-8): {path}")
+            cli_error(
+                ErrorType.IO_ERROR,
+                "文件编码不支持（非 UTF-8）",
+                context={"arg": "-f/--file", "received": path, "expected_encoding": "utf-8"},
+                suggestion="使用 iconv 转换: iconv -f GBK -t UTF-8 file -o file.utf8",
+            )
     return "\n\n".join(parts)
 
 
@@ -336,8 +377,21 @@ def parse_thinking(value: str | None) -> bool | str | int | None:
 
         cli_error(
             ErrorType.INVALID_ARGS,
-            f"--thinking 参数无效: {value}",
-            suggestion="支持: true/false/low/medium/high/minimal 或整数(budget_tokens)",
+            "--thinking 参数无效",
+            context={
+                "arg": "--thinking",
+                "received": value,
+                "expected": [
+                    "true",
+                    "false",
+                    "low",
+                    "medium",
+                    "high",
+                    "minimal",
+                    "<int budget_tokens>",
+                ],
+            },
+            suggestion="布尔/级别字符串或整数 budget_tokens",
         )
 
 
