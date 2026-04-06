@@ -5,14 +5,49 @@ from __future__ import annotations
 import sys
 
 try:
-    from typer import Typer
+    from typing import Annotated
+
+    from typer import Option, Typer
 
     app = Typer(
         name="flexllm",
-        help="flexllm - 高性能 LLM 客户端命令行工具",
+        help="""flexllm - 高性能 LLM 客户端命令行工具
+
+\b
+Quick Start:
+  flexllm ask "什么是 Python"             # 快速问答
+  flexllm ask -f code.py "解释这段代码"   # 附加文件
+  flexllm chat                            # 交互式对话
+  flexllm batch in.jsonl -o out.jsonl     # 批量处理（支持断点续传）
+  flexllm list                            # 查看本地配置的模型
+  flexllm test                            # 测试 LLM 连接
+
+配置: ~/.flexllm/config.yaml (运行 flexllm init 创建)
+环境变量: FLEXLLM_BASE_URL, FLEXLLM_API_KEY, FLEXLLM_MODEL""",
         add_completion=True,
         no_args_is_help=True,
     )
+
+    def _version_callback(value: bool):
+        if value:
+            try:
+                from flexllm import __version__
+
+                v = __version__
+            except Exception:
+                v = "unknown"
+            print(f"flexllm {v}")
+            raise SystemExit(0)
+
+    @app.callback()
+    def _main_callback(
+        version: Annotated[
+            bool | None,
+            Option("--version", "-V", help="显示版本号", callback=_version_callback, is_eager=True),
+        ] = None,
+    ):
+        pass
+
     HAS_TYPER = True
 except ImportError:
     HAS_TYPER = False

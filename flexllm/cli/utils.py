@@ -18,7 +18,7 @@ def resolve_model_config(
         model: 模型名称（CLI 传入）
         base_url: base_url（CLI 传入，优先级高于配置）
         api_key: api_key（CLI 传入，优先级高于配置）
-        required: 为 True 时，配置不存在则打印错误并 raise typer.Exit(1)
+        required: 为 True 时，配置不存在则通过 cli_error 报错退出
 
     Returns:
         (model, base_url, api_key) 三元组，配置中的值合并 CLI 传入值
@@ -30,15 +30,14 @@ def resolve_model_config(
 
     if not model_config:
         if required:
-            import typer
+            from .errors import ErrorType, cli_error
 
-            print("错误: 未找到模型配置，使用 'flexllm list' 查看可用模型", file=sys.stderr)
-            print(
-                "提示: 设置环境变量 FLEXLLM_BASE_URL, FLEXLLM_API_KEY, FLEXLLM_MODEL"
-                " 或创建 ~/.flexllm/config.yaml",
-                file=sys.stderr,
+            cli_error(
+                ErrorType.NOT_FOUND,
+                "未找到模型配置",
+                suggestion="使用 'flexllm list' 查看可用模型，"
+                "或设置环境变量 FLEXLLM_BASE_URL, FLEXLLM_API_KEY, FLEXLLM_MODEL",
             )
-            raise typer.Exit(1)
         return model, base_url, api_key
 
     resolved_base_url = base_url or model_config.get("base_url")
@@ -250,17 +249,20 @@ def parse_schema(value: str | None) -> dict | None:
             with open(path, encoding="utf-8") as f:
                 schema = json.loads(f.read())
         except FileNotFoundError:
-            print(f"错误: schema 文件不存在: {path}", file=sys.stderr)
-            raise SystemExit(1)
+            from .errors import ErrorType, cli_error
+
+            cli_error(ErrorType.IO_ERROR, f"schema 文件不存在: {path}")
         except json.JSONDecodeError as e:
-            print(f"错误: schema 文件 JSON 解析失败: {e}", file=sys.stderr)
-            raise SystemExit(1)
+            from .errors import ErrorType, cli_error
+
+            cli_error(ErrorType.INVALID_ARGS, f"schema 文件 JSON 解析失败: {e}")
         return {"type": "json_schema", "json_schema": {"schema": schema}}
     try:
         schema = json.loads(value)
     except json.JSONDecodeError as e:
-        print(f"错误: --schema JSON 解析失败: {e}", file=sys.stderr)
-        raise SystemExit(1)
+        from .errors import ErrorType, cli_error
+
+        cli_error(ErrorType.INVALID_ARGS, f"--schema JSON 解析失败: {e}")
     # 如果已经是 response_format 格式（含 type 字段），直接返回
     if (
         isinstance(schema, dict)
@@ -303,11 +305,13 @@ def read_file_contents(paths: list[str]) -> str:
                 print(f"警告: 文件 {path} 较大 ({size // 1024}KB)", file=sys.stderr)
             parts.append(content)
         except FileNotFoundError:
-            print(f"错误: 文件不存在: {path}", file=sys.stderr)
-            raise SystemExit(1)
+            from .errors import ErrorType, cli_error
+
+            cli_error(ErrorType.IO_ERROR, f"文件不存在: {path}")
         except UnicodeDecodeError:
-            print(f"错误: 文件编码不支持 (非 UTF-8): {path}", file=sys.stderr)
-            raise SystemExit(1)
+            from .errors import ErrorType, cli_error
+
+            cli_error(ErrorType.IO_ERROR, f"文件编码不支持 (非 UTF-8): {path}")
     return "\n\n".join(parts)
 
 
@@ -328,8 +332,13 @@ def parse_thinking(value: str | None) -> bool | str | int | None:
     try:
         return int(value)
     except ValueError:
-        print(f"错误: --thinking 参数无效: {value}", file=sys.stderr)
-        raise SystemExit(1)
+        from .errors import ErrorType, cli_error
+
+        cli_error(
+            ErrorType.INVALID_ARGS,
+            f"--thinking 参数无效: {value}",
+            suggestion="支持: true/false/low/medium/high/minimal 或整数(budget_tokens)",
+        )
 
 
 def _detect_provider_from_key(api_key: str) -> str | None:

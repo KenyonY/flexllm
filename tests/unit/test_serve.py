@@ -164,7 +164,9 @@ class TestParseThinking:
         assert _parse_thinking(None) is None
 
     def test_invalid(self):
+        import click.exceptions
+
         from flexllm.cli.utils import parse_thinking as _parse_thinking
 
-        with pytest.raises(SystemExit):
+        with pytest.raises(click.exceptions.Exit):
             _parse_thinking("invalid_value")

@@ -69,7 +69,9 @@ def single_chat(
     except KeyboardInterrupt:
         print("\n[中断]")
     except Exception as e:
-        print(f"错误: {e}", file=sys.stderr)
+        from .errors import ErrorType, cli_error
+
+        cli_error(ErrorType.GENERAL, str(e))
 
 
 def interactive_chat(

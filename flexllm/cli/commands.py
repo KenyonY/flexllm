@@ -8,6 +8,7 @@ from typing import Annotated
 
 from .chat_helpers import interactive_chat, single_chat
 from .config import get_config
+from .errors import ErrorType, cli_error, dry_run_output
 from .utils import (
     apply_user_template,
     convert_to_messages,
@@ -56,6 +57,7 @@ def register_commands(app):
         files: Annotated[
             list[str] | None, Option("-f", "--file", help="附加文件内容到 prompt（可多次指定）")
         ] = None,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """LLM 快速问答（支持管道输入）
 
@@ -76,6 +78,9 @@ def register_commands(app):
         代码提取 (-x):  只输出回复中的第一个代码块
           flexllm ask "用 Python 写个快排" -x
           flexllm ask "用 Python 写个快排" -x > sort.py
+
+        预览:
+          flexllm ask "测试" --dry-run              # 预览请求内容
         """
         stdin_content = None
         if not sys.stdin.isatty():
@@ -84,8 +89,7 @@ def register_commands(app):
         file_content = read_file_contents(files) if files else None
 
         if not prompt and not stdin_content and not file_content:
-            print("错误: 请提供问题", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.INVALID_ARGS, "请提供问题")
 
         parts = [p for p in [file_content, stdin_content, prompt] if p]
         full_prompt = "\n\n".join(parts)
@@ -110,15 +114,27 @@ def register_commands(app):
         if response_format is not None:
             model_params["response_format"] = response_format
 
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        user_content = apply_user_template(full_prompt, user_template)
+        messages.append({"role": "user", "content": user_content})
+
+        if dry_run:
+            dry_run_output(
+                {
+                    "action": "ask",
+                    "model": model_id,
+                    "base_url": base_url,
+                    "messages": messages,
+                    "params": model_params,
+                }
+            )
+
         async def _ask():
             from flexllm import LLMClient
 
             async with LLMClient(model=model_id, base_url=base_url, api_key=api_key) as client:
-                messages = []
-                if system:
-                    messages.append({"role": "system", "content": system})
-                user_content = apply_user_template(full_prompt, user_template)
-                messages.append({"role": "user", "content": user_content})
                 return await client.chat_completions(messages, **model_params)
 
         try:
@@ -140,8 +156,7 @@ def register_commands(app):
             else:
                 print(output)
         except Exception as e:
-            print(f"错误: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.GENERAL, str(e))
 
     @app.command()
     def chat(
@@ -175,6 +190,7 @@ def register_commands(app):
         files: Annotated[
             list[str] | None, Option("-f", "--file", help="附加文件内容到 prompt（可多次指定）")
         ] = None,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """交互式对话
 
@@ -190,13 +206,19 @@ def register_commands(app):
 
         代码提取 (-x):  只输出回复中的代码块（仅单条模式）
           flexllm chat "写个 hello world" -x
+
+        预览:
+          flexllm chat "测试" --dry-run             # 预览请求配置
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
 
         if not base_url:
-            print("错误: 未配置 base_url", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                "未配置 base_url",
+                suggestion="设置 FLEXLLM_BASE_URL 或运行 flexllm init",
+            )
 
         if not system_prompt:
             system_prompt = config.get_system(model)
@@ -230,6 +252,20 @@ def register_commands(app):
         elif files and not message:
             message = read_file_contents(files)
 
+        if dry_run:
+            mode = "single" if message else "interactive"
+            data = {
+                "action": "chat",
+                "mode": mode,
+                "model": model,
+                "base_url": base_url,
+                "system": system_prompt,
+                "params": model_params,
+            }
+            if message:
+                data["message"] = message
+            dry_run_output(data)
+
         if message:
             single_chat(
                 message,
@@ -243,6 +279,12 @@ def register_commands(app):
                 user_template,
                 thinking=resolved_thinking,
                 extract=extract,
+            )
+        elif not sys.stdin.isatty():
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "非 TTY 模式下必须提供 message 参数",
+                suggestion='用法: flexllm chat "你的问题"',
             )
         else:
             interactive_chat(
@@ -280,6 +322,7 @@ def register_commands(app):
         multi_turn: Annotated[
             bool, Option("--multi-turn", help="多轮对话模式（携带上下文）")
         ] = False,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """启动 Web 聊天界面
 
@@ -291,13 +334,17 @@ def register_commands(app):
         flexllm chat-web -p 9090              # 指定端口
         flexllm chat-web --host 0.0.0.0       # 允许外部访问
         flexllm chat-web --thinking true      # 启用思考模式
+        flexllm chat-web --dry-run            # 预览启动配置
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
 
         if not base_url:
-            print("错误: 未配置 base_url", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                "未配置 base_url",
+                suggestion="设置 FLEXLLM_BASE_URL 或运行 flexllm init",
+            )
 
         if not system_prompt:
             system_prompt = config.get_system(model)
@@ -315,12 +362,30 @@ def register_commands(app):
         try:
             from ..chat_web import ChatWebConfig, ChatWebServer
         except ImportError:
-            print("错误: 需要安装 aiohttp: pip install aiohttp", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.DEPENDENCY_MISSING,
+                "需要安装 aiohttp",
+                suggestion="pip install aiohttp",
+            )
 
         thinking_value = parse_thinking(thinking)
         if thinking_value is None:
             thinking_value = model_params.get("thinking")
+
+        if dry_run:
+            dry_run_output(
+                {
+                    "action": "chat_web",
+                    "host": host,
+                    "port": port,
+                    "model": model,
+                    "base_url": base_url,
+                    "temperature": model_params.get("temperature"),
+                    "max_tokens": model_params.get("max_tokens"),
+                    "thinking": thinking_value,
+                    "multi_turn": multi_turn,
+                }
+            )
 
         web_config = ChatWebConfig(
             port=port,
@@ -351,8 +416,7 @@ def register_commands(app):
         except KeyboardInterrupt:
             print("\nServer stopped")
         except Exception as e:
-            print(f"错误: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.GENERAL, str(e))
 
     @app.command()
     def serve(
@@ -379,6 +443,7 @@ def register_commands(app):
         port: Annotated[int, Option("-p", "--port", help="监听端口")] = 8000,
         host: Annotated[str, Option("--host", help="监听地址")] = "0.0.0.0",
         verbose: Annotated[bool, Option("--verbose", "-v", help="打印请求日志")] = False,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """启动 HTTP API 服务，将 LLM 包装为 REST API
 
@@ -397,13 +462,17 @@ def register_commands(app):
         Examples:
         flexllm serve -m qwen-finetuned -s "你是助手"
         flexllm serve --thinking true -c 20 -p 8000
+        flexllm serve --dry-run                     # 预览启动配置
         """
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
 
         if not base_url:
-            print("错误: 未配置 base_url", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                "未配置 base_url",
+                suggestion="设置 FLEXLLM_BASE_URL 或运行 flexllm init",
+            )
 
         if not system_prompt:
             system_prompt = config.get_system(model)
@@ -419,12 +488,36 @@ def register_commands(app):
         try:
             from ..serve import ServeConfig, ServeServer
         except ImportError:
-            print("错误: 需要安装 aiohttp: pip install aiohttp", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.DEPENDENCY_MISSING,
+                "需要安装 aiohttp",
+                suggestion="pip install aiohttp",
+            )
 
         thinking_value = parse_thinking(thinking)
         if thinking_value is None:
             thinking_value = model_params.get("thinking")
+
+        if dry_run:
+            dry_run_output(
+                {
+                    "action": "serve",
+                    "host": host,
+                    "port": port,
+                    "model": model,
+                    "base_url": base_url,
+                    "system": system_prompt,
+                    "concurrency": concurrency,
+                    "timeout": timeout,
+                    "endpoints": [
+                        "POST /api/generate",
+                        "POST /api/generate/stream",
+                        "POST /api/generate/batch",
+                        "GET /health",
+                        "GET /api/config",
+                    ],
+                }
+            )
 
         serve_config = ServeConfig(
             port=port,
@@ -478,8 +571,7 @@ def register_commands(app):
         except KeyboardInterrupt:
             print("\nServer stopped")
         except Exception as e:
-            print(f"错误: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.GENERAL, str(e))
 
     @app.command()
     def batch(
@@ -529,6 +621,7 @@ def register_commands(app):
                 help="结构化输出 (json=JSON模式, @file.json=从文件读取, 或 JSON Schema 字符串)",
             ),
         ] = None,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """批量处理 JSONL 文件（支持断点续传）
 
@@ -551,19 +644,21 @@ def register_commands(app):
           flexllm batch input.jsonl --cache --return-usage --track-cost
           flexllm batch data.jsonl -o out.jsonl -uf text -sf sys_prompt
           flexllm batch input.jsonl -n 5               # 只处理前5条（试跑）
+
+        预览:
+          flexllm batch input.jsonl --dry-run       # 预览处理计划
         """
         has_stdin = not sys.stdin.isatty()
         if not input and not has_stdin:
-            print("错误: 请提供输入文件或通过管道传入数据", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.INVALID_ARGS, "请提供输入文件或通过管道传入数据")
 
         auto_generated_output = False
         if not output:
             if not input:
-                print(
-                    "错误: 从 stdin 读取数据时必须指定输出文件 (-o output.jsonl)", file=sys.stderr
+                cli_error(
+                    ErrorType.INVALID_ARGS,
+                    "从 stdin 读取数据时必须指定输出文件 (-o output.jsonl)",
                 )
-                raise typer.Exit(1)
 
             input_path = Path(input)
             stem = input_path.stem
@@ -571,8 +666,7 @@ def register_commands(app):
             auto_generated_output = True
 
         if not output.endswith(".jsonl"):
-            print(f"错误: 输出文件必须使用 .jsonl 扩展名，当前: {output}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.INVALID_ARGS, f"输出文件必须使用 .jsonl 扩展名，当前: {output}")
 
         config = get_config()
         batch_config = config.get_batch_config()
@@ -584,21 +678,22 @@ def register_commands(app):
         if model:
             model_config = config.get_model_config(model)
             if not model_config:
-                print(f"错误: 未找到模型 '{model}'", file=sys.stderr)
-                print("提示: 使用 'flexllm list' 查看可用模型", file=sys.stderr)
-                raise typer.Exit(1)
+                cli_error(
+                    ErrorType.NOT_FOUND,
+                    f"未找到模型 '{model}'",
+                    suggestion="使用 'flexllm list' 查看可用模型",
+                )
         elif batch_config.get("endpoints"):
             endpoints_config = batch_config["endpoints"]
             use_pool = len(endpoints_config) > 0
         else:
             model_config = config.get_model_config(None)
             if not model_config:
-                print("错误: 未找到模型配置", file=sys.stderr)
-                print(
-                    "提示: 使用 'flexllm list' 查看可用模型，或在 batch 节配置 endpoints",
-                    file=sys.stderr,
+                cli_error(
+                    ErrorType.NOT_FOUND,
+                    "未找到模型配置",
+                    suggestion="使用 'flexllm list' 查看可用模型，或在 batch 节配置 endpoints",
                 )
-                raise typer.Exit(1)
 
         model_id = model_config.get("id", model) if model_config else None
         base_url = model_config.get("base_url") if model_config else None
@@ -628,11 +723,10 @@ def register_commands(app):
             elif low == "true":
                 effective_save_input = True
             else:
-                print(
-                    f"错误: --save-input 仅支持 true/last/false，当前: {save_input}",
-                    file=sys.stderr,
+                cli_error(
+                    ErrorType.INVALID_ARGS,
+                    f"--save-input 仅支持 true/last/false，当前: {save_input}",
                 )
-                raise typer.Exit(1)
 
         try:
             if user_field:
@@ -641,11 +735,10 @@ def register_commands(app):
                 message_fields = [user_field, system_field]
                 if user_field not in records[0]:
                     available = list(records[0].keys())
-                    print(
-                        f"错误: 字段 '{user_field}' 不存在，可用字段: {available}",
-                        file=sys.stderr,
+                    cli_error(
+                        ErrorType.INVALID_ARGS,
+                        f"字段 '{user_field}' 不存在，可用字段: {available}",
                     )
-                    raise typer.Exit(1)
             else:
                 records, format_type, message_fields = parse_batch_input(input)
             if limit is not None:
@@ -678,6 +771,23 @@ def register_commands(app):
             has_metadata = any(m for m in metadata_list)
             if not has_metadata:
                 metadata_list = None
+
+            if dry_run:
+                dry_run_output(
+                    {
+                        "action": "batch",
+                        "input_file": input,
+                        "output_file": output,
+                        "format": format_type,
+                        "record_count": len(records),
+                        "model": model_id,
+                        "base_url": base_url,
+                        "concurrency": effective_concurrency,
+                        "max_qps": effective_max_qps,
+                        "cache": effective_cache,
+                        "sample_messages": messages_list[0] if messages_list else None,
+                    }
+                )
 
             async def _run_batch():
                 from flexllm import LLMClient, LLMClientPool
@@ -763,28 +873,36 @@ def register_commands(app):
             print(f"输出文件: {output}", file=sys.stderr)
 
         except json.JSONDecodeError as e:
-            print(f"错误: JSON 解析失败 - {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.INVALID_ARGS, f"JSON 解析失败 - {e}")
         except ValueError as e:
-            print(f"错误: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.INVALID_ARGS, str(e))
         except FileNotFoundError:
-            print(f"错误: 文件不存在 - {input}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.IO_ERROR, f"文件不存在 - {input}")
+        except typer.Exit:
+            raise
         except Exception as e:
             import traceback
 
             traceback.print_exc()
-            print(f"错误: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.GENERAL, str(e))
 
     @app.command()
     def models(
         base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
         api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
         name: Annotated[str | None, Option("-n", "--name", help="模型配置名称")] = None,
+        json_output: Annotated[bool, Option("--json", help="输出 JSON 格式")] = False,
     ):
-        """列出远程服务器上的可用模型"""
+        """列出远程服务器上的可用模型（查询 /v1/models 接口）
+
+        与 'list' 不同：models 查询远程服务器，list 读取本地配置文件。
+
+        \b
+        Examples:
+          flexllm models                           # 查询默认服务器的模型
+          flexllm models -n claude                 # 查询指定配置的服务器
+          flexllm models --json                    # JSON 格式输出
+        """
         import requests
 
         config = get_config()
@@ -800,8 +918,11 @@ def register_commands(app):
             base_url = "https://api.anthropic.com/v1"
 
         if not base_url:
-            print("错误: 未配置 base_url", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                "未配置 base_url",
+                suggestion="设置 FLEXLLM_BASE_URL 或运行 flexllm init",
+            )
 
         is_gemini = provider == "gemini" or "generativelanguage.googleapis.com" in base_url
 
@@ -831,19 +952,8 @@ def register_commands(app):
             if response.status_code == 200:
                 models_data = response.json()
 
-                print("\n可用模型列表")
-                print(f"服务器: {base_url}")
-                print("-" * 50)
-
                 if is_gemini:
                     models_list = models_data.get("models", [])
-                    if models_list:
-                        for i, m in enumerate(models_list, 1):
-                            model_name = m.get("name", "").replace("models/", "")
-                            print(f"  {i:2d}. {model_name}")
-                        print(f"\n共 {len(models_list)} 个模型")
-                    else:
-                        print("未找到可用模型")
                 else:
                     if isinstance(models_data, dict) and "data" in models_data:
                         models_list = models_data["data"]
@@ -852,30 +962,69 @@ def register_commands(app):
                     else:
                         models_list = []
 
-                    if models_list:
-                        for i, m in enumerate(models_list, 1):
-                            if isinstance(m, dict):
-                                model_id = m.get("id", m.get("name", "unknown"))
-                                print(f"  {i:2d}. {model_id}")
+                if json_output:
+                    import json as json_module
+
+                    ids = []
+                    for m in models_list:
+                        if isinstance(m, dict):
+                            if is_gemini:
+                                ids.append(m.get("name", "").replace("models/", ""))
                             else:
-                                print(f"  {i:2d}. {m}")
-                        print(f"\n共 {len(models_list)} 个模型")
-                    else:
-                        print("未找到可用模型")
+                                ids.append(m.get("id", m.get("name", "unknown")))
+                        else:
+                            ids.append(str(m))
+                    print(
+                        json_module.dumps(
+                            {"base_url": base_url, "models": ids, "count": len(ids)},
+                            indent=2,
+                            ensure_ascii=False,
+                        )
+                    )
+                    return
+
+                print("\n可用模型列表")
+                print(f"服务器: {base_url}")
+                print("-" * 50)
+
+                if models_list:
+                    for i, m in enumerate(models_list, 1):
+                        if isinstance(m, dict):
+                            if is_gemini:
+                                display_name = m.get("name", "").replace("models/", "")
+                            else:
+                                display_name = m.get("id", m.get("name", "unknown"))
+                            print(f"  {i:2d}. {display_name}")
+                        else:
+                            print(f"  {i:2d}. {m}")
+                    print(f"\n共 {len(models_list)} 个模型")
+                else:
+                    print("未找到可用模型")
             else:
-                print(f"错误: HTTP {response.status_code}", file=sys.stderr)
-                raise typer.Exit(1)
+                cli_error(
+                    ErrorType.NETWORK_ERROR,
+                    f"HTTP {response.status_code}",
+                    retryable=True,
+                )
 
         except requests.exceptions.RequestException as e:
-            print(f"连接失败: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.NETWORK_ERROR, f"连接失败: {e}", retryable=True)
         except Exception as e:
-            print(f"错误: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.GENERAL, str(e))
 
     @app.command("list")
-    def list_models():
-        """列出本地配置的模型"""
+    def list_models(
+        json_output: Annotated[bool, Option("--json", help="输出 JSON 格式")] = False,
+    ):
+        """列出本地配置文件中的模型（~/.flexllm/config.yaml）
+
+        与 'models' 不同：list 读取本地配置文件，models 查询远程服务器。
+
+        \b
+        Examples:
+          flexllm list                             # 列出所有已配置模型
+          flexllm list --json                      # JSON 格式输出
+        """
         config = get_config()
         models_cfg = config.config.get("models", [])
         default = config.config.get("default", "")
@@ -883,6 +1032,28 @@ def register_commands(app):
         if not models_cfg:
             print("未配置模型")
             print("提示: 创建 ~/.flexllm/config.yaml 或设置环境变量")
+            return
+
+        if json_output:
+            import json as json_module
+
+            output = []
+            for m in models_cfg:
+                name = m.get("name", m.get("id", "?"))
+                model_id = m.get("id", "?")
+                provider = m.get("provider", "openai")
+                endpoints = m.get("endpoints")
+                entry = {
+                    "name": name,
+                    "id": model_id,
+                    "provider": provider,
+                    "is_default": name == default or model_id == default,
+                }
+                if endpoints and len(endpoints) > 1:
+                    entry["type"] = "pool"
+                    entry["endpoints"] = len(endpoints)
+                output.append(entry)
+            print(json_module.dumps(output, indent=2, ensure_ascii=False))
             return
 
         print(f"已配置模型 (共 {len(models_cfg)} 个):\n")
@@ -907,6 +1078,7 @@ def register_commands(app):
     @app.command("set-model")
     def set_model(
         model_name: Annotated[str, Argument(help="模型名称或 ID")],
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """设置默认模型
 
@@ -914,20 +1086,36 @@ def register_commands(app):
         Examples:
         flexllm set-model gpt-4
         flexllm set-model local-ollama
+        flexllm set-model gpt-4 --dry-run          # 预览变更
         """
         config = get_config()
         config_path = config.get_config_path()
 
         if not config_path:
-            print("错误: 未找到配置文件", file=sys.stderr)
-            print("提示: 先运行 'flexllm init' 初始化配置文件", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                "未找到配置文件",
+                suggestion="先运行 'flexllm init' 初始化配置文件",
+            )
 
         model_config = config.get_model_config(model_name)
         if not model_config:
-            print(f"错误: 未找到模型 '{model_name}'", file=sys.stderr)
-            print("提示: 使用 'flexllm list' 查看已配置的模型", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                f"未找到模型 '{model_name}'",
+                suggestion="使用 'flexllm list' 查看已配置的模型",
+            )
+
+        if dry_run:
+            default_value = model_config.get("name", model_config.get("id"))
+            dry_run_output(
+                {
+                    "action": "set_model",
+                    "config_path": str(config_path),
+                    "old_default": config.config.get("default"),
+                    "new_default": default_value,
+                }
+            )
 
         try:
             import yaml
@@ -949,11 +1137,13 @@ def register_commands(app):
             config.config["default"] = default_value
 
         except ImportError:
-            print("错误: 需要安装 pyyaml: pip install pyyaml", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.DEPENDENCY_MISSING,
+                "需要安装 pyyaml",
+                suggestion="pip install pyyaml",
+            )
         except Exception as e:
-            print(f"错误: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.GENERAL, str(e))
 
     @app.command()
     def test(
@@ -964,8 +1154,17 @@ def register_commands(app):
             str, Option("--message", help="测试消息")
         ] = "Hello, please respond with 'OK' if you can see this message.",
         timeout: Annotated[int, Option("--timeout", help="超时时间（秒）")] = 30,
+        json_output: Annotated[bool, Option("--json", help="输出 JSON 格式")] = False,
     ):
-        """测试 LLM 服务连接"""
+        """测试 LLM 服务连接
+
+        \b
+        Examples:
+          flexllm test                             # 测试默认模型连接
+          flexllm test -m gpt-4                    # 测试指定模型
+          flexllm test --base-url http://localhost:11434/v1  # 测试自定义服务器
+          flexllm test --json                      # JSON 格式输出（适合脚本）
+        """
         import time
 
         import requests
@@ -973,14 +1172,20 @@ def register_commands(app):
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
 
         if not base_url:
-            print("错误: 未配置 base_url", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                "未配置 base_url",
+                suggestion="设置 FLEXLLM_BASE_URL 或运行 flexllm init",
+            )
 
-        print("\nLLM 服务连接测试")
-        print("-" * 50)
+        result_data = {}
 
-        print("\n1. 测试服务器连接...")
-        print(f"   地址: {base_url}")
+        if not json_output:
+            print("\nLLM 服务连接测试")
+            print("-" * 50)
+            print("\n1. 测试服务器连接...")
+            print(f"   地址: {base_url}")
+
         try:
             start = time.time()
             response = requests.get(
@@ -991,7 +1196,6 @@ def register_commands(app):
             elapsed = time.time() - start
 
             if response.status_code == 200:
-                print(f"   ✓ 连接成功 ({elapsed:.2f}s)")
                 models_data = response.json()
                 if isinstance(models_data, dict) and "data" in models_data:
                     model_count = len(models_data["data"])
@@ -999,17 +1203,40 @@ def register_commands(app):
                     model_count = len(models_data)
                 else:
                     model_count = 0
-                print(f"   可用模型数: {model_count}")
+
+                if json_output:
+                    result_data["server"] = {
+                        "status": "ok",
+                        "base_url": base_url,
+                        "latency_s": round(elapsed, 2),
+                        "model_count": model_count,
+                    }
+                else:
+                    print(f"   ✓ 连接成功 ({elapsed:.2f}s)")
+                    print(f"   可用模型数: {model_count}")
             else:
-                print(f"   ✗ 连接失败: HTTP {response.status_code}")
-                raise typer.Exit(1)
+                if json_output:
+                    result_data["server"] = {
+                        "status": "error",
+                        "base_url": base_url,
+                        "http_status": response.status_code,
+                    }
+                else:
+                    cli_error(
+                        ErrorType.NETWORK_ERROR,
+                        f"连接失败: HTTP {response.status_code}",
+                        retryable=True,
+                    )
         except Exception as e:
-            print(f"   ✗ 连接失败: {e}")
-            raise typer.Exit(1)
+            if json_output:
+                result_data["server"] = {"status": "error", "error": str(e)}
+            else:
+                cli_error(ErrorType.NETWORK_ERROR, f"连接失败: {e}", retryable=True)
 
         if model:
-            print("\n2. 测试 Chat API...")
-            print(f"   模型: {model}")
+            if not json_output:
+                print("\n2. 测试 Chat API...")
+                print(f"   模型: {model}")
             try:
                 start = time.time()
                 response = requests.post(
@@ -1030,25 +1257,67 @@ def register_commands(app):
                 if response.status_code == 200:
                     result = response.json()
                     content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-                    print(f"   ✓ 调用成功 ({elapsed:.2f}s)")
-                    print(f"   响应: {content[:100]}...")
+                    if json_output:
+                        result_data["chat"] = {
+                            "status": "ok",
+                            "model": model,
+                            "latency_s": round(elapsed, 2),
+                            "response": content[:100],
+                        }
+                    else:
+                        print(f"   ✓ 调用成功 ({elapsed:.2f}s)")
+                        print(f"   响应: {content[:100]}...")
                 else:
-                    print(f"   ✗ 调用失败: HTTP {response.status_code}")
-                    print(f"   {response.text[:200]}")
+                    if json_output:
+                        result_data["chat"] = {
+                            "status": "error",
+                            "model": model,
+                            "http_status": response.status_code,
+                        }
+                    else:
+                        print(f"   ✗ 调用失败: HTTP {response.status_code}")
+                        print(f"   {response.text[:200]}")
             except Exception as e:
-                print(f"   ✗ 调用失败: {e}")
+                if json_output:
+                    result_data["chat"] = {"status": "error", "error": str(e)}
+                else:
+                    print(f"   ✗ 调用失败: {e}")
 
-        print("\n测试完成")
+        if json_output:
+            import json as json_module
+
+            print(json_module.dumps(result_data, indent=2, ensure_ascii=False))
+        else:
+            print("\n测试完成")
 
     @app.command()
     def init(
         path: Annotated[str | None, Option("-p", "--path", help="配置文件路径")] = None,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
-        """初始化配置文件"""
+        """初始化 flexllm 配置文件
+
+        在 ~/.flexllm/ 目录创建默认配置文件模板。如已存在则不覆盖。
+
+        \b
+        Examples:
+          flexllm init                             # 创建 ~/.flexllm/config.yaml
+          flexllm init -p ./flexllm_config.yaml    # 指定路径
+          flexllm init --dry-run                   # 预览将创建的路径
+        """
         if path is None:
             config_path = Path.home() / ".flexllm" / "config.yaml"
         else:
             config_path = Path(path)
+
+        if dry_run:
+            dry_run_output(
+                {
+                    "action": "init",
+                    "config_path": str(config_path),
+                    "exists": config_path.exists(),
+                }
+            )
 
         if config_path.exists():
             print(f"配置文件已存在: {config_path}")
@@ -1104,8 +1373,7 @@ models:
             print(f"已创建配置文件: {config_path}")
             print("请编辑配置文件填入 API 密钥")
         except Exception as e:
-            print(f"创建失败: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.IO_ERROR, f"创建失败: {e}")
 
     @app.command()
     def pricing(
@@ -1138,11 +1406,9 @@ models:
                     reload_pricing()
                     print("✓ 定价数据已更新")
                 else:
-                    print("✗ 更新失败", file=sys.stderr)
-                    raise typer.Exit(1)
+                    cli_error(ErrorType.NETWORK_ERROR, "定价数据更新失败", retryable=True)
             except Exception as e:
-                print(f"更新失败: {e}", file=sys.stderr)
-                raise typer.Exit(1)
+                cli_error(ErrorType.NETWORK_ERROR, f"更新失败: {e}", retryable=True)
             return
 
         if model:
@@ -1153,12 +1419,11 @@ models:
             }
 
             if not matches:
-                print(f"未找到匹配 '{model}' 的模型", file=sys.stderr)
-                print(
-                    f"\n可用模型: {', '.join(sorted(MODEL_PRICING.keys())[:10])}...",
-                    file=sys.stderr,
+                cli_error(
+                    ErrorType.NOT_FOUND,
+                    f"未找到匹配 '{model}' 的模型",
+                    suggestion=f"可用模型: {', '.join(sorted(MODEL_PRICING.keys())[:10])}...",
                 )
-                raise typer.Exit(1)
 
             if json_output:
                 import json as json_module
@@ -1250,6 +1515,7 @@ models:
     def credits(
         model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
         key: Annotated[str | None, Option("-k", "--key", help="直接指定 API Key")] = None,
+        json_output: Annotated[bool, Option("--json", help="输出 JSON 格式")] = False,
     ):
         """查询 API Key 余额
 
@@ -1261,17 +1527,22 @@ models:
         flexllm credits                        # 查询默认模型的 key 余额
         flexllm credits -m grok-4              # 查询指定模型的 key 余额
         flexllm credits -k sk-or-v1-xxx...     # 直接查询指定 key 的余额
+        flexllm credits --json                 # JSON 格式输出
         """
         if key:
             result = query_credits_by_key(key)
 
             if result is None:
-                print("错误: 无法识别此 API Key 对应的 provider", file=sys.stderr)
-                raise typer.Exit(1)
+                cli_error(ErrorType.AUTH_FAILED, "无法识别此 API Key 对应的 provider")
 
             if "error" in result:
-                print(f"错误: {result['error']}", file=sys.stderr)
-                raise typer.Exit(1)
+                cli_error(ErrorType.NETWORK_ERROR, result["error"], retryable=True)
+
+            if json_output:
+                import json as json_module
+
+                print(json_module.dumps(result, indent=2, ensure_ascii=False))
+                return
 
             print(f"\n{result['provider']} 账户余额")
             print(f"API Key: {key[:15]}...{key[-4:]}")
@@ -1285,28 +1556,35 @@ models:
         model_config = config.get_model_config(model)
 
         if not model_config:
-            print("错误: 未找到模型配置", file=sys.stderr)
-            print("提示: 使用 'flexllm list' 查看已配置的模型", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                "未找到模型配置",
+                suggestion="使用 'flexllm list' 查看已配置的模型",
+            )
 
         base_url = model_config.get("base_url", "")
         api_key = model_config.get("api_key", "")
         model_name = model_config.get("name", model_config.get("id", "unknown"))
 
         if not api_key or api_key == "EMPTY":
-            print(f"错误: 模型 '{model_name}' 未配置 API Key", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.AUTH_FAILED, f"模型 '{model_name}' 未配置 API Key")
 
         result = query_credits(base_url, api_key)
 
         if result is None:
-            print("错误: 不支持查询此 provider 的余额", file=sys.stderr)
-            print(f"  base_url: {base_url}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.NOT_FOUND,
+                f"不支持查询此 provider 的余额 (base_url: {base_url})",
+            )
 
         if "error" in result:
-            print(f"错误: {result['error']}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.NETWORK_ERROR, result["error"], retryable=True)
+
+        if json_output:
+            import json as json_module
+
+            print(json_module.dumps(result, indent=2, ensure_ascii=False))
+            return
 
         print(f"\n{result['provider']} 账户余额")
         print(f"模型配置: {model_name}")
@@ -1345,6 +1623,7 @@ models:
         log: Annotated[
             str, Option("--log", help="请求日志保存路径（JSONL），记录每个请求的完整输入输出")
         ] = None,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """启动 Mock LLM 服务器
 
@@ -1356,6 +1635,7 @@ models:
         flexllm mock --error-rate 0.5         # 50% 请求返回错误
         flexllm mock --qa qa.jsonl            # QA 数据集确定性回复
         flexllm mock --log requests.jsonl     # 额外将请求日志写入文件
+        flexllm mock --dry-run                # 预览启动配置
 
         QA 数据集格式（每行一个 JSON）:
         {"input": "关键词或完整问题", "output": "对应的回复内容"}
@@ -1366,8 +1646,11 @@ models:
         try:
             from ..mock import MockLLMServer, MockServerConfig, parse_range
         except ImportError:
-            print("错误: 需要安装 aiohttp: pip install aiohttp", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.DEPENDENCY_MISSING,
+                "需要安装 aiohttp",
+                suggestion="pip install aiohttp",
+            )
 
         delay_min, delay_max = parse_range(delay, float)
         response_min_len, response_max_len = parse_range(response_len, int)
@@ -1386,6 +1669,23 @@ models:
             qa_path=qa,
             log_path=log,
         )
+
+        if dry_run:
+            dry_run_output(
+                {
+                    "action": "mock",
+                    "port": port,
+                    "delay": delay,
+                    "response_len": response_len,
+                    "model": model,
+                    "rps": rps,
+                    "token_rate": token_rate,
+                    "error_rate": error_rate,
+                    "thinking": thinking,
+                    "qa": qa,
+                    "log": log,
+                }
+            )
 
         print(f"Mock LLM Server starting on port {port}")
         print(f"  Delay: {delay_min}-{delay_max}s")
@@ -1418,31 +1718,52 @@ models:
         except KeyboardInterrupt:
             print("\nServer stopped")
         except Exception as e:
-            print(f"错误: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.GENERAL, str(e))
 
     @app.command()
-    def version():
-        """显示版本信息"""
+    def version(
+        json_output: Annotated[bool, Option("--json", help="输出 JSON 格式")] = False,
+    ):
+        """显示 flexllm 版本信息
+
+        \b
+        Examples:
+          flexllm version                          # 显示版本号
+          flexllm version --json                   # JSON 格式输出
+        """
         try:
             from flexllm import __version__
 
             v = __version__
         except Exception:
             v = "0.1.0"
-        print(f"flexllm {v}")
+        if json_output:
+            import json as json_module
+
+            print(
+                json_module.dumps({"name": "flexllm", "version": v}, indent=2, ensure_ascii=False)
+            )
+        else:
+            print(f"flexllm {v}")
 
     @app.command("install-skill")
     def install_skill():
-        """安装 Claude Code skill 文件"""
+        """安装 Claude Code skill 文件到 ~/.claude/skills/
+
+        \b
+        Examples:
+          flexllm install-skill                    # 安装 skill 文件
+        """
         import shutil
 
         skill_src = Path(__file__).parent.parent / "data" / "SKILL.md"
 
         if not skill_src.exists():
-            print("错误: 找不到 skill 文件", file=sys.stderr)
-            print("请尝试重新安装 flexllm: pip install --force-reinstall flexllm", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(
+                ErrorType.IO_ERROR,
+                "找不到 skill 文件",
+                suggestion="pip install --force-reinstall flexllm",
+            )
 
         skill_dir = Path.home() / ".claude" / "skills" / "flexllm"
         skill_dst = skill_dir / "SKILL.md"
@@ -1453,5 +1774,4 @@ models:
             print(f"已安装 skill 文件到: {skill_dst}")
             print("Claude Code 现在可以使用 flexllm skill 了")
         except Exception as e:
-            print(f"安装失败: {e}", file=sys.stderr)
-            raise typer.Exit(1)
+            cli_error(ErrorType.IO_ERROR, f"安装失败: {e}")
