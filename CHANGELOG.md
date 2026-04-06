@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.10.2] - 2026-04-06
+
+### Documentation
+
+- **skill**: 精简 SKILL.md，强化配置文件章节
+- **cli**: Improve --help with grouped examples for -f, -x, --schema
+
+### Features
+
+- **cli**: Add --json, --dry-run, semantic exit codes, and enriched help
+- **cli**: Add --schema, -x, -f options for ask/chat/batch
+
+### Miscellaneous
+
+- Bump version to 0.10.2
+
+### Styling
+
+- Fix ruff format for cli/config.py
+
 ## [0.10.1] - 2026-04-04
 
 ### Features
