@@ -650,11 +650,20 @@ def register_commands(app):
             str | None, Option("-o", "--output", help="输出文件路径（可选，默认自动生成）")
         ] = None,
         model: Annotated[str | None, Option("-m", "--model", help="模型名称")] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址（覆盖配置）")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥（覆盖配置）")] = None,
         concurrency: Annotated[int | None, Option("-c", "--concurrency", help="并发数")] = None,
         max_qps: Annotated[float | None, Option("--max-qps", help="每秒最大请求数")] = None,
         system: Annotated[str | None, Option("-s", "--system", help="全局 system prompt")] = None,
         temperature: Annotated[float | None, Option("-t", "--temperature", help="采样温度")] = None,
         max_tokens: Annotated[int | None, Option("--max-tokens", help="最大生成 token 数")] = None,
+        thinking: Annotated[
+            str | None,
+            Option(
+                "--thinking",
+                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值)",
+            ),
+        ] = None,
         cache: Annotated[
             bool | None, Option("--cache/--no-cache", help="启用/禁用响应缓存")
         ] = None,
@@ -705,6 +714,14 @@ def register_commands(app):
           flexllm batch input.jsonl -o output.jsonl    # 指定输出文件
           flexllm batch input.jsonl -c 20 -m gpt-4     # 并发数 + 模型
           cat input.jsonl | flexllm batch -o out.jsonl  # stdin 输入（需指定 -o）
+
+        临时指定 endpoint (--base-url / --api-key):  覆盖配置中的模型连接参数
+          flexllm batch in.jsonl --base-url http://localhost:8000/v1 --api-key EMPTY
+          flexllm batch in.jsonl -m gpt-4 --base-url http://new-host/v1
+
+        思考模式 (--thinking):
+          flexllm batch in.jsonl --thinking high       # 高强度思考
+          flexllm batch in.jsonl --thinking 4096       # 指定 budget_tokens
 
         结构化输出 (--schema):  所有记录统一使用结构化输出
           flexllm batch input.jsonl -o out.jsonl --schema json
@@ -760,27 +777,60 @@ def register_commands(app):
         config = get_config()
         batch_config = config.get_batch_config()
 
+        # batch.model 和 batch.endpoints 二选一，同时配置报错
+        if batch_config.get("model") and batch_config.get("endpoints"):
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "batch.model 与 batch.endpoints 不能同时配置",
+                context={
+                    "batch.model": batch_config.get("model"),
+                    "batch.endpoints_count": len(batch_config.get("endpoints") or []),
+                },
+                suggestion="二选一：单模型用 batch.model，多 endpoint pool 用 batch.endpoints",
+                doc="flexllm batch --help",
+            )
+
         model_config = None
         endpoints_config = None
         use_pool = False
 
-        if model:
-            model_config = config.get_model_config(model)
+        # 模型解析优先级：
+        #   CLI -m 或 --base-url > batch.model > batch.endpoints > 顶级 default
+        explicit_endpoint = base_url is not None
+        effective_model = model or batch_config.get("model")
+
+        if effective_model or explicit_endpoint:
+            if effective_model:
+                model_config = config.get_model_config(effective_model)
             if not model_config:
-                available = [
-                    m.get("name", m.get("id", "?")) for m in config.config.get("models", [])
-                ]
-                cli_error(
-                    ErrorType.NOT_FOUND,
-                    "模型未找到",
-                    context={
-                        "arg": "-m/--model",
-                        "received": model,
-                        "available_models": available,
-                    },
-                    suggestion="使用 flexllm list 查看已配置模型，或 flexllm list --json 获取 JSON 列表",
-                    doc="flexllm batch --help",
-                )
+                # 未注册：允许 CLI 直接用 --base-url 指定端点
+                if explicit_endpoint:
+                    # 没给 -m 时尝试从 /v1/models 自动检测
+                    detected_id = effective_model
+                    if not detected_id:
+                        from .utils import _fetch_model_id
+
+                        detected_id = _fetch_model_id(base_url, api_key or "EMPTY")
+                    model_config = {
+                        "id": detected_id,
+                        "base_url": base_url,
+                        "api_key": api_key or "EMPTY",
+                    }
+                else:
+                    available = [
+                        m.get("name", m.get("id", "?")) for m in config.config.get("models", [])
+                    ]
+                    cli_error(
+                        ErrorType.NOT_FOUND,
+                        "模型未找到",
+                        context={
+                            "arg": "-m/--model" if model else "batch.model",
+                            "received": effective_model,
+                            "available_models": available,
+                        },
+                        suggestion="使用 flexllm list 查看已配置模型，或加 --base-url 直接指定端点",
+                        doc="flexllm batch --help",
+                    )
         elif batch_config.get("endpoints"):
             endpoints_config = batch_config["endpoints"]
             use_pool = len(endpoints_config) > 0
@@ -798,13 +848,17 @@ def register_commands(app):
                         "available_models": available,
                         "has_endpoints": False,
                     },
-                    suggestion="使用 -m 指定模型、运行 flexllm list，或在 ~/.flexllm/config.yaml 的 batch 节配置 endpoints",
+                    suggestion="使用 -m 指定模型、在 batch.model 配置默认模型，或在 batch.endpoints 配置多 endpoint",
                     doc="flexllm batch --help",
                 )
 
-        model_id = model_config.get("id", model) if model_config else None
-        base_url = model_config.get("base_url") if model_config else None
-        api_key = model_config.get("api_key", "EMPTY") if model_config else None
+        model_id = model_config.get("id", effective_model) if model_config else None
+        # CLI --base-url / --api-key 覆盖 model_config 中的对应字段
+        if model_config:
+            if base_url is None:
+                base_url = model_config.get("base_url")
+            if api_key is None:
+                api_key = model_config.get("api_key", "EMPTY")
 
         effective_cache = cache if cache is not None else batch_config["cache"]
         effective_return_usage = return_usage or batch_config["return_usage"]
@@ -819,6 +873,8 @@ def register_commands(app):
         effective_user_template = (
             user_template if user_template is not None else config.get_user_template(model)
         )
+
+        thinking_value = parse_thinking(thinking)
 
         effective_save_input: bool | str = True
         if save_input is not None:
@@ -908,6 +964,7 @@ def register_commands(app):
                         "concurrency": effective_concurrency,
                         "max_qps": effective_max_qps,
                         "cache": effective_cache,
+                        "thinking": thinking_value,
                         "sample_messages": messages_list[0] if messages_list else None,
                     }
                 )
@@ -921,14 +978,14 @@ def register_commands(app):
                 if effective_cache:
                     cache_config = ResponseCacheConfig.with_ttl(ttl=batch_config["cache_ttl"])
 
-                kwargs = config.get_model_params(model)
-                for key in ("temperature", "max_tokens", "top_p", "top_k", "thinking"):
-                    if batch_config.get(key) is not None:
-                        kwargs[key] = batch_config[key]
+                # 模型参数只从 models 节读取；CLI 参数覆盖
+                kwargs = config.get_model_params(effective_model)
                 if temperature is not None:
                     kwargs["temperature"] = temperature
                 if max_tokens is not None:
                     kwargs["max_tokens"] = max_tokens
+                if thinking_value is not None:
+                    kwargs["thinking"] = thinking_value
 
                 response_format = parse_schema(schema)
                 if response_format is not None:

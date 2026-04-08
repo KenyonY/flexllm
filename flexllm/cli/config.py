@@ -338,10 +338,17 @@ class FlexLLMConfig:
         return re.sub(r"\$\{([^}:]+)(?:(:-)(.*?))?\}", _replace, value)
 
     def get_batch_config(self) -> dict:
-        """获取 batch 命令的配置（配置文件中的 batch 节 + 默认值）"""
+        """获取 batch 命令的配置（配置文件中的 batch 节 + 默认值）
+
+        注意：batch 节只存放调度 / IO / 默认模型选择等参数；
+        模型行为参数（temperature/top_p/top_k/max_tokens/thinking）
+        必须在 models 节下定义，通过 CLI 参数临时覆盖。
+        """
         batch_config = self.config.get("batch", {}) or {}
 
         defaults = {
+            # 默认模型（单 endpoint 模式）；与 endpoints 二选一
+            "model": None,
             # 缓存
             "cache": False,
             "cache_ttl": 86400,
@@ -351,20 +358,13 @@ class FlexLLMConfig:
             "timeout": 120,
             "retry_times": 3,
             "retry_delay": 1.0,
-            # 采样
-            "temperature": None,
-            "max_tokens": None,
-            "top_p": None,
-            "top_k": None,
-            # 思考
-            "thinking": None,
             # 处理
             "preprocess_msg": False,
             "flush_interval": 1.0,
             # 输出
             "return_usage": True,
             "track_cost": True,
-            # 多 endpoint
+            # 多 endpoint（与 model 二选一）
             "endpoints": None,
             "fallback": True,
         }
