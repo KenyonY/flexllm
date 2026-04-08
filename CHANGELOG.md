@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.3] - 2026-04-08
+
+### Features
+
+- **cli**: 补全 batch 参数并重新划分 batch 节职责
+- **cli**: Agent 友好的错误输出（context + doc 字段）
+
+### Miscellaneous
+
+- Bump version to 0.10.3
+
 ## [0.10.2] - 2026-04-06
 
 ### Documentation
