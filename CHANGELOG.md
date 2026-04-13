@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.10.4] - 2026-04-13
+
+### Bug Fixes
+
+- **cli**: -m 搭配 --base-url 时支持原始模型 ID 透传 (#3)
+
+### Miscellaneous
+
+- Bump version to 0.10.4
+
 ## [0.10.3] - 2026-04-08
 
 ### Features
