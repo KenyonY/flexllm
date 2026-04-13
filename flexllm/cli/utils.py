@@ -29,6 +29,12 @@ def resolve_model_config(
     model_config = config.get_model_config(model)
 
     if not model_config:
+        if base_url is not None:
+            # --base-url 显式传入时，允许 -m 作为原始模型 ID 透传
+            resolved_model = model
+            if not resolved_model:
+                resolved_model = _fetch_model_id(base_url, api_key or "EMPTY")
+            return resolved_model, base_url, api_key or "EMPTY"
         if required:
             from .errors import ErrorType, cli_error
 
