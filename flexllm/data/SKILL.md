@@ -30,17 +30,33 @@ LLM 调用首选工具。**所有 CLI 用法以 `flexllm <cmd> --help` 为准**�
 from flexllm import LLMClient, ResponseCacheConfig
 
 async with LLMClient(model="gpt-4", base_url="...", api_key="...") as client:
-    # 同步 / 异步 / 流式 / batch / iter_batch 均可用，参考源码或 dir(client)
     result = await client.chat_completions(messages)
     results = await client.chat_completions_batch(
         messages_list, output_jsonl="out.jsonl", track_cost=True,
     )
+    async for chunk in client.chat_completions_stream(messages): ...
 ```
 
 - **多 provider**：`provider="gemini"|"claude"`，或由 `base_url` 自动识别
-- **多 endpoint 负载均衡**：传 `endpoints=[{...}, {...}]` + `fallback=True`
-- **响应缓存**：`cache=ResponseCacheConfig(enabled=True, ttl=3600)`
-- 关键参数：`return_usage` / `thinking` / `response_format` / `return_raw`
+- **多 endpoint 负载均衡**：传 `endpoints=[{...}, {...}]` + `fallback=True`（`LLMClientPool`，`distribute=True` 可把 batch 分散到多 endpoint）
+- **响应缓存**：`cache=ResponseCacheConfig(enabled=True, ttl=3600)`（LMDB 后端，多进程安全）
+- 核心方法：`chat_completions` / `chat_completions_sync` / `chat_completions_batch` / `chat_completions_stream`
+- 关键参数：`return_usage` / `thinking`（跨厂商统一：DeepSeek-R1/Qwen3/Claude/Gemini，取值 `True|False|"minimal"|"low"|"medium"|"high"`）/ `response_format` / `return_raw`
+
+## Python API 高级能力
+
+`from flexllm import ...` 除 `LLMClient` 外还提供：
+
+| 类 | 定位 | 典型入口 |
+|---|---|---|
+| `MllmClient` | 多模态（图片/视频/PDF），自动预处理（base64/URL/本地路径） | `await mllm.call_llm(messages_list)` |
+| `ChainOfThoughtClient` | 多步推理链，可根据上一步结果动态决定下一步模型/prompt，支持批量并发 | `add_step(Step(...))` / `create_linear_chain([LinearStep(...)])` / `await execute_chain(...)` / `await execute_chains_batch(...)` |
+| `MllmTableProcessor` | 表格批处理（需 pandas），通过 `MllmClient.table` 属性访问 | `mllm.table.load_dataframe(...)` + `mllm.table.call_llm(...)` |
+| `MllmFolderProcessor` | 文件夹批处理（扫描图片目录），通过 `MllmClient.folder` 属性访问 | `mllm.folder.scan_folder_images(...)` + `mllm.folder.call_llm(...)` |
+
+**成本追踪**：`from flexllm import CostTracker, estimate_batch_cost, count_tokens, MODEL_PRICING`，支持预算上限（超出抛 `BudgetExceededError`）。
+
+**工具函数**：`from flexllm.utils import extract_code_snippets, parse_to_code, parse_to_obj`（对应 CLI 的 `-x` 和 `--schema` 后处理）。
 
 ## batch 输入格式（自动检测，按优先级）
 
