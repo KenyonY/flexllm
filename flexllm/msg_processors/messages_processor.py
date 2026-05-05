@@ -122,7 +122,7 @@ async def messages_preprocess(
     if not inplace:
         messages = deepcopy(messages)
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(trust_env=True) as session:
         tasks = [
             process_content_recursive(message, session, cache_config=cache_config, **kwargs)
             for message in messages

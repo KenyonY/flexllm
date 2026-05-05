@@ -76,7 +76,7 @@ class ImageProcessor:
             aiohttp.ClientSession实例
         """
         if self._session is None:
-            self._session = aiohttp.ClientSession()
+            self._session = aiohttp.ClientSession(trust_env=True)
             self._own_session = True
             self._session_initialized = True
         return self._session

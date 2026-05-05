@@ -143,7 +143,7 @@ async def encode_media_to_base64(source, session=None, return_with_mime=True) ->
     if isinstance(source, str) and source.startswith("http"):
         close_session = False
         if session is None:
-            session = aiohttp.ClientSession()
+            session = aiohttp.ClientSession(trust_env=True)
             close_session = True
         try:
             return await encode_base64_from_url(source, session, return_with_mime=return_with_mime)
@@ -467,7 +467,7 @@ async def get_pil_image(
             # 创建临时会话（如果未提供）
             close_session = False
             if session is None:
-                session = aiohttp.ClientSession()
+                session = aiohttp.ClientSession(trust_env=True)
                 close_session = True
 
             try:

@@ -674,7 +674,7 @@ class UnifiedImageProcessor:
                 else:
                     # 处理URL（会自动使用磁盘缓存）
                     if session is None:
-                        async with aiohttp.ClientSession() as temp_session:
+                        async with aiohttp.ClientSession(trust_env=True) as temp_session:
                             result = await asyncio.wait_for(
                                 self._process_url_async(
                                     source,
@@ -933,7 +933,7 @@ async def _get_raw_bytes(source: str, session: aiohttp.ClientSession | None = No
     if source.startswith("http"):
         close = session is None
         if close:
-            session = aiohttp.ClientSession()
+            session = aiohttp.ClientSession(trust_env=True)
         try:
             async with session.get(source) as resp:
                 resp.raise_for_status()
@@ -1234,7 +1234,7 @@ async def unified_messages_preprocess(
             messages = deepcopy(messages)
 
         # 使用HTTP会话处理所有图像
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(trust_env=True) as session:
             # 递归处理所有消息内容
             for message in messages:
                 await process_content_recursive(message, session, processor, **kwargs)

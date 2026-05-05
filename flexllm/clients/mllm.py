@@ -274,7 +274,7 @@ class MllmClient(MllmClientBase):
 
         try:
             # 使用HTTP会话和持有的处理器实例
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(trust_env=True) as session:
                 # 创建信号量控制并发
                 semaphore = asyncio.Semaphore(self.preprocess_concurrency)
 
