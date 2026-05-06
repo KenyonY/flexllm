@@ -45,7 +45,7 @@ class ProgressTracker:
         input_price_per_1m: float | None = None,
         output_price_per_1m: float | None = None,
     ):
-        self.console = Console()
+        self.console = Console(file=sys.stderr)
 
         # 统计信息
         self.success_count = 0
@@ -209,7 +209,7 @@ class ProgressTracker:
         if self.error_count > 0:
             parts.append(f"(errors: {self.error_count})")
 
-        print(" ".join(parts), flush=True)
+        print(" ".join(parts), flush=True, file=sys.stderr)
 
     def _build_cost_line(self) -> str:
         """构建成本信息行（双行显示的第一行）"""
@@ -340,16 +340,19 @@ class ProgressTracker:
                 cost_line = self._build_cost_line()
                 if self._first_render:
                     # 首次渲染：打印两行
-                    print(self._get_colored_text(cost_line, "green"))
-                    print(progress_line, end="", flush=True)
+                    print(self._get_colored_text(cost_line, "green"), file=sys.stderr)
+                    print(progress_line, end="", flush=True, file=sys.stderr)
                     self._first_render = False
                 else:
                     # 后续刷新：上移光标，更新两行
                     # \033[A 上移一行, \033[K 清除到行尾
-                    print(f"\r\033[A\033[K{self._get_colored_text(cost_line, 'green')}")
-                    print(f"\033[K{progress_line}", end="", flush=True)
+                    print(
+                        f"\r\033[A\033[K{self._get_colored_text(cost_line, 'green')}",
+                        file=sys.stderr,
+                    )
+                    print(f"\033[K{progress_line}", end="", flush=True, file=sys.stderr)
             else:
-                print("\r" + progress_line, end="", flush=True)
+                print("\r" + progress_line, end="", flush=True, file=sys.stderr)
         except UnicodeEncodeError:
             # Windows GBK编码兼容处理
             safe_components = []
@@ -366,7 +369,7 @@ class ProgressTracker:
                 )
                 safe_comp = safe_comp.replace("⣿", "#").replace("⣀", ".").replace("💰", "$")
                 safe_components.append(safe_comp)
-            print("\r" + " ".join(safe_components), end="", flush=True)
+            print("\r" + " ".join(safe_components), end="", flush=True, file=sys.stderr)
 
     def update(self, result: "RequestResult") -> None:
         """
@@ -403,10 +406,13 @@ class ProgressTracker:
                 # 清除当前行并打印警告，避免打乱进度条
                 if self._use_two_lines:
                     # 双行模式：上移一行，清除两行，打印警告，重置首次渲染标志
-                    print(f"\r\033[A\033[K\033[K⚠️  新错误类型: {display_error}")
+                    print(
+                        f"\r\033[A\033[K\033[K⚠️  新错误类型: {display_error}",
+                        file=sys.stderr,
+                    )
                     self._first_render = True
                 else:
-                    print(f"\r\033[K⚠️  新错误类型: {display_error}")
+                    print(f"\r\033[K⚠️  新错误类型: {display_error}", file=sys.stderr)
 
         # 最后一个请求完成时强制刷新，确保显示 100%
         force = self.completed_requests >= self.total_requests
@@ -475,13 +481,13 @@ class ProgressTracker:
 
         summary += "-" * 76
         if print_to_console:
-            print()  # 打印空行
+            print(file=sys.stderr)  # 打印空行
             try:
                 # 尝试使用Rich输出，如果失败则使用普通print
                 self.console.print(summary)
             except UnicodeEncodeError:
                 # 在Windows GBK环境下，如果出现编码错误，使用普通print
-                print(summary)
+                print(summary, file=sys.stderr)
         return summary
 
 
