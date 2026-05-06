@@ -23,7 +23,25 @@ Quick Start:
   flexllm test                            # 测试 LLM 连接
 
 配置: ~/.flexllm/config.yaml (运行 flexllm init 创建)
-环境变量: FLEXLLM_BASE_URL, FLEXLLM_API_KEY, FLEXLLM_MODEL""",
+环境变量: FLEXLLM_BASE_URL, FLEXLLM_API_KEY, FLEXLLM_MODEL
+
+\b
+Exit Codes (Agent-friendly, cross-version stable):
+  0   成功
+  1   通用错误
+  2   参数/用法错误（非法值、缺少必选）
+  3   资源未找到（模型/配置/文件）
+  4   认证失败（API Key 无效、额度不足）
+  5   冲突（资源已存在）
+  6   网络错误（常为 retryable）
+  7   依赖缺失（缺 pip 包）
+  8   文件 IO 错误
+  10  Dry-run 成功（非实际执行）
+
+\b
+Agent-friendly JSON 输出:
+  核心命令支持 --format json（ask/chat/batch），stdout 为结构化数据，
+  stderr 为进度/日志；错误在非 TTY 自动以 JSON 输出到 stderr。""",
         add_completion=True,
         no_args_is_help=True,
     )

@@ -22,8 +22,11 @@ def single_chat(
     user_template=None,
     thinking=None,
     extract=False,
+    output_format="text",
 ):
     """单次对话"""
+    import json
+    import time
 
     async def _run():
         from flexllm import LLMClient
@@ -38,6 +41,26 @@ def single_chat(
             kwargs = {"temperature": temperature, "max_tokens": max_tokens}
             if thinking is not None:
                 kwargs["thinking"] = thinking
+
+            if output_format == "json":
+                t0 = time.perf_counter()
+                result = await client.chat_completions(messages, **kwargs)
+                elapsed_ms = int((time.perf_counter() - t0) * 1000)
+                output = str(result) if not isinstance(result, str) else result
+                thinking_text = None
+                usage = None
+                if hasattr(result, "data") and isinstance(result.data, dict):
+                    thinking_text = result.data.get("thinking")
+                    usage = result.data.get("usage")
+                payload = {
+                    "content": output,
+                    "thinking": thinking_text,
+                    "usage": usage,
+                    "model": model,
+                    "elapsed_ms": elapsed_ms,
+                }
+                print(json.dumps(payload, ensure_ascii=False))
+                return
 
             if stream and not extract:
                 print("Assistant: ", end="", flush=True)

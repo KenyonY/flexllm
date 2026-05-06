@@ -57,6 +57,13 @@ def register_commands(app):
         files: Annotated[
             list[str] | None, Option("-f", "--file", help="附加文件内容到 prompt（可多次指定）")
         ] = None,
+        format: Annotated[
+            str,
+            Option(
+                "--format",
+                help="输出格式: text(默认) 或 json(结构化: {content, thinking, usage, model, elapsed_ms})",
+            ),
+        ] = "text",
         dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """LLM 快速问答（支持管道输入）
@@ -79,9 +86,21 @@ def register_commands(app):
           flexllm ask "用 Python 写个快排" -x
           flexllm ask "用 Python 写个快排" -x > sort.py
 
+        JSON 输出 (--format json):  给 agent/脚本解析
+          flexllm ask "你好" --format json
+          # {"content":"...","thinking":null,"usage":{...},"model":"...","elapsed_ms":123}
+
         预览:
           flexllm ask "测试" --dry-run              # 预览请求内容
         """
+        if format not in ("text", "json"):
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--format 参数值无效",
+                context={"arg": "--format", "received": format, "expected": ["text", "json"]},
+                suggestion="使用 --format text 或 --format json",
+                doc="flexllm ask --help",
+            )
         stdin_content = None
         if not sys.stdin.isatty():
             stdin_content = sys.stdin.read().strip()
@@ -147,8 +166,12 @@ def register_commands(app):
             async with LLMClient(model=model_id, base_url=base_url, api_key=api_key) as client:
                 return await client.chat_completions(messages, **model_params)
 
+        import time
+
         try:
+            t0 = time.perf_counter()
             result = asyncio.run(_ask())
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
             if result is None:
                 cli_error(
                     ErrorType.GENERAL,
@@ -173,6 +196,23 @@ def register_commands(app):
                     retryable=True,
                 )
             output = str(result) if not isinstance(result, str) else result
+
+            if format == "json":
+                thinking_text = None
+                usage = None
+                if hasattr(result, "data") and isinstance(result.data, dict):
+                    thinking_text = result.data.get("thinking")
+                    usage = result.data.get("usage")
+                payload = {
+                    "content": output,
+                    "thinking": thinking_text,
+                    "usage": usage,
+                    "model": model_id,
+                    "elapsed_ms": elapsed_ms,
+                }
+                print(json.dumps(payload, ensure_ascii=False))
+                return
+
             if extract:
                 code = extract_code_block(output)
                 if code is not None:
@@ -228,6 +268,13 @@ def register_commands(app):
         files: Annotated[
             list[str] | None, Option("-f", "--file", help="附加文件内容到 prompt（可多次指定）")
         ] = None,
+        format: Annotated[
+            str,
+            Option(
+                "--format",
+                help="输出格式: text(默认) 或 json(仅单条模式, 多轮模式会报错)",
+            ),
+        ] = "text",
         dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """交互式对话
@@ -245,9 +292,28 @@ def register_commands(app):
         代码提取 (-x):  只输出回复中的代码块（仅单条模式）
           flexllm chat "写个 hello world" -x
 
+        JSON 输出 (--format json):  仅单条模式支持
+          flexllm chat "你好" --format json
+
         预览:
           flexllm chat "测试" --dry-run             # 预览请求配置
         """
+        if format not in ("text", "json"):
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--format 参数值无效",
+                context={"arg": "--format", "received": format, "expected": ["text", "json"]},
+                suggestion="使用 --format text 或 --format json",
+                doc="flexllm chat --help",
+            )
+        if format == "json" and not message:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--format json 仅支持单条对话模式",
+                context={"mode": "interactive", "message": None},
+                suggestion='提供 message 切到单条模式: flexllm chat "你好" --format json',
+                doc="flexllm chat --help",
+            )
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
 
@@ -319,6 +385,7 @@ def register_commands(app):
                 user_template,
                 thinking=resolved_thinking,
                 extract=extract,
+                output_format=format,
             )
         elif not sys.stdin.isatty():
             cli_error(
@@ -700,6 +767,13 @@ def register_commands(app):
                 help="结构化输出 (json=JSON模式, @file.json=从文件读取, 或 JSON Schema 字符串)",
             ),
         ] = None,
+        format: Annotated[
+            str,
+            Option(
+                "--format",
+                help="输出格式: text(默认) 或 json(stdout 输出聚合汇总 JSON)",
+            ),
+        ] = "text",
         dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
     ):
         """批量处理 JSONL 文件（支持断点续传）
@@ -732,9 +806,20 @@ def register_commands(app):
           flexllm batch data.jsonl -o out.jsonl -uf text -sf sys_prompt
           flexllm batch input.jsonl -n 5               # 只处理前5条（试跑）
 
+        JSON 输出 (--format json):  stdout 输出聚合汇总,方便 agent/脚本解析
+          flexllm batch input.jsonl -o out.jsonl --format json
+
         预览:
           flexllm batch input.jsonl --dry-run       # 预览处理计划
         """
+        if format not in ("text", "json"):
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--format 参数值无效",
+                context={"arg": "--format", "received": format, "expected": ["text", "json"]},
+                suggestion="使用 --format text 或 --format json",
+                doc="flexllm batch --help",
+            )
         has_stdin = not sys.stdin.isatty()
         if not input and not has_stdin:
             cli_error(
@@ -1048,9 +1133,33 @@ def register_commands(app):
 
             results, summary = asyncio.run(_run_batch())
 
-            if summary:
-                print(f"\n完成: {summary}", file=sys.stderr)
-            print(f"输出文件: {output}", file=sys.stderr)
+            if format == "json":
+                if isinstance(summary, dict):
+                    summary_payload = summary
+                elif summary is None:
+                    summary_payload = None
+                else:
+                    summary_payload = {"raw": str(summary)}
+                success_count = sum(1 for r in results if r is not None)
+                print(
+                    json.dumps(
+                        {
+                            "input_file": input,
+                            "output_file": output,
+                            "record_count": len(records),
+                            "success_count": success_count,
+                            "failure_count": len(records) - success_count,
+                            "format_type": format_type,
+                            "model": model_id,
+                            "summary": summary_payload,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                if summary:
+                    print(f"\n完成: {summary}", file=sys.stderr)
+                print(f"输出文件: {output}", file=sys.stderr)
 
         except json.JSONDecodeError as e:
             cli_error(
