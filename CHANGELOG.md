@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.11.0] - 2026-05-19
+
+### Bug Fixes
+
+- **mllm**: 多模态/图片 HTTP 拉取统一启用 trust_env 走系统代理
+
+### Documentation
+
+- **skill**: 补充 Python API 高级能力和 stream/pool/thinking 细节
+
+### Features
+
+- **prefill**: 支持 OpenAI 兼容后端的 prefill(预设回复开头)
+- **cli**: Ask/chat/batch 增加 --format json 结构化输出
+- **cli**: 进度/日志统一输出到 stderr
+
+### Miscellaneous
+
+- Bump version to 0.11.0
+
 ## [0.10.4] - 2026-04-13
 
 ### Bug Fixes
