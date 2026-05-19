@@ -193,6 +193,14 @@ def convert_to_messages(
         messages = [m for m in messages if m.get("role") != "system"]
         messages.insert(0, {"role": "system", "content": global_system})
 
+    # 支持 jsonl 顶层 prefix 字段:追加为末尾 assistant message,触发 OpenAI 兼容后端的 prefill
+    # 仅在 messages 末尾不是 assistant 时追加,避免与 openai_chat 格式中用户已自带的 prefill 重复
+    prefix_value = record.get("prefix")
+    if isinstance(prefix_value, str) and prefix_value:
+        used_fields.add("prefix")
+        if not messages or messages[-1].get("role") != "assistant":
+            messages.append({"role": "assistant", "content": prefix_value})
+
     metadata = {k: v for k, v in record.items() if k not in used_fields}
     return messages, metadata
 

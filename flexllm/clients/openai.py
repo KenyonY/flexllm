@@ -176,6 +176,18 @@ class OpenAIClient(LLMClientBase):
         else:
             self._keep_thinking = False
 
+        # Prefill: messages 末尾是 assistant message → 让模型从该 content 继续生成
+        # vLLM 需要同时关闭 add_generation_prompt 并启用 continue_final_message
+        # 仅在 kwargs 未显式提供这两个参数时自动设置，给用户保留 override 能力
+        if (
+            processed_messages
+            and processed_messages[-1].get("role") == "assistant"
+            and "continue_final_message" not in kwargs
+            and "add_generation_prompt" not in kwargs
+        ):
+            body["continue_final_message"] = True
+            body["add_generation_prompt"] = False
+
         body.update(kwargs)
         return body
 

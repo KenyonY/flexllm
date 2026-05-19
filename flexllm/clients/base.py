@@ -231,6 +231,20 @@ class LLMClientBase(ABC):
             raise ValueError("必须提供 model 参数或在初始化时指定 model")
         return effective_model
 
+    @staticmethod
+    def _trailing_assistant_prefix(messages: list[dict]) -> str | None:
+        """若 messages 末尾是 assistant message 且 content 为字符串,返回该 content,否则 None。
+
+        用于识别 prefill 场景下需要拼回输出的前缀。
+        """
+        if not messages:
+            return None
+        last = messages[-1]
+        if last.get("role") != "assistant":
+            return None
+        content = last.get("content")
+        return content if isinstance(content, str) else None
+
     async def _preprocess_messages(
         self, messages: list[dict], preprocess_msg: bool = False
     ) -> list[dict]:
@@ -262,6 +276,8 @@ class LLMClientBase(ABC):
         show_progress: bool = False,
         preprocess_msg: bool = False,
         url: str = None,
+        prefix: str | None = None,
+        include_prefix: bool = True,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """
@@ -275,6 +291,11 @@ class LLMClientBase(ABC):
             show_progress: 是否显示进度条
             preprocess_msg: 是否预处理消息
             url: 自定义请求 URL，默认使用 _get_url() 生成
+            prefix: 预设回复开头(prefill),仅 OpenAI 兼容客户端(含 vLLM/Ollama 等)实际生效;
+                若传入则自动追加为末尾 assistant message,等同于直接在 messages 末尾加 assistant。
+            include_prefix: prefill 场景下返回值是否拼接 prefix。
+                默认 True,返回 "prefix + 续写";
+                设为 False 仅返回模型续写部分(与底层 API 原始行为一致)。
 
         Returns:
             - return_raw=True: RequestResult 原始响应
@@ -284,22 +305,35 @@ class LLMClientBase(ABC):
               如果需要失败时抛异常，请使用 chat_completions_or_raise()。
 
         Note:
-            缓存由初始化时的 cache 参数控制，return_raw 时自动跳过缓存
+            缓存由初始化时的 cache 参数控制，return_raw 时自动跳过缓存。
+            缓存只存模型续写部分(不含 prefix),拼接由返回路径完成。
         """
         effective_model = self._get_effective_model(model)
         messages = await self._preprocess_messages(messages, preprocess_msg)
+
+        # prefix 显式参数等价于在 messages 末尾追加 assistant message
+        if prefix is not None:
+            messages = list(messages) + [{"role": "assistant", "content": prefix}]
+
+        # 拼接用前缀(仅在 include_prefix 时生效);return_raw 路径不参与拼接
+        effective_prefix = (
+            self._trailing_assistant_prefix(messages) if include_prefix and not return_raw else None
+        )
 
         # 检查缓存
         use_cache = self._response_cache is not None and not return_raw
         if use_cache:
             cached = self._response_cache.get(messages, model=effective_model, **kwargs)
             if cached is not None:
+                cached_content = cached["content"]
+                if effective_prefix and cached_content is not None:
+                    cached_content = effective_prefix + cached_content
                 if return_usage:
                     return ChatCompletionResult(
-                        content=cached["content"],
+                        content=cached_content,
                         usage=cached.get("usage"),
                     )
-                return cached["content"]
+                return cached_content
 
         body = self._build_request_body(messages, effective_model, stream=False, **kwargs)
         request_params = {"json": body, "headers": self._get_headers()}
@@ -319,11 +353,14 @@ class LLMClientBase(ABC):
             content = self._extract_content(data.data)
             usage = self._extract_usage(data.data)
 
-            # 写入缓存（始终存储 usage）
+            # 写入缓存（始终存储 usage; content 不含 prefix）
             if use_cache and content is not None:
                 self._response_cache.set(
                     messages, {"content": content, "usage": usage}, model=effective_model, **kwargs
                 )
+
+            if effective_prefix and content is not None:
+                content = effective_prefix + content
 
             if return_usage:
                 tool_calls = self._extract_tool_calls(data.data)
@@ -397,6 +434,7 @@ class LLMClientBase(ABC):
         metadata_list: list[dict] | None = None,
         url: str = None,
         save_input: bool | str = True,
+        include_prefix: bool = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -445,16 +483,30 @@ class LLMClientBase(ABC):
 
         use_cache = self._response_cache is not None
 
+        # Prefill 拼接前缀:逐条样本预计算,缓存与底层返回均不含 prefix,只在输出与返回处拼回
+        prefix_list = (
+            [self._trailing_assistant_prefix(m) for m in messages_list]
+            if include_prefix
+            else [None] * len(messages_list)
+        )
+
+        def with_prefix(idx: int, content):
+            """若该样本有 prefix 且 content 非空,返回拼接后的内容"""
+            p = prefix_list[idx]
+            if p and content is not None:
+                return p + content
+            return content
+
         def extractor(result):
-            """提取 content 和 usage（用于缓存存储）"""
+            """提取 content 和 usage（用于缓存存储, content 不含 prefix）"""
             content = self._extract_content(result.data)
             usage = self._extract_usage(result.data)
             return {"content": content, "usage": usage}
 
-        def to_chat_result(extracted):
-            """转换为 ChatCompletionResult"""
+        def to_chat_result(extracted, idx: int):
+            """转换为 ChatCompletionResult, content 自动拼接 prefix"""
             return ChatCompletionResult(
-                content=extracted["content"],
+                content=with_prefix(idx, extracted["content"]),
                 usage=extracted.get("usage"),
                 tool_calls=None,  # 缓存不存储 tool_calls
             )
@@ -486,7 +538,9 @@ class LLMClientBase(ABC):
                 # 将缓存命中的写入文件（如果文件中没有）
                 for i, resp in enumerate(cached_responses):
                     if resp is not None and i not in completed_indices:
-                        writer.write_result(i, resp["content"], usage=resp.get("usage"))
+                        writer.write_result(
+                            i, with_prefix(i, resp["content"]), usage=resp.get("usage")
+                        )
 
                 # 过滤掉文件中已完成的
                 actual_uncached = [i for i in uncached_indices if i not in completed_indices]
@@ -543,7 +597,7 @@ class LLMClientBase(ABC):
                                 # 文件输出
                                 writer.write_result(
                                     original_idx,
-                                    extracted["content"],
+                                    with_prefix(original_idx, extracted["content"]),
                                     usage=extracted.get("usage"),
                                 )
                                 # 记录成本
@@ -614,7 +668,7 @@ class LLMClientBase(ABC):
                                 responses[original_idx] = extracted
                                 writer.write_result(
                                     original_idx,
-                                    extracted["content"],
+                                    with_prefix(original_idx, extracted["content"]),
                                     usage=extracted.get("usage"),
                                 )
                                 if self._cost_tracker and extracted.get("usage"):
@@ -646,11 +700,16 @@ class LLMClientBase(ABC):
 
         summary = progress.summary(print_to_console=False) if progress else None
 
-        # 转换返回值格式
+        # 转换返回值格式（prefill 场景统一在此拼接 prefix）
         if return_usage:
-            final_responses = [to_chat_result(r) if r is not None else None for r in responses]
+            final_responses = [
+                to_chat_result(r, i) if r is not None else None for i, r in enumerate(responses)
+            ]
         else:
-            final_responses = [r["content"] if r is not None else None for r in responses]
+            final_responses = [
+                with_prefix(i, r["content"]) if r is not None else None
+                for i, r in enumerate(responses)
+            ]
 
         # 构建返回值
         result = final_responses
@@ -717,6 +776,7 @@ class LLMClientBase(ABC):
         batch_size: int = None,
         url: str = None,
         save_input: bool | str = True,
+        include_prefix: bool = True,
         **kwargs,
     ):
         """
@@ -768,6 +828,19 @@ class LLMClientBase(ABC):
 
         use_cache = self._response_cache is not None and not return_raw
 
+        # Prefill 拼接前缀(同 chat_completions_batch)
+        prefix_list = (
+            [self._trailing_assistant_prefix(m) for m in messages_list]
+            if include_prefix
+            else [None] * len(messages_list)
+        )
+
+        def with_prefix(idx: int, content):
+            p = prefix_list[idx]
+            if p and content is not None:
+                return p + content
+            return content
+
         # 使用 JsonlWriter 管理文件输出
         writer = JsonlWriter(output_jsonl, messages_list, save_input, metadata_list, flush_interval)
         completed_indices = writer.completed_indices
@@ -793,8 +866,9 @@ class LLMClientBase(ABC):
                 # 先 yield 缓存命中的结果
                 for i, resp in enumerate(cached_responses):
                     if resp is not None:
+                        merged_content = with_prefix(i, resp["content"])
                         if i not in completed_indices:
-                            writer.write_result(i, resp["content"], usage=resp.get("usage"))
+                            writer.write_result(i, merged_content, usage=resp.get("usage"))
                         from types import SimpleNamespace
 
                         yielded_count += 1
@@ -803,7 +877,7 @@ class LLMClientBase(ABC):
                         is_last = yielded_count == total_count
 
                         cached_result = SimpleNamespace(
-                            content=resp["content"],
+                            content=merged_content,
                             usage=resp.get("usage"),
                             original_idx=i,
                             latency=0.0,
@@ -870,7 +944,7 @@ class LLMClientBase(ABC):
                                     self._extract_content(result.data) if result.data else None
                                 )
                                 usage = self._extract_usage(result.data)
-                                # 写入缓存
+                                # 写入缓存(存原始,不含 prefix)
                                 if use_cache and self._response_cache and content is not None:
                                     self._response_cache.set(
                                         messages_list[original_idx],
@@ -878,8 +952,9 @@ class LLMClientBase(ABC):
                                         model=effective_model,
                                         **kwargs,
                                     )
-                                writer.write_result(original_idx, content, usage=usage)
-                                result.content = content
+                                merged_content = with_prefix(original_idx, content)
+                                writer.write_result(original_idx, merged_content, usage=usage)
+                                result.content = merged_content
                                 result.usage = usage if return_usage else None
                                 result.original_idx = original_idx
                                 success_count += 1

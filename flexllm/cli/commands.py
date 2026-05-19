@@ -57,6 +57,13 @@ def register_commands(app):
         files: Annotated[
             list[str] | None, Option("-f", "--file", help="附加文件内容到 prompt（可多次指定）")
         ] = None,
+        prefix: Annotated[
+            str | None,
+            Option(
+                "--prefix",
+                help="预设回复开头(prefill,仅 vLLM/Ollama 等 OpenAI 兼容后端生效)",
+            ),
+        ] = None,
         format: Annotated[
             str,
             Option(
@@ -148,6 +155,8 @@ def register_commands(app):
             messages.append({"role": "system", "content": system})
         user_content = apply_user_template(full_prompt, user_template)
         messages.append({"role": "user", "content": user_content})
+        if prefix:
+            messages.append({"role": "assistant", "content": prefix})
 
         if dry_run:
             dry_run_output(
@@ -157,6 +166,7 @@ def register_commands(app):
                     "base_url": base_url,
                     "messages": messages,
                     "params": model_params,
+                    "prefix": prefix,
                 }
             )
 
