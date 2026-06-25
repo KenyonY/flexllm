@@ -427,6 +427,46 @@ async for batch_result in client.iter_chat_completions_batch(
     process(batch_result)
 ```
 
+### Per-record 参数（参数扫描）
+
+`chat_completions_batch` 接受 `params_list`（与 `messages_list` 等长，元素为 dict 或 None），
+让每条记录单独覆盖全局生成参数，用于参数扫描（同一 prompt 跑不同 `temperature` / `stop` 对比）。
+
+```python
+results = await client.chat_completions_batch(
+    messages_list=[msgs, msgs],          # 相同 messages
+    params_list=[
+        {"temperature": 0.2, "stop": ["\n\n"]},
+        {"temperature": 0.9},
+    ],
+    output_jsonl="sweep.jsonl",
+)
+# 每条有效参数 = {**全局kwargs, **params_list[i]}；缓存键随各自参数区分，互不命中。
+# 带 params 的行会把该行 params 原样回显到输出（output 多出 "params" 字段）。
+```
+
+CLI 中通过 JSONL 每行的 `params` 字段使用（嵌套，不平铺）：
+
+```jsonl
+{"messages": [{"role":"user","content":"解释量子纠缠"}], "params": {"temperature": 0.2, "stop": ["\n\n"]}}
+{"q": "解释量子纠缠", "params": {"system": "你是物理老师", "user_template": "用初中生能懂的话：{content}", "temperature": 0.9}}
+```
+
+`params` 内有两类键，消费位置不同：
+
+- **`system` / `user_template`**：消息构造类，作为该行的有效 system / 模板（行内 > 配置），
+  不会作为 API 参数下发。
+- **其余键**（`temperature` / `stop` / `max_tokens` / `response_format` …）：作为该行生成参数覆盖全局。
+
+优先级（行内 > 配置）：
+
+- system：`messages 内显式 system` > `params.system` > CLI `-s` > 配置 `models.system`
+- user_template：`params.user_template` > CLI `--user-template` > 配置 `user_template`
+- 生成参数：`params.<key>` > CLI 对应参数 > 配置 `models` 节
+
+> 注意：断点续传校验只看 messages，不感知 `params` 变化（与"改 kwargs 不影响续传判定"一致）。
+> 若改了某行的 `params` 想重跑，需先删除输出文件中对应记录。
+
 ---
 
 ## Thinking 模式

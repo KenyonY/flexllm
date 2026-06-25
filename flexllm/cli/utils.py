@@ -126,20 +126,19 @@ def convert_to_messages(
     global_system: str = None,
     user_template: str = None,
 ) -> tuple[list[dict], dict]:
-    """将输入记录转换为 messages 格式"""
+    """将输入记录转换为 messages 格式
+
+    system 与 user_template 的应用对所有格式统一处理（行内 > 全局）：
+      - system 兜底：messages 中无 system 时才插入 global_system；行内 system 保持不动。
+      - user_template：只套用到最后一条 content 为 str 的 user 消息，其余 user 不动。
+    """
     messages = []
     used_fields = set()
 
     if format_type == "openai_chat":
-        messages = record["messages"]
+        # 浅拷贝列表，后续替换整条消息（不原地修改），避免改动输入 record
+        messages = list(record["messages"])
         used_fields.add("messages")
-        if user_template:
-            messages = [
-                {**msg, "content": apply_user_template(msg["content"], user_template)}
-                if msg.get("role") == "user" and isinstance(msg.get("content"), str)
-                else msg
-                for msg in messages
-            ]
 
     elif format_type == "alpaca":
         instruction = record.get("instruction", "")
@@ -154,7 +153,6 @@ def convert_to_messages(
         content = instruction
         if input_text:
             content = f"{instruction}\n\n{input_text}"
-        content = apply_user_template(content, user_template)
         messages.append({"role": "user", "content": content})
 
     elif format_type == "simple":
@@ -166,14 +164,13 @@ def convert_to_messages(
 
         if prompt_field:
             used_fields.add(prompt_field)
-            system = global_system or record.get("system")
+            system = record.get("system")
             if "system" in record:
                 used_fields.add("system")
 
             if system:
                 messages.append({"role": "system", "content": system})
-            user_content = apply_user_template(record[prompt_field], user_template)
-            messages.append({"role": "user", "content": user_content})
+            messages.append({"role": "user", "content": record[prompt_field]})
 
     elif format_type == "custom":
         user_field, system_field = message_fields[0], message_fields[1]
@@ -186,12 +183,23 @@ def convert_to_messages(
 
         if system:
             messages.append({"role": "system", "content": system})
-        user_content = apply_user_template(record[user_field], user_template)
-        messages.append({"role": "user", "content": user_content})
+        messages.append({"role": "user", "content": record[user_field]})
 
-    if global_system and format_type != "openai_chat":
-        messages = [m for m in messages if m.get("role") != "system"]
+    # 统一 system 兜底：仅当不存在行内 system 时补全局 system
+    if global_system and not any(m.get("role") == "system" for m in messages):
         messages.insert(0, {"role": "system", "content": global_system})
+
+    # 统一 user_template：从后往前找到第一条 str content 的 user 消息套用，其余不动
+    if user_template:
+        for i in range(len(messages) - 1, -1, -1):
+            m = messages[i]
+            if m.get("role") == "user" and isinstance(m.get("content"), str):
+                messages[i] = {**m, "content": apply_user_template(m["content"], user_template)}
+                break
+
+    # per-record params 字段由调用方消费，不透传进 metadata
+    if "params" in record:
+        used_fields.add("params")
 
     # 支持 jsonl 顶层 prefix 字段:追加为末尾 assistant message,触发 OpenAI 兼容后端的 prefill
     # 仅在 messages 末尾不是 assistant 时追加,避免与 openai_chat 格式中用户已自带的 prefill 重复

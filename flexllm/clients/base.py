@@ -23,6 +23,7 @@ from ..pricing import estimate_cost, get_model_pricing
 from ..pricing.cost_tracker import BudgetExceededError, CostReport, CostTracker, CostTrackerConfig
 from .batch_helpers import (
     JsonlWriter,
+    build_gen_params_list,
     compact_output_file,
     extract_save_input,
     resume_from_jsonl,
@@ -435,6 +436,7 @@ class LLMClientBase(ABC):
         url: str = None,
         save_input: bool | str = True,
         include_prefix: bool = True,
+        params_list: list[dict | None] | None = None,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -458,6 +460,10 @@ class LLMClientBase(ABC):
                 - True（默认）: 保存完整 messages，断点续传时做首尾 input 校验
                 - "last": 仅保存最后一个 user message 的 content
                 - False: 不保存 input 字段，断点续传仅基于 index 恢复
+            params_list: per-record 参数列表（与 messages_list 等长，元素为 dict 或 None）。
+                每条的有效请求参数 = {**全局kwargs, **params_list[i]}，覆盖全局 kwargs，
+                并参与各自的缓存键计算。带 params 的行会把 params 原样回显到输出 JSONL。
+                注：断点续传校验只看 messages，不感知 params 变化（与改 kwargs 不影响续传一致）。
 
         Returns:
             - return_usage=True: List[ChatCompletionResult] 或 (List[ChatCompletionResult], summary)
@@ -478,8 +484,17 @@ class LLMClientBase(ABC):
         effective_url = url or self._get_url(effective_model, stream=False)
         headers = self._get_headers()
 
-        validate_batch_params(messages_list, metadata_list, output_jsonl)
+        validate_batch_params(messages_list, metadata_list, output_jsonl, params_list)
         messages_list = await self._preprocess_messages_batch(messages_list, preprocess_msg)
+
+        # per-record 生成参数：剥除消息构造类键（system/user_template，已在上层消费），
+        # 其余作为该行覆盖全局 kwargs 的生成参数，并参与各自缓存键。
+        gen_params_list = build_gen_params_list(params_list)
+
+        def merged_kwargs(idx: int) -> dict:
+            """该行有效请求参数 = 全局 kwargs 叠加 per-record 生成参数"""
+            extra = gen_params_list[idx] if gen_params_list else None
+            return {**kwargs, **extra} if extra else kwargs
 
         use_cache = self._response_cache is not None
 
@@ -519,8 +534,15 @@ class LLMClientBase(ABC):
         input_price = pricing["input"] * 1e6 if pricing else None
         output_price = pricing["output"] * 1e6 if pricing else None
 
-        # 使用 JsonlWriter 管理文件输出
-        writer = JsonlWriter(output_jsonl, messages_list, save_input, metadata_list, flush_interval)
+        # 使用 JsonlWriter 管理文件输出（params_list 用于带 params 的行回显 params）
+        writer = JsonlWriter(
+            output_jsonl,
+            messages_list,
+            save_input,
+            metadata_list,
+            flush_interval,
+            params_list=params_list,
+        )
         completed_indices = writer.completed_indices
 
         try:
@@ -530,9 +552,9 @@ class LLMClientBase(ABC):
 
             # 带缓存执行
             if use_cache and self._response_cache:
-                # 查询缓存（传递 kwargs 以确保不同参数配置使用不同缓存键）
+                # 查询缓存（传递 kwargs + per-record params 以确保不同参数使用不同缓存键）
                 cached_responses, uncached_indices = self._response_cache.get_batch(
-                    messages_list, model=effective_model, **kwargs
+                    messages_list, model=effective_model, params_list=gen_params_list, **kwargs
                 )
 
                 # 将缓存命中的写入文件（如果文件中没有）
@@ -552,13 +574,14 @@ class LLMClientBase(ABC):
                 if actual_uncached:
                     logger.info(f"待执行: {len(actual_uncached)}/{len(messages_list)}")
 
-                    uncached_messages = [messages_list[i] for i in actual_uncached]
                     request_params = [
                         {
-                            "json": self._build_request_body(m, effective_model, **kwargs),
+                            "json": self._build_request_body(
+                                messages_list[i], effective_model, **merged_kwargs(i)
+                            ),
                             "headers": headers,
                         }
-                        for m in uncached_messages
+                        for i in actual_uncached
                     ]
 
                     async for batch in self._client.aiter_stream_requests(
@@ -566,7 +589,7 @@ class LLMClientBase(ABC):
                         url=effective_url,
                         method="POST",
                         show_progress=show_progress,
-                        total_requests=len(uncached_messages),
+                        total_requests=len(actual_uncached),
                         progress_config=progress_config,
                         model_name=effective_model if track_cost else None,
                         input_price_per_1m=input_price,
@@ -587,12 +610,12 @@ class LLMClientBase(ABC):
                             try:
                                 extracted = extractor(result)
                                 cached_responses[original_idx] = extracted
-                                # 写入缓存
+                                # 写入缓存（per-record 参数纳入键，与 get_batch 对齐）
                                 self._response_cache.set(
                                     messages_list[original_idx],
                                     extracted,
                                     model=effective_model,
-                                    **kwargs,
+                                    **merged_kwargs(original_idx),
                                 )
                                 # 文件输出
                                 writer.write_result(
@@ -632,20 +655,21 @@ class LLMClientBase(ABC):
 
                 progress = None
                 if indices_to_run:
-                    messages_to_run = [messages_list[i] for i in indices_to_run]
                     request_params = [
                         {
-                            "json": self._build_request_body(m, effective_model, **kwargs),
+                            "json": self._build_request_body(
+                                messages_list[i], effective_model, **merged_kwargs(i)
+                            ),
                             "headers": headers,
                         }
-                        for m in messages_to_run
+                        for i in indices_to_run
                     ]
                     async for batch in self._client.aiter_stream_requests(
                         request_params=request_params,
                         url=effective_url,
                         method="POST",
                         show_progress=show_progress,
-                        total_requests=len(messages_to_run),
+                        total_requests=len(indices_to_run),
                         progress_config=progress_config,
                         model_name=effective_model if track_cost else None,
                         input_price_per_1m=input_price,

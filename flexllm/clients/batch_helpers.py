@@ -126,15 +126,45 @@ def compact_output_file(file_path: str):
             os.remove(tmp_path)
 
 
+# per-record params 中的消息构造类键：在 CLI 层消费（system/模板），不作为 API 生成参数下发
+MSG_CONSTRUCTION_PARAM_KEYS = frozenset({"system", "user_template"})
+
+
+def build_gen_params_list(
+    params_list: list[dict | None] | None,
+) -> list[dict | None] | None:
+    """从 per-record params 中提取生成参数（剥除消息构造类键）
+
+    system / user_template 已在上层用于构造 messages，不能作为 API 参数下发；
+    其余键（temperature/stop/max_tokens/...）作为该行覆盖全局 kwargs 的生成参数。
+    返回与 params_list 等长的列表，元素为 dict（非空生成参数）或 None。
+    """
+    if params_list is None:
+        return None
+    result: list[dict | None] = []
+    for p in params_list:
+        if not p:
+            result.append(None)
+            continue
+        gen = {k: v for k, v in p.items() if k not in MSG_CONSTRUCTION_PARAM_KEYS}
+        result.append(gen or None)
+    return result
+
+
 def validate_batch_params(
     messages_list: list[list[dict]],
     metadata_list: list[dict] | None,
     output_jsonl: str | None,
+    params_list: list[dict | None] | None = None,
 ):
-    """校验 batch 参数（metadata_list 长度、output_jsonl 扩展名）"""
+    """校验 batch 参数（metadata_list / params_list 长度、output_jsonl 扩展名）"""
     if metadata_list is not None and len(metadata_list) != len(messages_list):
         raise ValueError(
             f"metadata_list 长度 ({len(metadata_list)}) 必须与 messages_list 长度 ({len(messages_list)}) 一致"
+        )
+    if params_list is not None and len(params_list) != len(messages_list):
+        raise ValueError(
+            f"params_list 长度 ({len(params_list)}) 必须与 messages_list 长度 ({len(messages_list)}) 一致"
         )
     if output_jsonl and not output_jsonl.endswith(".jsonl"):
         raise ValueError(f"output_jsonl 必须使用 .jsonl 扩展名，当前: {output_jsonl}")
@@ -156,12 +186,15 @@ class JsonlWriter:
         save_input: bool | str = True,
         metadata_list: list[dict] | None = None,
         flush_interval: float = 1.0,
+        params_list: list[dict | None] | None = None,
     ):
         self._messages_list = messages_list
         self._save_input = save_input
         self._metadata_list = metadata_list
         self._flush_interval = flush_interval
         self._output_jsonl = output_jsonl
+        # per-record params 回显（参数扫描场景），仅对带 params 的行写出 params 字段
+        self._params_list = params_list
 
         self._file_writer = None
         self._buffer: list[dict] = []
@@ -198,6 +231,8 @@ class JsonlWriter:
             record["input"] = input_value
         if self._metadata_list is not None:
             record["metadata"] = self._metadata_list[index]
+        if self._params_list is not None and self._params_list[index]:
+            record["params"] = self._params_list[index]
         if usage is not None:
             record["usage"] = usage
         if error:

@@ -41,7 +41,12 @@ from ..cache import ResponseCacheConfig
 from ..pricing import get_model_pricing
 from ..utils.core import retry_callback
 from .base import ChatCompletionResult, LLMClientBase
-from .batch_helpers import JsonlWriter, extract_save_input, validate_batch_params
+from .batch_helpers import (
+    JsonlWriter,
+    build_gen_params_list,
+    extract_save_input,
+    validate_batch_params,
+)
 from .claude import ClaudeClient
 from .gemini import GeminiClient
 from .openai import OpenAIClient
@@ -737,6 +742,7 @@ class LLMClientPool:
         distribute: bool = True,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
+        params_list: list[dict | None] | None = None,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -756,6 +762,8 @@ class LLMClientPool:
             distribute: 是否将请求分散到多个 endpoint（True）
                         False 时使用单个 endpoint + fallback
             metadata_list: 元数据列表，与 messages_list 等长，每个元素保存到对应输出记录
+            params_list: per-record 参数列表（与 messages_list 等长，dict 或 None），
+                每条覆盖全局 kwargs 并参与缓存键；带 params 的行回显到输出。
             **kwargs: 其他参数
 
         Returns:
@@ -780,6 +788,7 @@ class LLMClientPool:
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
                 save_input=save_input,
+                params_list=params_list,
                 **kwargs,
             )
 
@@ -788,7 +797,7 @@ class LLMClientPool:
         if track_cost:
             return_usage = True
 
-        validate_batch_params(messages_list, metadata_list, output_jsonl)
+        validate_batch_params(messages_list, metadata_list, output_jsonl, params_list)
 
         if not distribute or len(self._clients) == 1:
             # 单 endpoint 模式：使用 fallback
@@ -805,6 +814,7 @@ class LLMClientPool:
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
                 save_input=save_input,
+                params_list=params_list,
                 **kwargs,
             )
         else:
@@ -821,6 +831,7 @@ class LLMClientPool:
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
                 save_input=save_input,
+                params_list=params_list,
                 **kwargs,
             )
 
@@ -838,6 +849,7 @@ class LLMClientPool:
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
+        params_list: list[dict | None] | None = None,
         **kwargs,
     ):
         """使用单个 endpoint + fallback 的批量调用"""
@@ -868,6 +880,7 @@ class LLMClientPool:
                     flush_interval=flush_interval,
                     metadata_list=metadata_list,
                     save_input=save_input,
+                    params_list=params_list,
                     **kwargs,
                 )
                 self._router.mark_success(provider)
@@ -896,6 +909,7 @@ class LLMClientPool:
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
+        params_list: list[dict | None] | None = None,
         **kwargs,
     ):
         """
@@ -913,6 +927,9 @@ class LLMClientPool:
         cached_count = 0
         start_time = time.time()
 
+        # per-record 生成参数（剥除消息构造类键），用于覆盖 kwargs 与缓存键
+        gen_params_list = build_gen_params_list(params_list)
+
         # 获取所有 endpoint 的 base_url 集合（用于 fallback 判断）
         all_endpoints = {ep.base_url for ep in self._endpoints}
         num_endpoints = len(all_endpoints)
@@ -925,8 +942,15 @@ class LLMClientPool:
                 response_cache = cache
                 break
 
-        # 使用 JsonlWriter 管理文件输出和断点续传
-        writer = JsonlWriter(output_jsonl, messages_list, save_input, metadata_list, flush_interval)
+        # 使用 JsonlWriter 管理文件输出和断点续传（params_list 用于回显 per-record params）
+        writer = JsonlWriter(
+            output_jsonl,
+            messages_list,
+            save_input,
+            metadata_list,
+            flush_interval,
+            params_list=params_list,
+        )
         completed_indices = set(writer.completed_indices)
 
         # 恢复已完成的记录到 results（断点续传）
@@ -950,8 +974,14 @@ class LLMClientPool:
             ]
             if pending:
                 pending_indices, pending_msgs = zip(*pending)
+                pending_gen_params = (
+                    [gen_params_list[i] for i in pending_indices] if gen_params_list else None
+                )
                 cached_responses, _ = response_cache.get_batch(
-                    list(pending_msgs), model=effective_model, **kwargs
+                    list(pending_msgs),
+                    model=effective_model,
+                    params_list=pending_gen_params,
+                    **kwargs,
                 )
                 for idx, cached_result in zip(pending_indices, cached_responses):
                     if cached_result is not None:
@@ -1082,12 +1112,13 @@ class LLMClientPool:
                 try:
                     if tracker:
                         retry_callback.set(tracker.increment_retry)
+                    row_extra = gen_params_list[idx] if gen_params_list else None
                     result = await client.chat_completions(
                         messages=msg,
                         model=worker_model,
                         return_raw=return_raw,
                         return_usage=return_usage,
-                        **kwargs,
+                        **({**kwargs, **row_extra} if row_extra else kwargs),
                     )
 
                     # 检查是否返回了 RequestResult（表示失败）

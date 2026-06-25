@@ -145,10 +145,18 @@ class ResponseCache:
         self._db[cache_key] = response
 
     def get_batch(
-        self, messages_list: list[list[dict]], model: str = "", **kwargs
+        self,
+        messages_list: list[list[dict]],
+        model: str = "",
+        params_list: list[dict | None] | None = None,
+        **kwargs,
     ) -> tuple[list[Any | None], list[int]]:
         """
         批量获取缓存
+
+        Args:
+            params_list: 每条记录的 per-record 生成参数（与 messages_list 等长），
+                用于让不同参数的同一 messages 使用各自独立的缓存键。
 
         Returns:
             (cached_responses, uncached_indices)
@@ -156,7 +164,14 @@ class ResponseCache:
         if self._db is None:
             return [None] * len(messages_list), list(range(len(messages_list)))
 
-        cache_keys = [self._make_key(msgs, model, **kwargs) for msgs in messages_list]
+        cache_keys = [
+            self._make_key(
+                msgs,
+                model,
+                **({**kwargs, **(params_list[i] or {})} if params_list else kwargs),
+            )
+            for i, msgs in enumerate(messages_list)
+        ]
         results = self._db.batch_get(cache_keys)
 
         cached = []

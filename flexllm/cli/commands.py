@@ -1034,17 +1034,32 @@ def register_commands(app):
 
             messages_list = []
             metadata_list = []
+            params_list = []
 
             for record in records:
+                raw_params = record.get("params")
+                if not isinstance(raw_params, dict):
+                    raw_params = None
+                # 行内 > 配置：params.system/user_template 优先于 CLI/配置；
+                # messages 内显式 system 的优先级由 convert_to_messages 兜底逻辑保证
+                rec_system = raw_params.get("system") if raw_params else None
+                rec_template = raw_params.get("user_template") if raw_params else None
+                eff_sys = rec_system if rec_system is not None else effective_system
+                eff_tmpl = rec_template if rec_template is not None else effective_user_template
                 messages, metadata = convert_to_messages(
-                    record, format_type, message_fields, effective_system, effective_user_template
+                    record, format_type, message_fields, eff_sys, eff_tmpl
                 )
                 messages_list.append(messages)
                 metadata_list.append(metadata if metadata else None)
+                params_list.append(raw_params)
 
             has_metadata = any(m for m in metadata_list)
             if not has_metadata:
                 metadata_list = None
+
+            # 无任何 per-record params 时置 None，行为完全等同普通 batch（零回归）
+            if not any(p for p in params_list):
+                params_list = None
 
             if dry_run:
                 dry_run_output(
@@ -1061,6 +1076,8 @@ def register_commands(app):
                         "cache": effective_cache,
                         "thinking": thinking_value,
                         "sample_messages": messages_list[0] if messages_list else None,
+                        # 第一条解析后的 per-record 参数（覆盖全局；None 表示该行无 params）
+                        "sample_params": params_list[0] if params_list else None,
                     }
                 )
 
@@ -1109,6 +1126,7 @@ def register_commands(app):
                             flush_interval=batch_config["flush_interval"],
                             metadata_list=metadata_list,
                             save_input=effective_save_input,
+                            params_list=params_list,
                             **kwargs,
                         )
                 else:
@@ -1137,6 +1155,7 @@ def register_commands(app):
                             flush_interval=batch_config["flush_interval"],
                             metadata_list=metadata_list,
                             save_input=effective_save_input,
+                            params_list=params_list,
                             **kwargs,
                         )
                 return results, summary
