@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.12.0] - 2026-06-25
+
+### Features
+
+- **batch**: 支持 per-record params 与统一 system/user_template 语义
+
+### Miscellaneous
+
+- Bump version to 0.12.0
+
 ## [0.11.0] - 2026-05-19
 
 ### Bug Fixes
