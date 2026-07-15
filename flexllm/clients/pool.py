@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Literal, Union
 
 logger = logging.getLogger(__name__)
 
+from ..async_api.core import ConcurrencyLimiter, RateLimiter
 from ..async_api.interface import RequestResult
 from ..async_api.progress import ProgressBarConfig, ProgressTracker
 from ..cache import ResponseCacheConfig
@@ -109,6 +110,8 @@ class LLMClientPool:
         # 共享参数
         concurrency_limit: int = 10,
         max_qps: int = None,
+        total_concurrency_limit: int = None,
+        total_max_qps: float = None,
         timeout: int = 120,
         retry_times: int = None,
         cache_image: bool = False,
@@ -142,8 +145,14 @@ class LLMClientPool:
             recovery_time: 不健康后多久尝试恢复（秒）
 
             # 共享参数
-            concurrency_limit: 并发请求限制
-            max_qps: 最大 QPS（openai 默认 1000，gemini 默认 60）
+            concurrency_limit: 并发请求限制（多 endpoint 模式下为每个 endpoint 的默认值）
+            max_qps: 最大 QPS（openai 默认 1000，gemini 默认 60；多 endpoint 模式下为每个
+                endpoint 的默认值）
+            total_concurrency_limit: 跨所有 endpoint 的全局并发硬上限。与 per-endpoint
+                的 concurrency_limit 同时生效（哪个先触发就卡在哪）。不传时无全局上限，
+                行为与之前完全一致。不约束流式接口（per-endpoint 限制同样不约束流式）。
+            total_max_qps: 跨所有 endpoint 的全局 QPS 硬上限，语义同上。
+                QPS 令牌按 wire 请求计：fallback 换 endpoint 重试会再取一次令牌。
             timeout: 请求超时时间
             retry_times: 重试次数。fallback=True 时表示总重试次数（会在多个 endpoint 间分配），默认为 0；
                 fallback=False 时为单 client 重试次数，默认为 3
@@ -197,6 +206,18 @@ class LLMClientPool:
             raise ValueError(
                 "不能同时提供 base_url 和 endpoints/clients，请选择单或多 endpoint 模式"
             )
+
+        # pool 级全局限制器：注入到每个底层客户端的 ConcurrentRequester 中，
+        # 在唯一的请求执行点（_send_single_request）生效，天然覆盖单条/批量/迭代
+        # 全部路径（流式除外，流式不经过 ConcurrentRequester）
+        if total_concurrency_limit is not None and total_concurrency_limit < 1:
+            raise ValueError(f"total_concurrency_limit 必须 ≥ 1，当前为 {total_concurrency_limit}")
+        if total_max_qps is not None and total_max_qps <= 0:
+            raise ValueError(f"total_max_qps 必须 > 0，当前为 {total_max_qps}")
+        self._pool_limiter = (
+            ConcurrencyLimiter(total_concurrency_limit) if total_concurrency_limit else None
+        )
+        self._pool_rate_limiter = RateLimiter(total_max_qps) if total_max_qps else None
 
         if has_single_endpoint:
             # ========== 单 endpoint 模式 ==========
@@ -491,6 +512,7 @@ class LLMClientPool:
             cache=cache,
             **kwargs,
         )
+        self._inject_pool_limits(self._single_client)
 
     def _init_multi_mode(
         self,
@@ -617,7 +639,21 @@ class LLMClientPool:
             ep.base_url: client for ep, client in zip(self._endpoints, self._clients)
         }
 
+        for client in self._clients:
+            self._inject_pool_limits(client)
+
         self._max_fallback_attempts = max_fallback_attempts or len(self._clients)
+
+    def _inject_pool_limits(self, client: LLMClientBase) -> None:
+        """把 pool 级共享限制器注入底层客户端的 ConcurrentRequester
+
+        统一用事后注入而非构造参数透传：新建 endpoint、单 endpoint、
+        legacy clients= 三条路径共用同一机制。
+        """
+        if self._pool_limiter is None and self._pool_rate_limiter is None:
+            return
+        client._client._pool_semaphore = self._pool_limiter
+        client._client._pool_rate_limiter = self._pool_rate_limiter
 
     def _get_client(self) -> tuple[LLMClientBase, ProviderConfig]:
         """获取下一个可用的 client（返回底层客户端）"""
@@ -1132,11 +1168,13 @@ class LLMClientPool:
                     if tracker:
                         retry_callback.set(tracker.increment_retry)
                     row_extra = gen_params_list[idx] if gen_params_list else None
+                    # 内部强制 return_usage=True 以拿到 queue_time（return_raw 时
+                    # RequestResult 本身就带），返回前按用户要求解包
                     result = await client.chat_completions(
                         messages=msg,
                         model=worker_model,
                         return_raw=return_raw,
-                        return_usage=return_usage,
+                        return_usage=return_usage or not return_raw,
                         **({**kwargs, **row_extra} if row_extra else kwargs),
                     )
 
@@ -1151,6 +1189,9 @@ class LLMClientPool:
                         raise RuntimeError(error_msg)
 
                     latency = time.perf_counter() - task_start
+                    queue_time = getattr(result, "queue_time", None)
+                    if not return_usage and not return_raw and hasattr(result, "content"):
+                        result = result.content  # 用户没要 usage，解包回 str
                     results[idx] = result
                     self._router.mark_success(provider)
 
@@ -1165,6 +1206,7 @@ class LLMClientPool:
                                 data=result,
                                 status="success",
                                 latency=latency,
+                                queue_time=queue_time or 0.0,
                             )
                             tracker.update(req_result)
 
@@ -1481,6 +1523,7 @@ class LLMClientPool:
                                 error="All endpoints failed",
                                 original_idx=idx,
                                 latency=0.0,
+                                queue_time=None,
                                 status="error",
                                 data=None,
                                 usage=None,
@@ -1498,11 +1541,13 @@ class LLMClientPool:
 
                 task_start = time.perf_counter()
                 try:
+                    # 内部强制 return_usage=True 以拿到 queue_time（return_raw 时
+                    # RequestResult 本身就带），返回前按用户要求解包
                     result = await client.chat_completions(
                         messages=msg,
                         model=worker_model,
                         return_raw=return_raw,
-                        return_usage=return_usage,
+                        return_usage=return_usage or not return_raw,
                         **kwargs,
                     )
 
@@ -1513,12 +1558,15 @@ class LLMClientPool:
                         raise RuntimeError(error_detail or "unknown error")
 
                     latency = time.perf_counter() - task_start
+                    queue_time = getattr(result, "queue_time", None)
                     self._router.mark_success(provider)
 
-                    # 提取 content
+                    # 提取 content；用户没要 usage 时把 data 解包回 str，保持返回形状不变
                     if hasattr(result, "content"):
                         content = result.content
-                        usage = getattr(result, "usage", None)
+                        usage = getattr(result, "usage", None) if return_usage else None
+                        if not return_usage and not return_raw:
+                            result = content
                     else:
                         content = result
                         usage = None
@@ -1529,6 +1577,7 @@ class LLMClientPool:
                             error=None,
                             original_idx=idx,
                             latency=latency,
+                            queue_time=queue_time,
                             status="success",
                             data=result,
                             usage=usage,
@@ -1554,6 +1603,7 @@ class LLMClientPool:
                                 error=str(e),
                                 original_idx=idx,
                                 latency=latency,
+                                queue_time=None,
                                 status="error",
                                 data=None,
                                 usage=None,

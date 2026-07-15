@@ -304,12 +304,37 @@ pool = LLMClientPool(
 
 **配置优先级**：endpoint 级别配置 > 全局配置 > 默认值
 
+### Pool 级全局硬上限（total_concurrency_limit / total_max_qps）
+
+per-endpoint 限制是**叠加**的：3 个 endpoint 各 `concurrency_limit=30`，峰值并发可达 90。
+当 API 配额按总 QPS 计费、或下游系统有总并发上限时，用 pool 级参数设全局硬上限：
+
+```python
+pool = LLMClientPool(
+    endpoints=[...],              # 3 个 endpoint
+    concurrency_limit=30,         # 每 endpoint 软上限（单点保护）
+    total_concurrency_limit=50,   # 跨所有 endpoint 的并发硬上限
+    total_max_qps=100,            # 跨所有 endpoint 的 QPS 硬上限
+)
+```
+
+两层同时生效，哪个先触发就卡在哪（类比 K8s 的 LimitRange + ResourceQuota）。语义细节：
+
+- **不传时行为完全不变**；单 endpoint 模式下同样生效（total 小于 endpoint 限制时以 total 为准）
+- 全局闸门在底层请求执行点生效，获取顺序为 endpoint 并发 → 全局并发 → endpoint QPS → 全局 QPS。
+  等全局 slot 的请求不占任何全局稀缺资源，不存在"慢 endpoint 拖住快 endpoint"的队头阻塞
+- QPS 令牌按 wire 请求计：fallback 换 endpoint 重试会再取一次令牌
+- **流式接口不受约束**（`chat_completions_stream` 不经过并发引擎，per-endpoint 限制同样不约束它）
+- 排队等待计入 `queue_time`（`return_usage=True` 时可从 `ChatCompletionResult.queue_time` 读取）
+
 **CLI 配置方式**（`~/.flexllm/config.yaml`）：
 
 ```yaml
 batch:
-  concurrency: 10       # 全局默认并发
-  max_qps: 100          # 全局默认 QPS
+  concurrency: 10          # 每 endpoint 默认并发（未单独配置时的回退值）
+  max_qps: 100             # 每 endpoint 默认 QPS
+  total_concurrency: 50    # 跨所有 endpoint 的并发硬上限（可选）
+  total_max_qps: 100       # 跨所有 endpoint 的 QPS 硬上限（可选）
   endpoints:
     - base_url: http://fast-api.com/v1
       api_key: key1

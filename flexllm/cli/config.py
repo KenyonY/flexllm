@@ -367,6 +367,9 @@ class FlexLLMConfig:
             # 多 endpoint（与 model 二选一）
             "endpoints": None,
             "fallback": True,
+            # pool 级全局硬上限（跨所有 endpoint）
+            "total_concurrency": None,
+            "total_max_qps": None,
         }
 
         result = {}

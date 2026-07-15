@@ -3,7 +3,7 @@ import itertools
 import time
 from asyncio import Queue
 from collections.abc import AsyncGenerator, Callable, Iterable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from typing import (
     Any,
@@ -117,6 +117,39 @@ class RateLimiter:
                 self._last_request_time = time.perf_counter()
 
 
+class ConcurrencyLimiter:
+    """并发上限限制器（asyncio.Semaphore 的 lazy 重绑定包装）
+
+    lazy init 以避免绑定错误的 event loop（多次 asyncio.run 场景），与 RateLimiter 一致。
+    多个 ConcurrentRequester 共享同一实例时，即构成跨 endpoint 的全局并发硬上限。
+    """
+
+    def __init__(self, limit: int):
+        self.limit = limit
+        self._semaphore: asyncio.Semaphore | None = None
+
+    def _get_semaphore(self) -> asyncio.Semaphore:
+        try:
+            loop = asyncio.get_running_loop()
+            if self._semaphore is not None:
+                # Python 3.10+ Semaphore 有 _loop 属性（内部）
+                sem_loop = getattr(self._semaphore, "_loop", None)
+                if sem_loop is not None and sem_loop is not loop:
+                    self._semaphore = None
+        except RuntimeError:
+            pass
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(self.limit)
+        return self._semaphore
+
+    async def __aenter__(self):
+        await self._get_semaphore().acquire()
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self._semaphore.release()
+
+
 class ConcurrentRequester:
     """
     并发请求管理器
@@ -157,6 +190,8 @@ class ConcurrentRequester:
         retry_times: int = 3,
         retry_delay: float = 0.3,
         proxy: str | None = None,
+        pool_semaphore: ConcurrencyLimiter | None = None,
+        pool_rate_limiter: RateLimiter | None = None,
     ):
         self._concurrency_limit = concurrency_limit
         self._proxy = validate_proxy(proxy)
@@ -165,7 +200,13 @@ class ConcurrentRequester:
         else:
             self._timeout = None
         self._rate_limiter = RateLimiter(max_qps)
-        self._semaphore: asyncio.Semaphore | None = None  # lazy init，避免绑定错误的 event loop
+        self._limiter = ConcurrencyLimiter(concurrency_limit)
+        # pool 级共享限制器（跨多个 requester 的全局硬上限），由 LLMClientPool 注入。
+        # 获取顺序固定为 endpoint sem → pool sem：等待 pool slot 时只占着自己
+        # endpoint 的 slot（非全局稀缺资源），不会出现"攥着全局 slot 在某个
+        # endpoint 队列里干等"的队头阻塞。
+        self._pool_semaphore = pool_semaphore
+        self._pool_rate_limiter = pool_rate_limiter
         self.retry_times = retry_times
         self.retry_delay = retry_delay
 
@@ -175,22 +216,7 @@ class ConcurrentRequester:
 
     def _get_semaphore(self) -> asyncio.Semaphore:
         """获取或创建 Semaphore（确保绑定到当前 event loop）"""
-        try:
-            loop = asyncio.get_running_loop()
-            # 检查 semaphore 是否绑定到当前 loop
-            if self._semaphore is not None:
-                # Python 3.10+ Semaphore 有 _loop 属性（内部）
-                sem_loop = getattr(self._semaphore, "_loop", None)
-                if sem_loop is not None and sem_loop is not loop:
-                    # 绑定到不同的 loop，需要重新创建
-                    self._semaphore = None
-            if self._semaphore is None:
-                self._semaphore = asyncio.Semaphore(self._concurrency_limit)
-        except RuntimeError:
-            # 没有运行的 event loop，创建新的 semaphore
-            if self._semaphore is None:
-                self._semaphore = asyncio.Semaphore(self._concurrency_limit)
-        return self._semaphore
+        return self._limiter._get_semaphore()
 
     def _create_session(self) -> ClientSession:
         """创建新的 session（内部使用）"""
@@ -314,10 +340,13 @@ class ConcurrentRequester:
         # 端到端计时起点：在 semaphore 外，包含排队等待
         t_enqueue = time.perf_counter()
         queue_time = 0.0
-        async with self._get_semaphore():
+        pool_gate = self._pool_semaphore if self._pool_semaphore is not None else nullcontext()
+        async with self._get_semaphore(), pool_gate:
             try:
                 await self._rate_limiter.acquire()
-                # 排队结束：semaphore 与漏桶均已放行，此后的耗时归因于服务。
+                if self._pool_rate_limiter is not None:
+                    await self._pool_rate_limiter.acquire()
+                # 排队结束：semaphore 与漏桶（含 pool 级）均已放行，此后的耗时归因于服务。
                 # 漏桶只在这里 acquire 一次（retry 循环在 make_requests 内部），
                 # 所以 queue_time 是一次性的，重试不会再次穿过漏桶。
                 queue_time = time.perf_counter() - t_enqueue

@@ -1114,6 +1114,10 @@ def register_commands(app):
                     }
                     if effective_max_qps is not None:
                         pool_kwargs["max_qps"] = effective_max_qps
+                    if batch_config.get("total_concurrency") is not None:
+                        pool_kwargs["total_concurrency_limit"] = batch_config["total_concurrency"]
+                    if batch_config.get("total_max_qps") is not None:
+                        pool_kwargs["total_max_qps"] = batch_config["total_max_qps"]
 
                     async with LLMClientPool(**pool_kwargs) as pool:
                         results, summary = await pool.chat_completions_batch(

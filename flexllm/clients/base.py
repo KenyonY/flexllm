@@ -56,6 +56,7 @@ class ChatCompletionResult:
     usage: dict | None = None  # {"prompt_tokens": x, "completion_tokens": y, "total_tokens": z}
     reasoning_content: str | None = None  # 思考内容（DeepSeek-R1、Qwen3 等）
     tool_calls: list["ToolCall"] | None = None  # 工具调用列表
+    queue_time: float | None = None  # 客户端排队耗时（semaphore + QPS 桶），缓存命中时为 None
 
 
 @dataclass
@@ -370,11 +371,18 @@ class LLMClientBase(ABC):
             if effective_prefix and content is not None:
                 content = effective_prefix + content
 
+            # 记账不依赖 return_usage：与批量路径行为一致（此前只在 return_usage=True 时记）
+            if self._cost_tracker and usage:
+                self._cost_tracker.record(usage, effective_model)
+
             if return_usage:
                 tool_calls = self._extract_tool_calls(data.data)
-                if self._cost_tracker:
-                    self._cost_tracker.record(usage, effective_model)
-                return ChatCompletionResult(content=content, usage=usage, tool_calls=tool_calls)
+                return ChatCompletionResult(
+                    content=content,
+                    usage=usage,
+                    tool_calls=tool_calls,
+                    queue_time=data.queue_time,
+                )
             return content
         logger.warning("chat_completions 请求失败: %s, 返回 RequestResult 而非 str", data.data)
         return data
