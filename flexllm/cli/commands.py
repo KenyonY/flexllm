@@ -1186,8 +1186,8 @@ def register_commands(app):
                     )
                 )
             else:
-                if summary:
-                    print(f"\n完成: {summary}", file=sys.stderr)
+                # 不在这里打印 summary：show_progress=True 时 ProgressTracker 已经
+                # 把同一份内容打到 stderr 了，再打一遍就是重复。
                 print(f"输出文件: {output}", file=sys.stderr)
 
         except json.JSONDecodeError as e:

@@ -13,6 +13,7 @@ from typing import (
     Protocol,
 )
 
+from .core import RateLimiter
 from .interface import RequestResult
 from .progress import ProgressBarConfig, ProgressTracker
 
@@ -76,25 +77,6 @@ class StreamingExecutionResult:
     completed_tasks: list[ExecutionResult]
     progress: ProgressTracker | None
     is_final: bool
-
-
-class RateLimiter:
-    """速率限制器"""
-
-    def __init__(self, max_qps: float | None = None):
-        self.max_qps = max_qps
-        self.min_interval = 1 / max_qps if max_qps else 0
-        self.last_request_time = 0
-
-    async def acquire(self):
-        if not self.max_qps:
-            return
-
-        current_time = time.time()
-        elapsed = current_time - self.last_request_time
-        if elapsed < self.min_interval:
-            time.sleep(self.min_interval - elapsed)
-        self.last_request_time = time.time()
 
 
 class ConcurrentExecutor:
@@ -178,7 +160,9 @@ class ConcurrentExecutor:
         error_handler: Callable[[Exception, Any, int], bool] | None = None,
     ):
         self._concurrency_limit = concurrency_limit
-        self._rate_limiter = RateLimiter(max_qps)
+        # use_bucket=False 保持固定间隔语义（漏桶会放行 max_qps 个突发），
+        # 与此前 executor 自带的那份 RateLimiter 行为一致
+        self._rate_limiter = RateLimiter(max_qps, use_bucket=False)
         self._semaphore: asyncio.Semaphore | None = None  # lazy init，避免绑定错误的 event loop
         self.retry_times = retry_times
         self.retry_delay = retry_delay

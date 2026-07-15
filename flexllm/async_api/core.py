@@ -90,11 +90,13 @@ class RateLimiter:
         if self._use_bucket:
             await self._get_limiter().acquire()
         else:
+            # 锁保证串行：否则多个协程读到同一个 _last_request_time，
+            # 睡同样的时长后一起醒来，QPS 会被突破
             async with self._get_lock():
-                elapsed = time.time() - self._last_request_time
+                elapsed = time.perf_counter() - self._last_request_time
                 if elapsed < self._min_interval:
                     await asyncio.sleep(self._min_interval - elapsed)
-                self._last_request_time = time.time()
+                self._last_request_time = time.perf_counter()
 
 
 class ConcurrentRequester:

@@ -1,9 +1,8 @@
 """
 async_api 模块速率限制器测试
 
-测试两个版本的 RateLimiter：
-- core.py 中的复杂版本（支持漏桶模式和 sleep 模式）
-- concurrent_executor.py 中的简单版本
+RateLimiter 只有 core.py 一份实现，支持漏桶模式（默认，允许突发）与 sleep 模式
+（固定间隔）。concurrent_executor 曾另有一份副本，因漂移出 bug 已删除并统一到此。
 """
 
 import asyncio
@@ -11,7 +10,7 @@ import time
 
 import pytest
 
-from flexllm.async_api.concurrent_executor import RateLimiter as SimpleRateLimiter
+from flexllm.async_api.concurrent_executor import RateLimiter as ExecutorRateLimiter
 from flexllm.async_api.core import RateLimiter as CoreRateLimiter
 
 
@@ -122,48 +121,49 @@ class TestCoreRateLimiter:
         assert isinstance(limiter._lock, asyncio.Lock)
 
 
-class TestSimpleRateLimiter:
-    """concurrent_executor.py 中 SimpleRateLimiter 的测试"""
+class TestRateLimiterIsNonBlocking:
+    """acquire() 不得阻塞 event loop
 
-    async def test_no_limit(self):
-        """测试 max_qps=None 时不限制"""
-        limiter = SimpleRateLimiter(max_qps=None)
+    回归：concurrent_executor 曾有一份 RateLimiter 副本，在 `async def acquire()`
+    里调用同步的 `time.sleep()`，限流期间整个 loop 冻结——设了 max_qps 的
+    executor 会丧失全部并发。副本已删除，统一到 core 这份。
+    """
 
-        start = time.time()
-        for _ in range(10):
+    async def _count_heartbeats_during_acquires(self, limiter, n: int) -> tuple[float, int]:
+        """在 acquire 期间跑一个 10ms 心跳，返回 (耗时, 心跳次数)"""
+        stop = asyncio.Event()
+
+        async def heartbeat():
+            ticks = 0
+            while not stop.is_set():
+                ticks += 1
+                await asyncio.sleep(0.01)
+            return ticks
+
+        hb = asyncio.create_task(heartbeat())
+        await asyncio.sleep(0.05)  # 让心跳先跑起来
+
+        start = time.perf_counter()
+        for _ in range(n):
             await limiter.acquire()
-        elapsed = time.time() - start
+        elapsed = time.perf_counter() - start
 
-        # 无限制时应该瞬间完成
-        assert elapsed < 0.1
+        stop.set()
+        return elapsed, await hb
 
-    async def test_qps_enforcement(self):
-        """测试 QPS 限制生效"""
-        max_qps = 20.0
-        limiter = SimpleRateLimiter(max_qps=max_qps)
+    async def test_sleep_mode_yields_to_event_loop(self):
+        limiter = CoreRateLimiter(max_qps=5.0, use_bucket=False)  # 间隔 0.2s
+        elapsed, ticks = await self._count_heartbeats_during_acquires(limiter, 4)
 
-        start = time.time()
-        for _ in range(5):
-            await limiter.acquire()
-        elapsed = time.time() - start
+        assert elapsed >= 0.5, "限流应当真的生效"
+        # 未阻塞时心跳约 elapsed/0.01 次；阻塞实现只能跑到个位数
+        assert ticks >= (elapsed / 0.01) * 0.5, (
+            f"loop 被阻塞：{elapsed:.2f}s 内只 tick 了 {ticks} 次"
+        )
 
-        # 简单版本使用 time.sleep（同步睡眠）
-        # 理论最小时间 ~0.2s
-        min_expected = (5 - 1) / max_qps
-        assert elapsed >= min_expected * 0.8
-
-    async def test_min_interval_calculation(self):
-        """测试最小间隔计算"""
-        limiter = SimpleRateLimiter(max_qps=10.0)
-        assert limiter.min_interval == 0.1
-
-        limiter2 = SimpleRateLimiter(max_qps=100.0)
-        assert limiter2.min_interval == 0.01
-
-    async def test_no_qps_min_interval_zero(self):
-        """测试无 QPS 限制时 min_interval 为 0"""
-        limiter = SimpleRateLimiter(max_qps=None)
-        assert limiter.min_interval == 0
+    async def test_executor_reuses_core_rate_limiter(self):
+        # concurrent_executor 不应再有自己的副本
+        assert ExecutorRateLimiter is CoreRateLimiter
 
 
 class TestRateLimiterEdgeCases:
