@@ -152,6 +152,10 @@ git push origin main && git push origin vX.X.X
 
 - **ruff** 配置：`line-length=100`，`target-version="py310"`，lint 仅启用 isort（`select=["I"]`）
 - ruff 不做风格检查（无 E/W/F 规则），主要职责是 import 排序和代码格式化
+- **ruff 版本在两处钉死，升级时必须同步改**：`pyproject.toml` 的 dev/test extra
+  (`ruff==x.y.z`) 与 `.pre-commit-config.yaml` 的 `rev`。两者不一致时，CI 的
+  `ruff format --check` 与 pre-commit hook 会对同一份代码给出相反的格式化结果，
+  互相把代码改回去，导致既推不上去、顺从 hook 又会让 CI 挂。
 
 ## Git Hooks（pre-commit）
 
@@ -170,5 +174,9 @@ git push --no-verify
 
 ## CI/CD
 
-- **GitHub Actions 测试**（`test.yml`）：push/PR 到 main 时运行，矩阵测试 Python 3.10 + 3.12，执行 `pytest tests/unit/`
+- **GitHub Actions 测试**（`test.yml`）：push/PR 到 main 时运行，矩阵测试 Python 3.10 + 3.12。
+  先跑 `ruff check flexllm tests` + `ruff format --check flexllm tests`，再跑 `pytest tests/unit/`。
+  依赖装的是 `pip install -e ".[test]"` —— 本地能过不代表 CI 能过：本地环境往往被
+  其它包间接装了一堆 `[test]` 里没声明的依赖，会把缺失掩盖掉。测试新增依赖时，
+  务必确认它在 `[test]` extra 里声明了。
 - **GitHub Actions 发版**（`gh-release.yml`）：推送 `v*` tag 时触发，使用 git-cliff 生成 changelog 并创建 GitHub Release

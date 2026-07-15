@@ -1,5 +1,7 @@
 repos:
   # Ruff: 替代 black + isort + flake8
+  # rev 必须与 pyproject.toml 里钉的 ruff 版本一致：CI 直接跑 ruff format --check，
+  # 版本不同会与本 hook 的格式化结果相反，互相把代码改回去。
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.9.7
     hooks:

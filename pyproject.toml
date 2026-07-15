@@ -77,7 +77,9 @@ all = [
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.20.0",
-    "ruff>=0.8.0",
+    # ruff 钉死：格式化结果随版本变化，宽松约束会让 CI/hook/本地各装一个版本、
+    # 互相把代码改回去。升级时需与 .pre-commit-config.yaml 的 rev 一起改。
+    "ruff==0.9.7",
     "pre-commit>=3.7.0",
 ]
 test = [
@@ -88,8 +90,12 @@ test = [
     "opencv-python",
     "flaxkv2>=0.2.0",
     "pyyaml>=6.0",
-    "ruff>=0.8.0",
-    # tests/unit/test_cli_*.py 会加载 CLI 并断言 typer.Exit 的退出码
+    # 同 dev：需与 .pre-commit-config.yaml 的 rev 保持一致
+    "ruff==0.9.7",
+    # tests/unit/test_cli_*.py 会加载 CLI 并断言 typer.Exit 的退出码。
+    # 此处刻意保持宽松：typer 是库的运行时依赖，钉死会给下游造成依赖冲突；
+    # 让 CI 装最新版才能及早发现上游行为变更（如 0.26 把 click vendor 进
+    # typer._click 并移除外部 click 依赖）。代码只用公开 API typer.Exit。
     "typer>=0.9.0",
 ]
 
