@@ -57,28 +57,28 @@ class TestCliError:
         )
         # 无法简单 mock isatty，改用 capsys 捕获
         # 直接测试退出码
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit) as exc_info:
             cli_error(ErrorType.INVALID_ARGS, "测试错误")
         assert exc_info.value.exit_code == ExitCode.USAGE
 
     def test_exit_code_not_found(self):
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit) as exc_info:
             cli_error(ErrorType.NOT_FOUND, "资源未找到")
         assert exc_info.value.exit_code == ExitCode.NOT_FOUND
 
     def test_exit_code_auth(self):
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit) as exc_info:
             cli_error(ErrorType.AUTH_FAILED, "认证失败")
         assert exc_info.value.exit_code == ExitCode.AUTH
 
     def test_exit_code_network(self):
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit) as exc_info:
             cli_error(ErrorType.NETWORK_ERROR, "连接失败")
@@ -92,7 +92,7 @@ class TestCliError:
         fake_stderr.isatty = lambda: False
         monkeypatch.setattr("sys.stderr", fake_stderr)
 
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit):
             cli_error(ErrorType.INVALID_ARGS, "测试错误", suggestion="修复建议", retryable=True)
@@ -112,7 +112,7 @@ class TestCliError:
         fake_stderr.isatty = lambda: False
         monkeypatch.setattr("sys.stderr", fake_stderr)
 
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit):
             cli_error(
@@ -144,7 +144,7 @@ class TestCliError:
         fake_stderr.isatty = lambda: False
         monkeypatch.setattr("sys.stderr", fake_stderr)
 
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit):
             cli_error(
@@ -166,7 +166,7 @@ class TestCliError:
         fake_stderr.isatty = lambda: False
         monkeypatch.setattr("sys.stderr", fake_stderr)
 
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit):
             cli_error(ErrorType.GENERAL, "一般错误")
@@ -204,7 +204,7 @@ class TestCliError:
         fake = FakeTTY(capsys)
         monkeypatch.setattr(_sys, "stderr", fake)
 
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit):
             cli_error(
@@ -225,7 +225,7 @@ class TestCliError:
 
 class TestDryRunOutput:
     def test_json_output(self, capsys):
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit) as exc_info:
             dry_run_output({"action": "test", "model": "gpt-4"})
@@ -237,7 +237,7 @@ class TestDryRunOutput:
         assert data["model"] == "gpt-4"
 
     def test_chinese_chars(self, capsys):
-        from click.exceptions import Exit
+        from typer import Exit
 
         with pytest.raises(Exit):
             dry_run_output({"action": "ask", "message": "你好世界"})

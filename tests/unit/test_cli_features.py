@@ -4,7 +4,7 @@ import json
 import os
 import tempfile
 
-import click.exceptions
+import typer
 
 from flexllm.cli.utils import extract_code_block, parse_schema, read_file_contents
 
@@ -55,14 +55,14 @@ class TestParseSchema:
         try:
             parse_schema("@nonexistent_file.json")
             assert False, "Should have raised Exit"
-        except click.exceptions.Exit:
+        except typer.Exit:
             pass
 
     def test_invalid_json(self):
         try:
             parse_schema("{invalid json}")
             assert False, "Should have raised Exit"
-        except click.exceptions.Exit:
+        except typer.Exit:
             pass
 
 
@@ -128,5 +128,5 @@ class TestReadFileContents:
         try:
             read_file_contents(["nonexistent_file.txt"])
             assert False, "Should have raised Exit"
-        except click.exceptions.Exit:
+        except typer.Exit:
             pass
