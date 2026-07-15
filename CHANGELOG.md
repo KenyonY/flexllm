@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.13.0] - 2026-07-15
+
+### Bug Fixes
+
+- **test**: 测试改用 typer.Exit，修复 CI 自 v0.12.0 起的红灯
+- **async**: RateLimiter 去重，修复阻塞 event loop 与缺锁竞争
+- **metrics**: 延迟按归因拆分，分位数只统计成功请求
+
+### Features
+
+- **proxy**: 支持 per-client / per-endpoint HTTP 正向代理
+
+### Miscellaneous
+
+- Bump version to 0.13.0
+
+### Build
+
+- Pre-commit 的 ruff 由 v0.8.6 跟进到 v0.9.7
+
 ## [0.12.0] - 2026-06-25
 
 ### Features
