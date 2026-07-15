@@ -67,6 +67,9 @@ class EndpointConfig:
     # endpoint 级别的 rate limit 配置（None 表示使用全局配置）
     concurrency_limit: int = None
     max_qps: int = None
+    # endpoint 级别的正向代理（None 表示使用 pool 顶层 proxy）
+    # 用于部分 endpoint 需经网关、部分直连的场景——这是环境变量做不到的
+    proxy: str = None
     # 其他 LLMClient 参数
     extra: dict[str, Any] = None
 
@@ -110,6 +113,7 @@ class LLMClientPool:
         retry_times: int = None,
         cache_image: bool = False,
         cache_dir: str = "image_cache",
+        proxy: str | None = None,
         # Gemini/Vertex AI 专用
         use_vertex_ai: bool = False,
         project_id: str = None,
@@ -145,6 +149,10 @@ class LLMClientPool:
                 fallback=False 时为单 client 重试次数，默认为 3
             cache_image: 是否缓存图片
             cache_dir: 图片缓存目录
+            proxy: 正向代理 URL（http://gateway:8080，支持 http://user:pass@host:port）。
+                多 endpoint 模式下为各 endpoint 的默认值，可被 EndpointConfig.proxy 覆盖，
+                从而做到"部分 endpoint 经网关、部分直连"——这是进程级环境变量做不到的。
+                仅支持 http(s)://，不支持 SOCKS（aiohttp 限制）。
             use_vertex_ai: 是否使用 Vertex AI（仅 Gemini）
             project_id: GCP 项目 ID（仅 Vertex AI）
             location: GCP 区域（仅 Vertex AI）
@@ -203,6 +211,7 @@ class LLMClientPool:
                 retry_times=retry_times if retry_times is not None else 3,
                 cache_image=cache_image,
                 cache_dir=cache_dir,
+                proxy=proxy,
                 use_vertex_ai=use_vertex_ai,
                 project_id=project_id,
                 location=location,
@@ -230,6 +239,7 @@ class LLMClientPool:
                 retry_times=retry_times,
                 cache_image=cache_image,
                 cache_dir=cache_dir,
+                proxy=proxy,
                 cache=cache,
                 **kwargs,
             )
@@ -292,6 +302,10 @@ class LLMClientPool:
         }
         if "provider" in model_config:
             init_kwargs["provider"] = model_config["provider"]
+        # 每个模型可单独配代理：CLI 走 from_config，没有这条就只能靠进程级环境变量，
+        # 而"仅此 endpoint 需经网关"正是环境变量表达不了的场景
+        if "proxy" in model_config:
+            init_kwargs["proxy"] = model_config["proxy"]
 
         # overrides 覆盖配置值
         init_kwargs.update(overrides)
@@ -433,6 +447,7 @@ class LLMClientPool:
         retry_times: int,
         cache_image: bool,
         cache_dir: str,
+        proxy: str | None,
         use_vertex_ai: bool,
         project_id: str,
         location: str,
@@ -468,6 +483,7 @@ class LLMClientPool:
             retry_times=retry_times,
             cache_image=cache_image,
             cache_dir=cache_dir,
+            proxy=proxy,
             use_vertex_ai=use_vertex_ai,
             project_id=project_id,
             location=location,
@@ -490,6 +506,7 @@ class LLMClientPool:
         retry_times: int,
         cache_image: bool,
         cache_dir: str,
+        proxy: str | None,
         cache: ResponseCacheConfig,
         **kwargs,
     ):
@@ -552,6 +569,8 @@ class LLMClientPool:
                     ep.concurrency_limit if ep.concurrency_limit is not None else concurrency_limit
                 )
                 ep_max_qps = ep.max_qps if ep.max_qps is not None else max_qps
+                # endpoint 级 proxy 覆盖 pool 顶层默认
+                ep_proxy = ep.proxy if ep.proxy is not None else proxy
 
                 # 自动推断 provider
                 provider = ep.provider
@@ -570,6 +589,7 @@ class LLMClientPool:
                     "retry_times": effective_retry_times,
                     "cache_image": cache_image,
                     "cache_dir": cache_dir,
+                    "proxy": ep_proxy,
                     "cache": cache,
                     **kwargs,
                     **(ep.extra or {}),

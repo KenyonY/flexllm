@@ -453,7 +453,11 @@ class ClaudeClient(LLMClientBase):
 
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
-                effective_url, json=body, headers=headers, timeout=aio_timeout
+                effective_url,
+                json=body,
+                headers=headers,
+                timeout=aio_timeout,
+                proxy=self._proxy,
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()

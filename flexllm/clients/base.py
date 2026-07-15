@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Union
 
 logger = logging.getLogger(__name__)
 
-from ..async_api import ConcurrentRequester
+from ..async_api import ConcurrentRequester, validate_proxy
 from ..async_api.progress import ProgressBarConfig
 from ..cache import ResponseCache, ResponseCacheConfig
 from ..msg_processors.image_processor import ImageCacheConfig
@@ -99,6 +99,7 @@ class LLMClientBase(ABC):
         cache_dir: str = "image_cache",
         cache: bool | ResponseCacheConfig | None = None,
         cost_tracker: bool | CostTrackerConfig | None = None,
+        proxy: str | None = None,
         **kwargs,
     ):
         """
@@ -113,6 +114,10 @@ class LLMClientBase(ABC):
             retry_delay: 重试延迟（秒）
             cache_image: 是否缓存图片
             cache_dir: 图片缓存目录
+            proxy: 正向代理 URL，形如 http://gateway:8080 或
+                   http://user:pass@gateway:8080（仅支持 http(s)://，不支持 SOCKS）。
+                   用于目标 base_url 仅经某网关可达的场景。不传时仍会沿用
+                   HTTP_PROXY/HTTPS_PROXY/NO_PROXY 环境变量（trust_env=True）。
             cache: 响应缓存配置
                    - True: 启用缓存（默认 24小时 TTL）
                    - False/None: 禁用缓存（默认）
@@ -127,6 +132,7 @@ class LLMClientBase(ABC):
         self._model = model
         self._concurrency_limit = concurrency_limit
         self._timeout = timeout
+        self._proxy = validate_proxy(proxy)
 
         self._client = ConcurrentRequester(
             concurrency_limit=concurrency_limit,
@@ -134,6 +140,7 @@ class LLMClientBase(ABC):
             timeout=timeout,
             retry_times=retry_times,
             retry_delay=retry_delay,
+            proxy=proxy,
         )
 
         self._cache_config = ImageCacheConfig(
@@ -1052,7 +1059,11 @@ class LLMClientBase(ABC):
 
         async with aiohttp.ClientSession(trust_env=True) as session:
             async with session.post(
-                effective_url, json=body, headers=headers, timeout=aio_timeout
+                effective_url,
+                json=body,
+                headers=headers,
+                timeout=aio_timeout,
+                proxy=self._proxy,
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()

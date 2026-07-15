@@ -735,3 +735,68 @@ flexllm batch input.jsonl -o output.jsonl
 - 其他: qwen, yi, llama 等主流模型
 
 未在定价表中的模型会使用默认估算价格。
+
+## 正向代理
+
+目标 `base_url` 仅经某网关可达时（例如网关常驻 VPN），可显式指定正向代理。
+
+不设 `proxy` 时，仍会沿用 `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` 环境变量
+（底层 `trust_env=True`）。`proxy` 参数解决的是环境变量表达不了的场景：
+**按 client / 按 endpoint 分别决定走不走代理**。
+
+```python
+from flexllm import LLMClient
+
+# 单 endpoint
+client = LLMClient(
+    base_url="https://api.example.com/v1",
+    api_key="sk-xxx",
+    proxy="http://gateway:8080",
+)
+
+# 带认证（凭据由 aiohttp 从 URL 中提取，转为 Proxy-Authorization 头）
+client = LLMClient(base_url="...", proxy="http://user:pass@gateway:8080")
+
+# 多 endpoint：部分直连、部分经网关
+client = LLMClient(
+    endpoints=[
+        {"base_url": "http://local-vllm:8000/v1"},                           # 直连
+        {"base_url": "https://vpn-only/v1", "proxy": "http://gateway:8080"}, # 经网关
+    ],
+)
+
+# 顶层 proxy 作为各 endpoint 的默认值，endpoint 级可覆盖
+client = LLMClient(
+    endpoints=[
+        {"base_url": "https://a/v1"},                                  # 用 gw:8080
+        {"base_url": "https://b/v1", "proxy": "http://gw2:9090"},      # 用 gw2:9090
+    ],
+    proxy="http://gw:8080",
+)
+```
+
+配置文件中可为每个模型单独指定（`flexllm ask/batch` 等 CLI 命令走此路径）：
+
+```yaml
+models:
+  - name: vpn-only-model
+    base_url: https://vpn-only/v1
+    api_key: sk-xxx
+    proxy: http://gateway:8080
+```
+
+### 仅支持 HTTP(S) 代理
+
+`proxy` 只接受 `http://` 与 `https://`，传 `socks5://` 会在构造时直接报错：
+
+```python
+LLMClient(base_url="...", proxy="socks5://gw:1080")
+# ValueError: 不支持的代理 scheme: 'socks5://gw:1080'。仅支持 http:// 与 https://
+```
+
+原因是 aiohttp 不支持 SOCKS，且**不校验 scheme**——给它 `socks5://` 它会照样往该
+端口发 HTTP `CONNECT`，在 SOCKS 服务端上表现为难以定位的连接错误。与其让它在运行时
+以令人困惑的方式失败，不如构造时就拒绝。若确需 SOCKS，可用 `ssh -L` 在本地转成
+HTTP 端口，或在网关上跑 squid / tinyproxy。
+
+代理对流式（`chat_completions_stream`）与非流式请求同样生效。

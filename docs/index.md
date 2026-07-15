@@ -10,7 +10,7 @@ docs/
 ├── agent.md              # Agent 模块（v0.6.0 新增）
 ├── agent-architecture.md # Agent 架构文档（开发者向）
 ├── api.md                # API 详细参考
-├── advanced.md           # 高级用法
+├── advanced.md           # 高级用法（多模态/成本/正向代理等）
 ├── roadmap.md            # 开发路线图
 └── plans/                # 实现计划
 ```

@@ -6,4 +6,4 @@ from .concurrent_executor import (
     TaskContext,
     TaskItem,
 )
-from .core import ConcurrentRequester
+from .core import ConcurrentRequester, validate_proxy

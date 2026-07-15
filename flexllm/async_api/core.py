@@ -23,6 +23,24 @@ class StreamingResult:
     is_final: bool
 
 
+def validate_proxy(proxy: str | None) -> str | None:
+    """校验正向代理 URL，仅接受 http(s)://
+
+    aiohttp 不支持 SOCKS，且不校验 scheme：传 socks5:// 它会照样往该端口发
+    HTTP CONNECT，在 SOCKS 服务端上表现为莫名其妙的连接错误。与其让它在运行时
+    以难以定位的方式失败，不如构造时就报错。
+    """
+    if proxy is None:
+        return None
+    scheme = proxy.split("://", 1)[0].lower() if "://" in proxy else ""
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"不支持的代理 scheme: {proxy!r}。仅支持 http:// 与 https:// "
+            f"（aiohttp 不支持 SOCKS）。带认证用 http://user:pass@host:port。"
+        )
+    return proxy
+
+
 class RateLimiter:
     """
     速率限制器
@@ -138,8 +156,10 @@ class ConcurrentRequester:
         timeout: float | None = None,
         retry_times: int = 3,
         retry_delay: float = 0.3,
+        proxy: str | None = None,
     ):
         self._concurrency_limit = concurrency_limit
+        self._proxy = validate_proxy(proxy)
         if timeout:
             self._timeout = ClientTimeout(total=timeout, connect=min(10.0, timeout))
         else:
@@ -274,6 +294,9 @@ class ConcurrentRequester:
             return response, data
 
     async def make_requests(self, session: ClientSession, method: str, url: str, **kwargs):
+        if self._proxy:
+            # setdefault：per-request 显式传入的 proxy 优先于客户端级配置
+            kwargs.setdefault("proxy", self._proxy)
         return await async_retry(self.retry_times, self.retry_delay)(self._make_requests)(
             session, method, url, **kwargs
         )
