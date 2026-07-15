@@ -277,7 +277,7 @@ class ConcurrentExecutor:
                 try:
                     await self._rate_limiter.acquire()
 
-                    start_time = time.time()
+                    start_time = time.perf_counter()
 
                     # 创建任务上下文
                     task_context = TaskContext(
@@ -304,7 +304,7 @@ class ConcurrentExecutor:
                             async_func, task_context, executor_kwargs
                         )
 
-                    latency = time.time() - start_time
+                    latency = time.perf_counter() - start_time
 
                     return ExecutionResult(
                         task_id=task_id,
@@ -334,7 +334,7 @@ class ConcurrentExecutor:
                 data=None,
                 status="error",
                 meta=meta,
-                latency=time.time() - start_time if "start_time" in locals() else 0,
+                latency=time.perf_counter() - start_time if "start_time" in locals() else 0,
                 error=last_error,
                 retry_count=retry_count - 1,
             )
@@ -439,7 +439,6 @@ class ConcurrentExecutor:
         if show_progress and total_tasks is not None:
             progress = ProgressTracker(
                 total_tasks,
-                concurrency=self._concurrency_limit,
                 config=ProgressBarConfig(),
             )
 
@@ -475,7 +474,6 @@ class ConcurrentExecutor:
         if show_progress and total_tasks is not None:
             progress = ProgressTracker(
                 total_tasks,
-                concurrency=self._concurrency_limit,
                 config=ProgressBarConfig(),
             )
 
@@ -606,7 +604,6 @@ class ConcurrentExecutor:
         if show_progress:
             progress = ProgressTracker(
                 len(priority_tasks),
-                concurrency=self._concurrency_limit,
                 config=ProgressBarConfig(),
             )
 
@@ -714,7 +711,6 @@ class ConcurrentExecutor:
         if show_progress and total_tasks is not None:
             progress = ProgressTracker(
                 total_tasks,
-                concurrency=self._concurrency_limit,
                 config=ProgressBarConfig(),
             )
 

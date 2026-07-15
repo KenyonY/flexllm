@@ -925,7 +925,7 @@ class LLMClientPool:
         n = len(messages_list)
         results = [None] * n
         cached_count = 0
-        start_time = time.time()
+        start_time = time.perf_counter()
 
         # per-record 生成参数（剥除消息构造类键），用于覆盖 kwargs 与缓存键
         gen_params_list = build_gen_params_list(params_list)
@@ -1043,7 +1043,6 @@ class LLMClientPool:
         tracker = (
             ProgressTracker(
                 total_requests=pending_count,
-                concurrency=total_concurrency,
                 config=progress_config,
                 model_name=first_model if track_cost else None,
                 input_price_per_1m=input_price,
@@ -1108,7 +1107,7 @@ class LLMClientPool:
                     await asyncio.sleep(0.01)
                     continue
 
-                task_start = time.time()
+                task_start = time.perf_counter()
                 try:
                     if tracker:
                         retry_callback.set(tracker.increment_retry)
@@ -1131,7 +1130,7 @@ class LLMClientPool:
                         error_msg = f"{error_type}: {error_detail}" if error_detail else error_type
                         raise RuntimeError(error_msg)
 
-                    latency = time.time() - task_start
+                    latency = time.perf_counter() - task_start
                     results[idx] = result
                     self._router.mark_success(provider)
 
@@ -1171,7 +1170,7 @@ class LLMClientPool:
                         writer.write_result(idx, output_content, usage=output_usage)
 
                 except Exception as e:
-                    latency = time.time() - task_start
+                    latency = time.perf_counter() - task_start
                     self._router.mark_failed(provider)
 
                     tried_endpoints = tried_endpoints | {my_endpoint}
@@ -1216,7 +1215,7 @@ class LLMClientPool:
                 "success": (tracker.success_count if tracker else 0) + total_cached,
                 "failed": tracker.error_count if tracker else 0,
                 "cached": total_cached,
-                "elapsed": time.time() - start_time,
+                "elapsed": time.perf_counter() - start_time,
             }
             return results, summary
 
@@ -1477,7 +1476,7 @@ class LLMClientPool:
                     await asyncio.sleep(0.01)
                     continue
 
-                task_start = time.time()
+                task_start = time.perf_counter()
                 try:
                     result = await client.chat_completions(
                         messages=msg,
@@ -1493,7 +1492,7 @@ class LLMClientPool:
                             error_detail = result.data.get("error", "unknown")
                         raise RuntimeError(error_detail or "unknown error")
 
-                    latency = time.time() - task_start
+                    latency = time.perf_counter() - task_start
                     self._router.mark_success(provider)
 
                     # 提取 content
@@ -1520,7 +1519,7 @@ class LLMClientPool:
                         active_tasks -= 1
 
                 except Exception as e:
-                    latency = time.time() - task_start
+                    latency = time.perf_counter() - task_start
                     self._router.mark_failed(provider)
                     tried = tried | {my_endpoint}
 
@@ -1554,7 +1553,7 @@ class LLMClientPool:
         # 边完成边 yield
         yielded = 0
         success_count = 0
-        start_time = time.time()
+        start_time = time.perf_counter()
         total_latency = 0.0
 
         try:
@@ -1573,7 +1572,7 @@ class LLMClientPool:
 
                 # 最后一条附带 summary
                 if yielded == total_pending:
-                    elapsed = time.time() - start_time
+                    elapsed = time.perf_counter() - start_time
                     result.summary = {
                         "total": n,
                         "success": success_count,

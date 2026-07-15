@@ -286,12 +286,18 @@ class ConcurrentRequester:
         **kwargs,
     ) -> RequestResult:
         """发送单个请求"""
-        start_time = time.time()  # 在 semaphore 外计时，包含等待时间
+        # 端到端计时起点：在 semaphore 外，包含排队等待
+        t_enqueue = time.perf_counter()
+        queue_time = 0.0
         async with self._get_semaphore():
             try:
                 await self._rate_limiter.acquire()
+                # 排队结束：semaphore 与漏桶均已放行，此后的耗时归因于服务。
+                # 漏桶只在这里 acquire 一次（retry 循环在 make_requests 内部），
+                # 所以 queue_time 是一次性的，重试不会再次穿过漏桶。
+                queue_time = time.perf_counter() - t_enqueue
                 response, data = await self.make_requests(session, method, url, **kwargs)
-                latency = time.time() - start_time
+                latency = time.perf_counter() - t_enqueue
 
                 if response.status != 200:
                     error_info = {
@@ -305,10 +311,16 @@ class ConcurrentRequester:
                         status="error",
                         meta=meta,
                         latency=latency,
+                        queue_time=queue_time,
                     )
 
                 return RequestResult(
-                    request_id=request_id, data=data, status="success", meta=meta, latency=latency
+                    request_id=request_id,
+                    data=data,
+                    status="success",
+                    meta=meta,
+                    latency=latency,
+                    queue_time=queue_time,
                 )
 
             except asyncio.TimeoutError as e:
@@ -317,7 +329,8 @@ class ConcurrentRequester:
                     data={"error": "Timeout error", "detail": str(e)},
                     status="error",
                     meta=meta,
-                    latency=time.time() - start_time,
+                    latency=time.perf_counter() - t_enqueue,
+                    queue_time=queue_time,
                 )
             except Exception as e:
                 return RequestResult(
@@ -325,7 +338,8 @@ class ConcurrentRequester:
                     data={"error": e.__class__.__name__, "detail": str(e)},
                     status="error",
                     meta=meta,
-                    latency=time.time() - start_time,
+                    latency=time.perf_counter() - t_enqueue,
+                    queue_time=queue_time,
                 )
 
     async def process_with_concurrency_window(
@@ -441,7 +455,6 @@ class ConcurrentRequester:
             config = progress_config or ProgressBarConfig()
             progress = ProgressTracker(
                 total_requests,
-                concurrency=self._concurrency_limit,
                 config=config,
                 model_name=model_name,
                 input_price_per_1m=input_price_per_1m,
@@ -529,9 +542,7 @@ class ConcurrentRequester:
 
         if show_progress and total_requests is not None:
             config = progress_config or ProgressBarConfig()
-            progress = ProgressTracker(
-                total_requests, concurrency=self._concurrency_limit, config=config
-            )
+            progress = ProgressTracker(total_requests, config=config)
 
         results = []
         async with self._get_session() as session:

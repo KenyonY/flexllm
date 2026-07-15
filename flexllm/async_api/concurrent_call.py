@@ -79,9 +79,7 @@ async def concurrent_executor(
 
     progress = None
     if show_progress:
-        progress = ProgressTracker(
-            total_tasks, concurrency=concurrency_limit, config=ProgressBarConfig()
-        )
+        progress = ProgressTracker(total_tasks, config=ProgressBarConfig())
 
     # 创建任务列表
     tasks = [asyncio.create_task(wrapped_func(arg, i)) for i, arg in enumerate(normalized_args)]

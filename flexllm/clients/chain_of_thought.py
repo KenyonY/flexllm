@@ -80,7 +80,7 @@ class ChainProgressTracker:
                 latency: float = 0.0
 
             self.ChainResult = ChainResult
-            self.tracker = ProgressTracker(total_chains, concurrency=1, config=self.config)
+            self.tracker = ProgressTracker(total_chains, config=self.config)
         else:
             self.tracker = None
 

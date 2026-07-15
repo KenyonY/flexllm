@@ -1,7 +1,5 @@
-import statistics
 import sys
 import time
-from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
@@ -39,7 +37,6 @@ class ProgressTracker:
     def __init__(
         self,
         total_requests: int,
-        concurrency=1,
         config: ProgressBarConfig | None = None,
         model_name: str | None = None,
         input_price_per_1m: float | None = None,
@@ -47,25 +44,25 @@ class ProgressTracker:
     ):
         self.console = Console(file=sys.stderr)
 
-        # 统计信息
+        self.total_requests = total_requests
+        self.config = config or ProgressBarConfig()
+        self.completed_requests = 0
+
+        # 统计信息。latencies / queue_times 只收集成功请求，两者按下标一一对应：
+        # 失败请求的 latency 是 timeout 全时长或报错耗时，与"服务多快"无关，
+        # 混进来会让分位数被 timeout 常数支配（默认 timeout=60s 时 p95 直接等于 60）。
         self.success_count = 0
         self.error_count = 0
         self.latencies: list[float] = []
-        self.errors: dict[str, int] = defaultdict(int)  # 统计不同类型的错误
-
-        self.total_requests = total_requests
-        self.concurrency = concurrency
-        self.config = config or ProgressBarConfig()
-        self.completed_requests = 0
-        self.success_count = 0
-        self.error_count = 0
+        self.queue_times: list[float] = []
+        # running sum，让进度条每次刷新算 avg 是 O(1)（分位数才需要整表排序）
+        self._latency_sum = 0.0
+        self._queue_sum = 0.0
+        self.errors: dict[str, int] = {}  # 统计不同类型的错误
         self.retry_count = 0  # fallback 重试次数
         self._seen_error_types: set[str] = set()  # 已打印过的错误类型
-        self.start_time = time.time()
-        self.latencies = []
-        self.errors = {}
-        self.last_speed_update = time.time()
-        self.recent_latencies = []  # 用于计算实时速度
+        # 计时一律用 perf_counter：time.time() 是墙钟，NTP 校时会跳
+        self.start_time = time.perf_counter()
 
         # 成本追踪
         self.total_cost = 0.0
@@ -165,10 +162,33 @@ class ProgressTracker:
 
     def _calculate_speed(self) -> float:
         """计算实际吞吐量（已完成请求数 / 已用时间）"""
-        elapsed = time.time() - self.start_time
+        elapsed = time.perf_counter() - self.start_time
         if elapsed <= 0:
             return 0
         return self.completed_requests / elapsed
+
+    def _estimate_eta(self, speed: float) -> float:
+        """剩余时间 = 剩余请求数 / 实测吞吐量
+
+        不要用 avg_latency * remaining / concurrency：avg_latency 含排队时间，
+        而排队时间本身就随并发上升，再除以 concurrency 只是让两个错误互相抵消。
+        实测吞吐量已经包含了限流、重试、失败的全部影响，直接用即可。
+        """
+        remaining = self.total_requests - self.completed_requests
+        return remaining / speed if speed > 0 else 0
+
+    def _avg_service_time(self) -> float:
+        """平均服务延迟（成功请求）= 平均端到端 - 平均排队"""
+        if not self.success_count:
+            return 0.0
+        return (self._latency_sum - self._queue_sum) / self.success_count
+
+    @staticmethod
+    def _percentile(sorted_values: list[float], q: float) -> float:
+        """取分位数（下标法）。空列表返回 0，下标越界钳到末位。"""
+        if not sorted_values:
+            return 0.0
+        return sorted_values[min(int(len(sorted_values) * q), len(sorted_values) - 1)]
 
     @staticmethod
     def _format_tokens(tokens: int) -> str:
@@ -184,12 +204,9 @@ class ProgressTracker:
 
         格式: [10%] 100/1000, 2.3 req/s, elapsed: 43s, eta: 6m
         """
-        now = time.time()
-        elapsed = now - self.start_time
+        elapsed = time.perf_counter() - self.start_time
         speed = self._calculate_speed()
-        avg_latency = statistics.mean(self.latencies) if self.latencies else 0
-        remaining_requests = self.total_requests - self.completed_requests
-        eta = avg_latency * remaining_requests / self.concurrency if avg_latency > 0 else 0
+        eta = self._estimate_eta(speed)
 
         # 构建输出
         parts = [
@@ -262,7 +279,7 @@ class ProgressTracker:
                     self._print_milestone(milestone)
             return
 
-        now = time.time()
+        now = time.perf_counter()
         # 节流：距离上次刷新不足间隔则跳过（除非强制刷新）
         if not force and self.completed_requests < self.total_requests:
             if now - self._last_refresh_time < self._min_refresh_interval:
@@ -272,13 +289,12 @@ class ProgressTracker:
         total_time = now - self.start_time
         progress = self.completed_requests / self.total_requests
 
-        # 计算统计信息
+        # 计算统计信息。avg 显示服务延迟而非端到端：排队时间由 max_qps/并发决定，
+        # 属于用户自己的配置，混进 avg 会让"调低 max_qps"看起来像"服务变慢"。
+        # 端到端的节奏由紧邻的 eta 表达。
         speed = self._calculate_speed()
-        avg_latency = statistics.mean(self.latencies) if self.latencies else 0
-        remaining_requests = self.total_requests - self.completed_requests
-        estimated_remaining_time = (
-            avg_latency * remaining_requests / self.concurrency if avg_latency > 0 else 0
-        )
+        avg_latency = self._avg_service_time()
+        estimated_remaining_time = self._estimate_eta(speed)
 
         # 创建进度条
         style = self.config.style.value
@@ -379,15 +395,13 @@ class ProgressTracker:
             result: 请求结果
         """
         self.completed_requests += 1
-        self.latencies.append(result.latency)
-        self.recent_latencies.append(result.latency)
-
-        # 只保留最近的30个请求用于计算速度
-        if len(self.recent_latencies) > 30:
-            self.recent_latencies.pop(0)
 
         if result.status == "success":
             self.success_count += 1
+            self.latencies.append(result.latency)
+            self.queue_times.append(result.queue_time)
+            self._latency_sum += result.latency
+            self._queue_sum += result.queue_time
         else:
             self.error_count += 1
             # 安全地获取错误类型和详情，处理 result.data 为 None 的情况
@@ -418,27 +432,60 @@ class ProgressTracker:
         force = self.completed_requests >= self.total_requests
         self._refresh_progress_bar(force=force)
 
+    # 排队占端到端低于此比例时，不单独列出排队/服务的拆分（三行退化为一行）
+    _QUEUE_DISPLAY_THRESHOLD = 0.05
+
     def summary(self, show_p999=False, print_to_console=True) -> str:
-        """打印请求汇总信息"""
-        total_time = time.time() - self.start_time
-        avg_latency = sum(self.latencies) / len(self.latencies) if self.latencies else 0
+        """打印请求汇总信息
+
+        Args:
+            show_p999: 额外显示 P995 / P999 尾部分位数
+            print_to_console: 是否打印到 stderr
+
+        分位数只统计成功请求（见 __init__ 中 latencies 的说明）。延迟按归因拆成
+        "服务延迟"与"排队等待"：后者是 max_qps / 并发上限造成的客户端自身等待，
+        调低 max_qps 会让它上升，但那不是服务变慢。仅在排队占比显著时才拆开显示。
+        """
+        total_time = time.perf_counter() - self.start_time
         throughput = self.success_count / total_time if total_time > 0 else 0
+        success_rate = self.success_count / self.total_requests * 100 if self.total_requests else 0
 
-        # 计算延迟分位数
-        sorted_latencies = sorted(self.latencies)
-        p50 = p95 = p99 = 0
-        if sorted_latencies:
-            p50 = sorted_latencies[int(len(sorted_latencies) * 0.5)]
-            p95 = sorted_latencies[int(len(sorted_latencies) * 0.95)]
-            p99 = sorted_latencies[int(len(sorted_latencies) * 0.99)]
-            p995 = sorted_latencies[int(len(sorted_latencies) * 0.995)]
-            p999 = sorted_latencies[int(len(sorted_latencies) * 0.999)]
+        avg_e2e = self._latency_sum / self.success_count if self.success_count else 0
+        avg_service = self._avg_service_time()
+        queue_share = self._queue_sum / self._latency_sum if self._latency_sum > 0 else 0
 
-        p99_str = f"> - P99 延迟: {p99:.2f} 秒"
-        p999_str = f"""> - P99 延迟: {p99:.2f} 秒
-> - P995 延迟: {p995:.2f} 秒
-> - P999 延迟: {p999:.2f} 秒"""
-        p99_or_p999_str = p999_str if show_p999 else p99_str
+        sorted_e2e = sorted(self.latencies)
+        sorted_queue = sorted(self.queue_times)
+        # 先逐条相减再排序：服务延迟是 per-request 的量，不能拿两条已排序的序列相减
+        sorted_service = sorted(lat - q for lat, q in zip(self.latencies, self.queue_times))
+
+        quantiles = [("P50", 0.5), ("P95", 0.95), ("P99", 0.99)]
+        if show_p999:
+            quantiles += [("P995", 0.995), ("P999", 0.999)]
+        names = "/".join(name for name, _ in quantiles)
+
+        def row(label: str, sorted_vals: list[float], note: str) -> str:
+            vals = " / ".join(f"{self._percentile(sorted_vals, q):.2f}" for _, q in quantiles)
+            return f"|  - {label} {names}: {vals} 秒（{note}）"
+
+        if not self.success_count:
+            # 不要在这里印 "延迟 0.00 秒"：扫一眼会读成"极快"，而真相是无数据
+            perf_rows = ["|  - 无成功请求，无延迟数据"]
+        elif queue_share >= self._QUEUE_DISPLAY_THRESHOLD:
+            perf_rows = [
+                row("服务延迟", sorted_service, f"平均 {avg_service:.2f}"),
+                row(
+                    "排队等待",
+                    sorted_queue,
+                    f"占端到端 {queue_share * 100:.0f}%，由并发/max_qps 决定",
+                ),
+                row("端到端", sorted_e2e, f"平均 {avg_e2e:.2f}"),
+            ]
+        else:
+            perf_rows = [row("延迟", sorted_e2e, f"平均 {avg_e2e:.2f}")]
+        perf_rows.append(f"|  - 吞吐量: {throughput:.2f} 请求/秒")
+        perf_rows.append(f"|  - 总运行时间: {total_time:.2f} 秒")
+        perf_section = "\n".join(perf_rows)
 
         summary = f"""
                                    请求统计
@@ -447,15 +494,10 @@ class ProgressTracker:
 |  - 总请求数: {self.total_requests}
 |  - 成功请求数: {self.success_count}
 |  - 失败请求数: {self.error_count}
-|  - 成功率: {(self.success_count / self.total_requests * 100):.2f}%
+|  - 成功率: {success_rate:.2f}%
 
-| 性能指标
-|  - 平均延迟: {avg_latency:.2f} 秒
-|  - P50 延迟: {p50:.2f} 秒
-|  - P95 延迟: {p95:.2f} 秒
-|  - P99 延迟: {p99:.2f} 秒
-|  - 吞吐量: {throughput:.2f} 请求/秒
-|  - 总运行时间: {total_time:.2f} 秒
+| 性能指标（仅统计 {self.success_count} 个成功请求）
+{perf_section}
 
 """
         # 如果有成本信息，添加成本统计
@@ -495,7 +537,7 @@ if __name__ == "__main__":
     from .interface import RequestResult
 
     config = ProgressBarConfig()
-    tracker = ProgressTracker(100, 1, config)
+    tracker = ProgressTracker(100, config)
     for i in range(100):
         time.sleep(0.1)
         tracker.update(
