@@ -23,6 +23,15 @@ class StreamingResult:
     is_final: bool
 
 
+class RetryableHTTPError(Exception):
+    """可重试的 HTTP 错误（429 限流 / 5xx 服务端错误），携带响应体供重试耗尽后上报"""
+
+    def __init__(self, status_code: int, response_data: Any):
+        self.status_code = status_code
+        self.response_data = response_data
+        super().__init__(f"HTTP {status_code}")
+
+
 def validate_proxy(proxy: str | None) -> str | None:
     """校验正向代理 URL，仅接受 http(s)://
 
@@ -313,9 +322,28 @@ class ConcurrentRequester:
             await connector.close()
 
     @staticmethod
+    async def _read_body(response) -> Any:
+        """读取响应体，优先 JSON，失败时降级为原始文本"""
+        try:
+            return await response.json()
+        except Exception:
+            try:
+                return {"raw": await response.text()}
+            except Exception:
+                return None
+
+    @staticmethod
     async def _make_requests(session: ClientSession, method: str, url: str, **kwargs):
         async with session.request(method, url, **kwargs) as response:
-            response.raise_for_status()
+            if response.status == 429 or response.status >= 500:
+                # 限流/服务端错误：抛异常进入 async_retry 重试，携带响应体
+                raise RetryableHTTPError(
+                    response.status, await ConcurrentRequester._read_body(response)
+                )
+            if response.status >= 400:
+                # 其他 4xx（认证/参数/404 等）重试也不会成功：不重试，
+                # 保留响应体交由调用方生成错误结果
+                return response, await ConcurrentRequester._read_body(response)
             data = await response.json()
             return response, data
 
@@ -377,6 +405,20 @@ class ConcurrentRequester:
                     queue_time=queue_time,
                 )
 
+            except RetryableHTTPError as e:
+                # 重试耗尽的 429/5xx：结构与上面非 200 分支一致，保留响应体
+                return RequestResult(
+                    request_id=request_id,
+                    data={
+                        "status_code": e.status_code,
+                        "response_data": e.response_data,
+                        "error": f"HTTP {e.status_code}",
+                    },
+                    status="error",
+                    meta=meta,
+                    latency=time.perf_counter() - t_enqueue,
+                    queue_time=queue_time,
+                )
             except asyncio.TimeoutError as e:
                 return RequestResult(
                     request_id=request_id,
