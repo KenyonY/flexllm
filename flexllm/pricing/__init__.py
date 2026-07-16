@@ -96,8 +96,9 @@ def _auto_update_if_stale():
             global _pricing_cache
             _pricing_cache = _load_pricing()
             logger.debug("定价数据已自动更新 (%d 个模型)", len(pricing_map))
-    except Exception:
-        pass  # 静默失败，不影响正常使用
+    except Exception as e:
+        # 定价自动更新失败不影响正常使用，但要留下线索
+        logger.debug("定价数据自动更新失败: %s", e)
 
 
 def get_pricing() -> dict[str, dict[str, float]]:

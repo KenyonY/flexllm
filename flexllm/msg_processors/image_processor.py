@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -15,6 +16,8 @@ import requests
 from PIL import Image
 
 from ..utils.core import async_retry, safe_repr_source
+
+logger = logging.getLogger(__name__)
 
 # 兼容不同版本的PIL
 try:
@@ -479,8 +482,8 @@ async def get_pil_image(
                         # 如果请求成功，删除可能存在的错误缓存
                         if error_cache_path and error_cache_path.exists():
                             error_cache_path.unlink()
-                    except Exception:
-                        pass  # 静默忽略缓存保存失败
+                    except Exception as e:
+                        logger.debug("图片缓存保存失败: %s", e)
 
                 return (image, cache_path) if return_cache_path else image
             except Exception as e:
@@ -495,8 +498,8 @@ async def get_pil_image(
                                 "type": type(e).__name__,
                             }
                             json.dump(error_data, f)
-                    except Exception:
-                        pass  # 静默忽略缓存错误信息失败
+                    except Exception as e2:
+                        logger.debug("错误缓存写入失败: %s", e2)
                 # 重新抛出原始异常
                 raise
             finally:
@@ -610,8 +613,8 @@ def get_pil_image_sync(
                         # 如果请求成功，删除可能存在的错误缓存
                         if error_cache_path and error_cache_path.exists():
                             error_cache_path.unlink()
-                    except Exception:
-                        pass  # 静默忽略缓存保存失败
+                    except Exception as e:
+                        logger.debug("图片缓存保存失败: %s", e)
 
                 return (image, cache_path) if return_cache_path else image
             except Exception as e:
@@ -626,8 +629,8 @@ def get_pil_image_sync(
                                 "type": type(e).__name__,
                             }
                             json.dump(error_data, f)
-                    except Exception:
-                        pass  # 静默忽略缓存错误信息失败
+                    except Exception as e2:
+                        logger.debug("错误缓存写入失败: %s", e2)
                 # 重新抛出原始异常
                 raise
         else:
@@ -676,11 +679,12 @@ def save_image_with_format(image: Image.Image, path: Path):
         else:
             image.save(path, format=target_format)
     except Exception:
-        pass  # 静默忽略图片保存格式问题
-        # 如果保存失败，尝试转换为 RGB 后保存
+        # 部分模式（如 RGBA 存 JPEG）需要先转 RGB 再存；转不了则让异常暴露
         if image.mode != "RGB":
             image = image.convert("RGB")
             image.save(path, format=target_format)
+        else:
+            raise
 
 
 def get_target_size(image, max_width, max_height, max_pixels):

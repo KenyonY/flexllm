@@ -267,7 +267,7 @@ class UnifiedMemoryCache:
                 try:
                     mtime = os.path.getmtime(source)
                     key_parts.append(f"mtime:{mtime}")
-                except:
+                except OSError:
                     pass
 
             # 添加其他参数

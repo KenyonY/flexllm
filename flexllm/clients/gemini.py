@@ -361,33 +361,25 @@ class GeminiClient(LLMClientBase):
 
     def _extract_stream_content(self, data: dict) -> str | None:
         """从 Gemini 流式响应中提取文本内容（跳过 thought parts）"""
-        try:
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return None
-            content = candidates[0].get("content", {})
-            parts = content.get("parts", [])
-            for part in parts:
-                if "text" in part and not part.get("thought"):
-                    return part["text"]
+        candidates = data.get("candidates")
+        if not candidates:
             return None
-        except Exception:
-            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        for part in parts:
+            if "text" in part and not part.get("thought"):
+                return part["text"]
+        return None
 
     def _extract_stream_thinking(self, data: dict) -> str | None:
         """从 Gemini 流式响应中提取思考内容（thought: true 的 parts）"""
-        try:
-            candidates = data.get("candidates", [])
-            if not candidates:
-                return None
-            content = candidates[0].get("content", {})
-            parts = content.get("parts", [])
-            for part in parts:
-                if part.get("thought") and "text" in part:
-                    return part["text"]
+        candidates = data.get("candidates")
+        if not candidates:
             return None
-        except Exception:
-            return None
+        parts = candidates[0].get("content", {}).get("parts", [])
+        for part in parts:
+            if part.get("thought") and "text" in part:
+                return part["text"]
+        return None
 
     def _extract_stream_usage(self, data: dict) -> dict | None:
         """从 Gemini 流式 chunk 中提取 usage（usageMetadata 字段）"""

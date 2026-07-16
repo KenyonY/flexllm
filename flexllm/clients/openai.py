@@ -224,33 +224,23 @@ class OpenAIClient(LLMClientBase):
             return None
 
     def _extract_stream_content(self, data: dict) -> str | None:
-        try:
-            if "choices" in data and len(data["choices"]) > 0:
-                return data["choices"][0].get("delta", {}).get("content")
-        except Exception:
-            pass
+        choices = data.get("choices")
+        if choices:
+            return choices[0].get("delta", {}).get("content")
         return None
 
     def _extract_stream_thinking(self, data: dict) -> str | None:
-        try:
-            if "choices" in data and len(data["choices"]) > 0:
-                delta = data["choices"][0].get("delta", {})
-                return delta.get("reasoning") or delta.get("reasoning_content")
-        except Exception:
-            pass
+        choices = data.get("choices")
+        if choices:
+            delta = choices[0].get("delta", {})
+            return delta.get("reasoning") or delta.get("reasoning_content")
         return None
 
     def _extract_stream_tool_calls(self, data: dict) -> list[dict] | None:
         """从 OpenAI 流式 chunk 中提取 tool_call delta"""
-        try:
-            choices = data.get("choices", [])
-            if choices:
-                delta = choices[0].get("delta", {})
-                tool_calls = delta.get("tool_calls")
-                if tool_calls:
-                    return tool_calls
-        except Exception:
-            pass
+        choices = data.get("choices")
+        if choices:
+            return choices[0].get("delta", {}).get("tool_calls")
         return None
 
     def _extract_tool_calls(self, response_data: dict):

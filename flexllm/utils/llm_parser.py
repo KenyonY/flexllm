@@ -48,7 +48,7 @@ def parse_to_obj(text: str, strict=False):
     code_str = code_snippets[-1]
     try:
         return ast.literal_eval(code_str)
-    except:
+    except (ValueError, SyntaxError, MemoryError, RecursionError):
         return json5.loads(code_str)
 
 
