@@ -7,7 +7,7 @@ import tempfile
 import pytest
 
 from flexllm.msg_processors.image_processor import encode_media_to_base64
-from flexllm.msg_processors.messages_processor import (
+from flexllm.msg_processors.unified_processor import (
     _is_source_needs_conversion,
     process_content_recursive,
 )

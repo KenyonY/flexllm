@@ -2,7 +2,7 @@
 async_api 模块速率限制器测试
 
 RateLimiter 只有 core.py 一份实现，支持漏桶模式（默认，允许突发）与 sleep 模式
-（固定间隔）。concurrent_executor 曾另有一份副本，因漂移出 bug 已删除并统一到此。
+（固定间隔）。
 """
 
 import asyncio
@@ -10,7 +10,6 @@ import time
 
 import pytest
 
-from flexllm.async_api.concurrent_executor import RateLimiter as ExecutorRateLimiter
 from flexllm.async_api.core import RateLimiter as CoreRateLimiter
 
 
@@ -124,9 +123,8 @@ class TestCoreRateLimiter:
 class TestRateLimiterIsNonBlocking:
     """acquire() 不得阻塞 event loop
 
-    回归：concurrent_executor 曾有一份 RateLimiter 副本，在 `async def acquire()`
-    里调用同步的 `time.sleep()`，限流期间整个 loop 冻结——设了 max_qps 的
-    executor 会丧失全部并发。副本已删除，统一到 core 这份。
+    回归：曾有一份 RateLimiter 副本在 `async def acquire()` 里调用同步的
+    `time.sleep()`，限流期间整个 loop 冻结。现在只允许 core 这一份实现。
     """
 
     async def _count_heartbeats_during_acquires(self, limiter, n: int) -> tuple[float, int]:
@@ -160,10 +158,6 @@ class TestRateLimiterIsNonBlocking:
         assert ticks >= (elapsed / 0.01) * 0.5, (
             f"loop 被阻塞：{elapsed:.2f}s 内只 tick 了 {ticks} 次"
         )
-
-    async def test_executor_reuses_core_rate_limiter(self):
-        # concurrent_executor 不应再有自己的副本
-        assert ExecutorRateLimiter is CoreRateLimiter
 
 
 class TestRateLimiterEdgeCases:

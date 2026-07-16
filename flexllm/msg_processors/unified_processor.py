@@ -1271,7 +1271,7 @@ async def unified_batch_messages_preprocess(
     """
     统一的批量消息预处理函数
 
-    完全兼容messages_processor.py的API，支持本地文件和URL的高性能处理
+    支持本地文件和URL的高性能处理
 
     Args:
         messages_list: 消息列表的列表，可以是列表、迭代器或异步迭代器
