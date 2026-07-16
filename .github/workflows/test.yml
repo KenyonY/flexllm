@@ -33,3 +33,7 @@ jobs:
 
       - name: Run unit tests
         run: pytest tests/unit/ -v --tb=short
+
+      # 真实行为测试：本地 mock server，覆盖断点续传/pool 路由/缓存组合，无需 API key
+      - name: Run mock e2e tests
+        run: pytest tests/test_mock_e2e.py -v --tb=short

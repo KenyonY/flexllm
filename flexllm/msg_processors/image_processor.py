@@ -27,7 +27,7 @@ except AttributeError:
     LANCZOS = Image.ANTIALIAS
 
 # 默认的缓存目录
-DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/maque/image_cache")
+DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/flexllm/image_cache")
 
 
 @dataclass

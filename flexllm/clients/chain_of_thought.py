@@ -129,7 +129,7 @@ def setup_chain_logger():
     """设置ChainOfThoughtClient专用logger"""
     if not hasattr(setup_chain_logger, "_configured"):
         # 创建专用的logger
-        chain_logger = logging.getLogger("maque.chain")
+        chain_logger = logging.getLogger("flexllm.chain")
         chain_logger.setLevel(logging.INFO)
 
         # 创建自定义格式的handler
