@@ -441,6 +441,7 @@ class GeminiClient(LLMClientBase):
                     error_text = await response.text()
                     raise Exception(f"HTTP {response.status}: {error_text}")
 
+                _last_usage = None
                 async for line in response.content:
                     line = line.decode("utf-8").strip()
                     if line.startswith("data: "):
@@ -463,13 +464,18 @@ class GeminiClient(LLMClientBase):
                                 else:
                                     yield content
 
+                            # Gemini 每个 chunk 都带 usageMetadata（累计值），
+                            # 只记录最新值，流结束后统一 yield，保证 usage 事件唯一且在最后
                             if return_usage:
                                 usage = self._extract_stream_usage(data)
                                 if usage:
-                                    yield {"type": "usage", "usage": usage}
+                                    _last_usage = usage
 
                         except json.JSONDecodeError:
                             continue
+
+                if return_usage and _last_usage:
+                    yield {"type": "usage", "usage": _last_usage}
 
     # ========== Gemini 特有方法 ==========
 

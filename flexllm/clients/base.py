@@ -1078,6 +1078,7 @@ class LLMClientBase(ABC):
                     raise Exception(f"HTTP {response.status}: {error_text}")
 
                 _thinking_started = False
+                _last_usage = None
                 async for line in response.content:
                     line = line.decode("utf-8").strip()
                     if line.startswith("data: "):
@@ -1087,12 +1088,13 @@ class LLMClientBase(ABC):
                         try:
                             data = json.loads(data_str)
 
-                            # 检查是否包含 usage
+                            # usage 与内容可能共存于同一 chunk（OpenAI 官方只在最后的空
+                            # chunk 携带；SiliconFlow 等则每个 chunk 都带并与 content 共存），
+                            # 因此只记录最新值，流结束后统一 yield，保证 usage 事件唯一且在最后
                             if return_usage:
                                 usage = self._extract_stream_usage(data)
                                 if usage:
-                                    yield {"type": "usage", "usage": usage}
-                                    continue
+                                    _last_usage = usage
 
                             # 提取思考内容
                             thinking = self._extract_stream_thinking(data)
@@ -1127,6 +1129,9 @@ class LLMClientBase(ABC):
                                     yield content
                         except json.JSONDecodeError:
                             continue
+
+                if return_usage and _last_usage:
+                    yield {"type": "usage", "usage": _last_usage}
 
     def model_list(self) -> list[str]:
         raise NotImplementedError("子类需要实现 model_list 方法")
