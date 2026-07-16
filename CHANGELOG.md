@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.13.1] - 2026-07-16
+
+### Bug Fixes
+
+- **stream**: Usage 事件只在流结束后 yield 一次，修复 usage 与 content 共存 chunk 的内容丢失
+
+### Features
+
+- **pool**: 新增 total_concurrency_limit / total_max_qps 全局硬上限 (#4)
+
+### Miscellaneous
+
+- Bump version to 0.13.1
+
+### Build
+
+- 钉死 ruff 版本，修复 release.sh 与过时的 CI 文档
+
 ## [0.13.0] - 2026-07-15
 
 ### Bug Fixes
