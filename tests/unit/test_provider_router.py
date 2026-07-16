@@ -199,6 +199,87 @@ class TestGetAllHealthy:
         assert healthy[0].base_url == "http://api2.com/v1"
 
 
+class TestCapacityAwareRouting:
+    """测试容量感知选路（acquire/release）"""
+
+    def _make_router(self, limits: list[int | None], **kwargs) -> ProviderRouter:
+        providers = [
+            ProviderConfig(base_url=f"http://api{i}.com/v1", concurrency_limit=limit)
+            for i, limit in enumerate(limits, 1)
+        ]
+        return ProviderRouter(providers, **kwargs)
+
+    def test_acquire_increments_release_decrements(self):
+        router = self._make_router([10])
+
+        provider = router.acquire()
+        assert router.stats["providers"][0]["in_flight"] == 1
+
+        router.release(provider)
+        assert router.stats["providers"][0]["in_flight"] == 0
+
+    def test_release_floors_at_zero(self):
+        router = self._make_router([10])
+        provider = router._providers[0].config
+
+        router.release(provider)
+        assert router.stats["providers"][0]["in_flight"] == 0
+
+    def test_picks_lowest_load_ratio_with_heterogeneous_limits(self):
+        """异构限额下按比值选：limit=50 用 10 个 (20%) 应胜过 limit=5 用 3 个 (60%)"""
+        router = self._make_router([50, 5])
+        router._providers[0].in_flight = 10
+        router._providers[1].in_flight = 3
+
+        provider = router.acquire()
+        assert provider.base_url == "http://api1.com/v1"
+
+    def test_cold_start_spreads_across_endpoints(self):
+        """同构 endpoint 连续 acquire（不 release）应交替分布"""
+        router = self._make_router([10, 10])
+
+        urls = [router.acquire().base_url for _ in range(4)]
+        assert Counter(urls) == {"http://api1.com/v1": 2, "http://api2.com/v1": 2}
+
+    def test_no_limit_balances_by_absolute_count(self):
+        """无限额时按绝对 in-flight 数均衡"""
+        router = self._make_router([None, None])
+
+        urls = [router.acquire().base_url for _ in range(4)]
+        assert Counter(urls) == {"http://api1.com/v1": 2, "http://api2.com/v1": 2}
+
+    def test_all_saturated_falls_back_to_round_robin(self):
+        """全饱和时退回轮询，不返回 None（排队是正确行为）"""
+        router = self._make_router([1, 1])
+        router.acquire()
+        router.acquire()  # 两个都到达 limit
+
+        urls = {router.acquire().base_url for _ in range(2)}
+        assert urls == {"http://api1.com/v1", "http://api2.com/v1"}
+        assert all(p["in_flight"] == 2 for p in router.stats["providers"])
+
+    def test_exclude_filters_candidates(self):
+        router = self._make_router([10, 10])
+
+        provider = router.acquire(exclude={"http://api1.com/v1"})
+        assert provider.base_url == "http://api2.com/v1"
+
+    def test_all_excluded_returns_none(self):
+        router = self._make_router([10, 10])
+
+        provider = router.acquire(exclude={"http://api1.com/v1", "http://api2.com/v1"})
+        assert provider is None
+
+    def test_unhealthy_not_selected(self):
+        """不健康的 endpoint 即使空闲也不被选中"""
+        router = self._make_router([10, 10], failure_threshold=1)
+        router._providers[1].in_flight = 5
+        router.mark_failed(router._providers[0].config)
+
+        provider = router.acquire()
+        assert provider.base_url == "http://api2.com/v1"
+
+
 class TestStats:
     """测试统计信息"""
 
@@ -210,6 +291,7 @@ class TestStats:
         assert "total" in stats
         assert "healthy" in stats
         assert "providers" in stats
+        assert "in_flight" in stats["providers"][0]
 
 
 class TestCreateRouterFromUrls:

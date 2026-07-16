@@ -29,7 +29,7 @@ LLMClient (统一入口，LLMClientPool 的别名)
     │   └── ClaudeClient (Anthropic Claude)
     │
     └── 多 endpoint 模式：负载均衡
-        └── ProviderRouter (round_robin)
+        └── ProviderRouter (容量感知，全饱和时退回轮询)
 
 AgentClient (Agent 能力，v0.6.0)
     ├── ToolRegistry (动态工具注册)

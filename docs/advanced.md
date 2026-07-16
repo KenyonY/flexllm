@@ -262,7 +262,10 @@ pool = LLMClientPool(
 )
 ```
 
-多 endpoint 模式使用轮询（round_robin）策略分配请求，配合共享队列实现动态负载均衡。
+选路策略：
+
+- **单条调用**（`chat_completions` / `chat_completions_stream`）：容量感知选路——在健康且未饱和的 endpoint 中选负载率（in-flight / concurrency_limit）最低者，全部饱和时退回轮询。异构 endpoint 下慢节点饱和后，流量自动流向快节点。
+- **批量调用**（`distribute=True`）：worker 模型——每个 endpoint 的 worker 数等于其并发上限，所有 worker 从共享队列抢任务，快 endpoint 周转快自然多拿任务。
 
 ### Endpoint 级别 Rate Limit
 

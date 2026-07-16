@@ -564,3 +564,118 @@ class TestFromConfig:
         assert pool._config_system is None
         assert pool._config_params == {}
         assert pool._config_user_template is None
+
+
+class TestCapacityAwareSelection:
+    """测试容量感知选路（issue #13）"""
+
+    def _make_pool(self, slow_limit=2, fast_limit=20):
+        return LLMClientPool(
+            endpoints=[
+                {"base_url": "http://slow.com/v1", "model": "m", "concurrency_limit": slow_limit},
+                {"base_url": "http://fast.com/v1", "model": "m", "concurrency_limit": fast_limit},
+            ],
+        )
+
+    def test_router_capacity_comes_from_client(self):
+        """router 的容量取自底层 client 的实际并发上限"""
+        pool = self._make_pool()
+        limits = {p.config.base_url: p.config.concurrency_limit for p in pool._router._providers}
+        assert limits == {"http://slow.com/v1": 2, "http://fast.com/v1": 20}
+
+    def test_router_capacity_default_from_shared_param(self):
+        """endpoint 未指定 concurrency_limit 时容量取共享默认值"""
+        pool = LLMClientPool(
+            endpoints=[
+                {"base_url": "http://api1.com/v1", "model": "m"},
+                {"base_url": "http://api2.com/v1", "model": "m"},
+            ],
+            concurrency_limit=7,
+        )
+        assert all(p.config.concurrency_limit == 7 for p in pool._router._providers)
+
+    async def test_routes_to_least_loaded_endpoint(self):
+        """有在途请求的 endpoint 应被避开"""
+        pool = self._make_pool(slow_limit=10, fast_limit=10)
+        pool._router._providers[0].in_flight = 3
+
+        pool._clients[0].chat_completions = AsyncMock(return_value="slow")
+        pool._clients[1].chat_completions = AsyncMock(return_value="fast")
+
+        result = await pool.chat_completions("hi")
+
+        assert result == "fast"
+        assert pool._clients[0].chat_completions.await_count == 0
+        # release 后 in_flight 恢复到调用前
+        assert pool._router._providers[1].in_flight == 0
+
+    async def test_fanout_avoids_saturated_endpoint(self):
+        """并发扇出时，慢 endpoint 饱和后流量应全部流向快 endpoint"""
+        import asyncio
+
+        pool = self._make_pool(slow_limit=2, fast_limit=20)
+
+        async def respond(**kwargs):
+            await asyncio.sleep(0.05)
+            return "ok"
+
+        pool._clients[0].chat_completions = AsyncMock(side_effect=respond)
+        pool._clients[1].chat_completions = AsyncMock(side_effect=respond)
+
+        results = await asyncio.gather(*[pool.chat_completions("hi") for _ in range(12)])
+
+        assert results == ["ok"] * 12
+        # slow limit=2 只拿 2 个，其余 10 个进 fast（盲轮询下会是 6/6）
+        assert pool._clients[0].chat_completions.await_count == 2
+        assert pool._clients[1].chat_completions.await_count == 10
+        assert all(p.in_flight == 0 for p in pool._router._providers)
+
+    async def test_fallback_excludes_tried_endpoint(self):
+        """fallback 时不会重复尝试同一 endpoint，失败后 in-flight 归零"""
+        pool = self._make_pool(slow_limit=10, fast_limit=10)
+
+        pool._clients[0].chat_completions = AsyncMock(side_effect=RuntimeError("boom"))
+        pool._clients[1].chat_completions = AsyncMock(return_value="ok")
+
+        result = await pool.chat_completions("hi")
+
+        assert result == "ok"
+        assert pool._clients[0].chat_completions.await_count == 1
+        assert pool._clients[1].chat_completions.await_count == 1
+        assert all(p.in_flight == 0 for p in pool._router._providers)
+
+    async def test_all_fail_raises_each_tried_once(self):
+        """全部失败时抛出异常，且每个 endpoint 只被尝试一次"""
+        pool = self._make_pool(slow_limit=10, fast_limit=10)
+
+        pool._clients[0].chat_completions = AsyncMock(side_effect=RuntimeError("boom1"))
+        pool._clients[1].chat_completions = AsyncMock(side_effect=RuntimeError("boom2"))
+
+        with pytest.raises(RuntimeError):
+            await pool.chat_completions("hi")
+
+        assert pool._clients[0].chat_completions.await_count == 1
+        assert pool._clients[1].chat_completions.await_count == 1
+        assert all(p.in_flight == 0 for p in pool._router._providers)
+
+    async def test_stream_counts_in_flight(self):
+        """流式请求计入 in-flight，覆盖整个流的生命周期"""
+        pool = self._make_pool(slow_limit=10, fast_limit=10)
+
+        async def fake_stream(**kwargs):
+            yield "a"
+            yield "b"
+
+        pool._clients[0].chat_completions_stream = fake_stream
+        pool._clients[1].chat_completions_stream = fake_stream
+
+        agen = pool.chat_completions_stream("hi")
+        chunks = [await anext(agen)]
+        # 流进行中：恰有一个 endpoint in_flight == 1
+        assert sorted(p.in_flight for p in pool._router._providers) == [0, 1]
+
+        async for chunk in agen:
+            chunks.append(chunk)
+
+        assert chunks == ["a", "b"]
+        assert all(p.in_flight == 0 for p in pool._router._providers)

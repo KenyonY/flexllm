@@ -56,7 +56,7 @@ LLMClient = LLMClientPool (统一入口，单/多 endpoint 均使用此类)
     │   └── ClaudeClient (Anthropic Claude API)
     │
     ├── 多 endpoint 模式：负载均衡
-    │   └── ProviderRouter (round_robin)
+    │   └── ProviderRouter (容量感知，全饱和时退回轮询)
     │
     └── 所有客户端继承自 LLMClientBase (抽象基类)
             ├── ConcurrentRequester (async_api/ 异步并发引擎)

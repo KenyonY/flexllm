@@ -187,7 +187,7 @@ client = GeminiClient(
 
 ### LLMClientPool
 
-多 Endpoint 客户端池，支持轮询分发和故障转移。
+多 Endpoint 客户端池，支持容量感知的负载均衡和故障转移。
 
 ```python
 from flexllm import LLMClientPool

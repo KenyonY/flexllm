@@ -21,12 +21,14 @@ class ProviderConfig:
         api_key: API 密钥
         model: 可选的模型覆盖
         enabled: 是否启用
+        concurrency_limit: 该 endpoint 的并发上限（容量感知选路用），None 表示无上限
     """
 
     base_url: str
     api_key: str = "EMPTY"
     model: str | None = None
     enabled: bool = True
+    concurrency_limit: int | None = None
 
 
 @dataclass
@@ -37,14 +39,15 @@ class ProviderStatus:
     failures: int = 0
     last_failure: float = 0
     is_healthy: bool = True
+    in_flight: int = 0
 
 
 class ProviderRouter:
     """
     Provider 路由器
 
-    使用轮询（round_robin）策略分配请求到多个 Provider，
-    支持健康检查和自动恢复。
+    选路策略：容量感知（acquire/release，在健康且未饱和的 provider 中选负载率最低者，
+    全部饱和时退回轮询），或纯轮询（get_next）。支持健康检查和自动恢复。
     """
 
     def __init__(
@@ -103,6 +106,69 @@ class ProviderRouter:
             self._index += 1
             return provider
 
+    def acquire(self, exclude: set[str] | None = None) -> ProviderConfig | None:
+        """
+        容量感知选路：在健康且未饱和的 provider 中选负载率最低者
+
+        in-flight 计数 +1，请求结束后必须配对调用 release()（try/finally 保证）。
+
+        选路规则：
+        - 过滤：健康 且 base_url 不在 exclude 中
+        - 未饱和（in_flight < concurrency_limit）的候选按 in_flight/concurrency_limit
+          比值取最低——异构限额下比绝对计数公平
+        - 全部饱和时退回轮询，此时排队是正确行为
+
+        Args:
+            exclude: 需要跳过的 base_url 集合（fallback 场景传入已尝试过的 endpoint）
+
+        Returns:
+            选中的 ProviderConfig；无候选（健康的都被排除）时返回 None
+        """
+        exclude = exclude or set()
+        with self._lock:
+            candidates = [
+                p for p in self._get_healthy_providers() if p.config.base_url not in exclude
+            ]
+            if not candidates:
+                return None
+
+            available = [
+                p
+                for p in candidates
+                if p.config.concurrency_limit is None or p.in_flight < p.config.concurrency_limit
+            ]
+            if available:
+                chosen = min(
+                    available,
+                    key=lambda p: (
+                        p.in_flight / p.config.concurrency_limit
+                        if p.config.concurrency_limit
+                        else 0.0,
+                        p.in_flight,
+                    ),
+                )
+            else:
+                chosen = candidates[self._index % len(candidates)]
+                self._index += 1
+
+            chosen.in_flight += 1
+            return chosen.config
+
+    def release(self, provider: ProviderConfig) -> None:
+        """
+        请求结束（正常返回或异常），in-flight 计数 -1
+
+        与 acquire() 配对调用。
+
+        Args:
+            provider: acquire() 返回的 provider 配置
+        """
+        with self._lock:
+            for p in self._providers:
+                if p.config.base_url == provider.base_url:
+                    p.in_flight = max(0, p.in_flight - 1)
+                    break
+
     def mark_failed(self, provider: ProviderConfig) -> None:
         """
         标记 provider 失败
@@ -150,6 +216,7 @@ class ProviderRouter:
                         "base_url": p.config.base_url,
                         "healthy": p.is_healthy,
                         "failures": p.failures,
+                        "in_flight": p.in_flight,
                     }
                     for p in self._providers
                 ],

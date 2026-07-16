@@ -620,13 +620,16 @@ class LLMClientPool:
                 self._clients.append(self._create_base_client(**client_kwargs))
 
         # 创建路由器
+        # concurrency_limit 直接取底层 client 的实际值：endpoints / legacy clients
+        # 两条构造路径的 ground truth 都在 client 上，不需要分别推导
         provider_configs = [
             ProviderConfig(
                 base_url=ep.base_url,
                 api_key=ep.api_key,
                 model=ep.model,
+                concurrency_limit=client._concurrency_limit,
             )
-            for ep in self._endpoints
+            for ep, client in zip(self._endpoints, self._clients)
         ]
         self._router = ProviderRouter(
             providers=provider_configs,
@@ -655,11 +658,18 @@ class LLMClientPool:
         client._client._pool_semaphore = self._pool_limiter
         client._client._pool_rate_limiter = self._pool_rate_limiter
 
-    def _get_client(self) -> tuple[LLMClientBase, ProviderConfig]:
-        """获取下一个可用的 client（返回底层客户端）"""
-        provider = self._router.get_next()
-        client = self._client_map[provider.base_url]
-        return client, provider
+    def _acquire_client(
+        self, tried: set[str]
+    ) -> tuple[LLMClientBase, ProviderConfig] | tuple[None, None]:
+        """容量感知地获取一个未尝试过的 client
+
+        in-flight 计数 +1，调用方必须在请求结束后 release（try/finally 保证）。
+        健康的 endpoint 都已尝试过时返回 (None, None)。
+        """
+        provider = self._router.acquire(exclude=tried)
+        if provider is None:
+            return None, None
+        return self._client_map[provider.base_url], provider
 
     async def chat_completions(
         self,
@@ -701,19 +711,14 @@ class LLMClientPool:
                 **kwargs,
             )
 
-        # 多 endpoint 模式：使用 fallback
+        # 多 endpoint 模式：容量感知选路 + fallback
         last_error = None
         tried_providers = set()
 
-        for attempt in range(self._max_fallback_attempts):
-            client, provider = self._get_client()
-
-            # 避免重复尝试同一个 provider
-            if provider.base_url in tried_providers:
-                # 如果所有 provider 都试过了，退出
-                if len(tried_providers) >= len(self._clients):
-                    break
-                continue
+        for _ in range(self._max_fallback_attempts):
+            client, provider = self._acquire_client(tried_providers)
+            if provider is None:
+                break  # 健康的 endpoint 都已尝试过
 
             tried_providers.add(provider.base_url)
 
@@ -746,6 +751,8 @@ class LLMClientPool:
 
                 if not self._fallback:
                     raise
+            finally:
+                self._router.release(provider)
 
         raise last_error or RuntimeError("所有 endpoint 都失败了")
 
@@ -912,13 +919,11 @@ class LLMClientPool:
         last_error = None
         tried_providers = set()
 
-        for attempt in range(self._max_fallback_attempts):
-            client, provider = self._get_client()
-
-            if provider.base_url in tried_providers:
-                if len(tried_providers) >= len(self._clients):
-                    break
-                continue
+        for _ in range(self._max_fallback_attempts):
+            # 整批算 1 个 in-flight：计数不精确，但能让单条调用避开正在跑批的 endpoint
+            client, provider = self._acquire_client(tried_providers)
+            if provider is None:
+                break  # 健康的 endpoint 都已尝试过
 
             tried_providers.add(provider.base_url)
 
@@ -949,6 +954,8 @@ class LLMClientPool:
 
                 if not self._fallback:
                     raise
+            finally:
+                self._router.release(provider)
 
         raise last_error or RuntimeError("所有 endpoint 都失败了")
 
@@ -1381,17 +1388,16 @@ class LLMClientPool:
                 yield chunk
             return
 
-        # 多 endpoint 模式：使用 fallback
+        # 多 endpoint 模式：容量感知选路 + fallback
+        # 流式不经过 ConcurrentRequester、不占 endpoint semaphore，但占服务端资源，
+        # 因此计入 in-flight（覆盖整个流的生命周期）
         last_error = None
         tried_providers = set()
 
-        for attempt in range(self._max_fallback_attempts):
-            client, provider = self._get_client()
-
-            if provider.base_url in tried_providers:
-                if len(tried_providers) >= len(self._clients):
-                    break
-                continue
+        for _ in range(self._max_fallback_attempts):
+            client, provider = self._acquire_client(tried_providers)
+            if provider is None:
+                break  # 健康的 endpoint 都已尝试过
 
             tried_providers.add(provider.base_url)
 
@@ -1415,6 +1421,8 @@ class LLMClientPool:
 
                 if not self._fallback:
                     raise
+            finally:
+                self._router.release(provider)
 
         raise last_error or RuntimeError("所有 endpoint 都失败了")
 
