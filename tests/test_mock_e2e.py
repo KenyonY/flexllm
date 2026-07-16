@@ -857,7 +857,7 @@ class TestSaveInput:
                 base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY"
             ) as client:
                 messages_list = create_messages(3)
-                results = await client.chat_completions_batch(
+                await client.chat_completions_batch(
                     messages_list,
                     output_jsonl=output_path,
                     show_progress=False,

@@ -693,13 +693,13 @@ def register_commands(app):
         print(f"  Concurrency: {concurrency}")
         if max_qps is not None:
             print(f"  Max QPS: {max_qps}")
-        print(f"\n  POST /api/generate             非流式生成")
-        print(f"  POST /api/generate/stream      流式生成")
-        print(f"  POST /api/generate/batch       批量生成")
-        print(f"  GET  /health                   健康检查")
-        print(f"  GET  /api/config               查看配置")
+        print("\n  POST /api/generate             非流式生成")
+        print("  POST /api/generate/stream      流式生成")
+        print("  POST /api/generate/batch       批量生成")
+        print("  GET  /health                   健康检查")
+        print("  GET  /api/config               查看配置")
         if verbose:
-            print(f"  Verbose: on (请求日志已开启)")
+            print("  Verbose: on (请求日志已开启)")
         print("\nPress Ctrl+C to stop")
 
         try:

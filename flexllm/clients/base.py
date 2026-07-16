@@ -9,7 +9,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Union
+from typing import TYPE_CHECKING, Union
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ from ..msg_processors.image_processor import ImageCacheConfig
 from ..msg_processors.unified_processor import batch_process_messages as optimized_batch_preprocess
 from ..msg_processors.unified_processor import unified_messages_preprocess
 from ..pricing import estimate_cost, get_model_pricing
-from ..pricing.cost_tracker import BudgetExceededError, CostReport, CostTracker, CostTrackerConfig
+from ..pricing.cost_tracker import BudgetExceededError, CostTracker, CostTrackerConfig
 from .batch_helpers import (
     JsonlWriter,
     build_gen_params_list,

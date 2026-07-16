@@ -575,7 +575,6 @@ def query_credits(base_url: str, api_key: str) -> dict | None:
             data = resp.json()
             grants = (data.get("grants") or {}).get("data") or []
             total_granted = sum((g.get("grant_amount") or 0) for g in grants) / 100
-            total_used = sum((g.get("used_amount") or 0) for g in grants) / 100
             total_available = (data.get("total_available") or 0) / 100
             total_used_all = (data.get("total_used") or 0) / 100
 

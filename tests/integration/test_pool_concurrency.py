@@ -13,8 +13,6 @@ LLMClientPool 高并发测试
     pytest tests/integration/test_pool_concurrency.py -v -s
 """
 
-import asyncio
-
 import pytest
 
 from flexllm import LLMClientPool

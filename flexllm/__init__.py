@@ -232,4 +232,8 @@ __all__ = [
     # Chain of Thought
     "ChainOfThoughtClient",
     "Step",
+    # 解析工具
+    "extract_code_snippets",
+    "parse_to_code",
+    "parse_to_obj",
 ]

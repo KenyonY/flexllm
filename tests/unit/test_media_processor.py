@@ -1,8 +1,6 @@
 """Tests for media (video/audio) preprocessing support."""
 
 import base64
-import os
-import tempfile
 
 import pytest
 

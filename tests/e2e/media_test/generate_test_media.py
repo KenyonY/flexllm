@@ -1,10 +1,9 @@
 """生成测试用的图片、视频、音频文件"""
 
-import struct
 import wave
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 
 def generate_test_image(path="test_image.png"):

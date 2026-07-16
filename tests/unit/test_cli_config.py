@@ -1,9 +1,5 @@
 """CLI 配置 get_model_params 测试"""
 
-from unittest.mock import patch
-
-import pytest
-
 from flexllm.cli.config import FlexLLMConfig
 
 

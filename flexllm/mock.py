@@ -48,7 +48,7 @@ import multiprocessing
 import random
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 try:
     from aiohttp import web

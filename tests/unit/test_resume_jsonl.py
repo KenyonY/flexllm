@@ -1,8 +1,6 @@
 """断点续传 _extract_save_input / _resume_from_jsonl 测试"""
 
 import json
-import tempfile
-from pathlib import Path
 
 import pytest
 

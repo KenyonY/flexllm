@@ -38,7 +38,7 @@ except ImportError:
 
 # 导入缓存配置
 try:
-    from .image_processor import DEFAULT_CACHE_DIR, LANCZOS, ImageCacheConfig, get_target_size
+    from .image_processor import DEFAULT_CACHE_DIR, ImageCacheConfig
 
     HAS_IMAGE_PROCESSOR = True
 except ImportError:
@@ -1308,12 +1308,6 @@ async def unified_batch_messages_preprocess(
     # 只传递非 None 的参数
     media_kwargs = {k: v for k, v in media_kwargs.items() if v is not None}
     kwargs.update(media_kwargs)
-
-    # 创建或获取处理器
-    if processor_config:
-        processor = UnifiedImageProcessor(processor_config)
-    else:
-        processor = get_global_unified_processor()
 
     # 创建处理单个消息列表的函数
     async def process_single_batch(messages, semaphore, index=None):

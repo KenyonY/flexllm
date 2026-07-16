@@ -94,7 +94,7 @@ class TestCoreRateLimiter:
             return time.time()
 
         start = time.time()
-        timestamps = await asyncio.gather(*[worker() for _ in range(num_coroutines)])
+        await asyncio.gather(*[worker() for _ in range(num_coroutines)])
         elapsed = time.time() - start
 
         # 15 个协程并发，QPS=10，前 10 个立即放行，后 5 个排队

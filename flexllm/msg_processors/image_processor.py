@@ -14,7 +14,7 @@ import numpy as np
 import requests
 from PIL import Image
 
-from ..utils.core import async_retry, safe_repr_error, safe_repr_source
+from ..utils.core import async_retry, safe_repr_source
 
 # 兼容不同版本的PIL
 try:

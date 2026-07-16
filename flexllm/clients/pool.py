@@ -45,7 +45,6 @@ from .base import ChatCompletionResult, LLMClientBase
 from .batch_helpers import (
     JsonlWriter,
     build_gen_params_list,
-    extract_save_input,
     validate_batch_params,
 )
 from .claude import ClaudeClient
@@ -1087,11 +1086,6 @@ class LLMClientPool:
             return results
 
         logger.info(f"待执行: {pending_count}/{n}")
-
-        # 计算总并发数
-        total_concurrency = sum(
-            getattr(client, "_concurrency_limit", 10) for client in self._clients
-        )
 
         # 进度条配置（支持成本显示）
         progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None

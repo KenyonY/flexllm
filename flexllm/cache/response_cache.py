@@ -79,7 +79,7 @@ class ResponseCache:
     def __init__(self, config: ResponseCacheConfig | None = None):
         self.config = config or ResponseCacheConfig.disabled()
         self._stats = {"hits": 0, "misses": 0}
-        self._db: FlaxKV | None = None
+        self._db: "FlaxKV | None" = None
 
         if self.config.enabled:
             try:

@@ -915,7 +915,6 @@ class ChainOfThoughtClient:
         if total_chains == 0:
             return []
 
-        batch_start_time = time.time()
         completed_count = 0
 
         # 创建进度跟踪器

@@ -366,7 +366,7 @@ class TestFromConfig:
         """指定模型名称"""
         mock_get_config.return_value = self._mock_config()
 
-        client = LLMClientPool.from_config(model="qwen-plus")
+        LLMClientPool.from_config(model="qwen-plus")
         mock_get_config.return_value.get_model_config.assert_called_with("qwen-plus")
 
     @patch("flexllm.cli.config.get_config")
@@ -551,7 +551,7 @@ class TestFromConfig:
         """指定配置文件路径"""
         mock_cls.return_value = self._mock_config()
 
-        client = LLMClientPool.from_config("/path/to/config.yaml", model="qwen-plus")
+        LLMClientPool.from_config("/path/to/config.yaml", model="qwen-plus")
         mock_cls.assert_called_once_with("/path/to/config.yaml")
 
     def test_default_config_attrs_on_normal_init(self):
