@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.0] - 2026-07-16
+
+### Features
+
+- **pool**: 单条调用路径容量感知选路，避免盲轮询打到已饱和 endpoint (#13)
+
+### Miscellaneous
+
+- Bump version to 0.14.0
+
 ## [0.13.1] - 2026-07-16
 
 ### Bug Fixes
