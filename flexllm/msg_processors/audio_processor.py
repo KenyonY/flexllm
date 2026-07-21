@@ -4,7 +4,6 @@
 依赖: soundfile + scipy（可选依赖组 flexllm[audio]）
 """
 
-import base64
 import io
 import logging
 from math import gcd
@@ -102,28 +101,6 @@ def preprocess_audio(
     sf.write(out, data, sr, format=fmt.upper(), subtype=subtype)
     out.seek(0)
     return out.read(), _FORMAT_TO_MIME[fmt]
-
-
-def preprocess_audio_to_base64(
-    audio_bytes: bytes,
-    return_with_mime: bool = True,
-    **kwargs,
-) -> str:
-    """预处理音频并返回 base64 编码字符串。
-
-    Args:
-        audio_bytes: 原始音频字节
-        return_with_mime: 是否返回带 data: 前缀
-        **kwargs: 传递给 preprocess_audio 的参数
-
-    Returns:
-        base64 编码字符串
-    """
-    processed, mime = preprocess_audio(audio_bytes, **kwargs)
-    b64 = base64.b64encode(processed).decode("utf-8")
-    if return_with_mime:
-        return f"data:{mime};base64,{b64}"
-    return b64
 
 
 def extract_audio_kwargs(kwargs: dict) -> dict:

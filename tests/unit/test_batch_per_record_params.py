@@ -1,8 +1,7 @@
 """batch per-record params + system/user_template 统一语义
 
-覆盖规格 docs(scratch)/batch_per_record_params_spec.md 的两步：
-- 第一步：convert_to_messages 对所有格式统一 system 兜底 / user_template 只套最后一条
-- 第二步：build_gen_params_list 剥离消息构造类键；缓存键随 per-record 参数变化
+- convert_to_messages 对所有格式统一 system 兜底 / user_template 只套最后一条
+- build_gen_params_list 剥离消息构造类键；缓存键随 per-record 参数变化
 """
 
 from flexllm.cache.response_cache import ResponseCache, ResponseCacheConfig

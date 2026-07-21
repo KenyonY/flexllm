@@ -95,12 +95,11 @@ results = await client.call_llm(messages_list)
 ```python
 from flexllm.msg_processors import (
     encode_image_to_base64,
-    ImageCacheConfig,
     unified_batch_process_messages,
 )
 
-# 单张图片编码（支持缩放）
-base64_data = await encode_image_to_base64("/path/to/image.jpg")
+# 单张图片编码（支持本地路径/URL，支持缩放）
+base64_data = await encode_image_to_base64("/path/to/image.jpg", max_width=1024)
 
 # 批量消息预处理（高性能）
 processed = await unified_batch_process_messages(

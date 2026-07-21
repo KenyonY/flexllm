@@ -29,6 +29,16 @@ class TestIsSourceNeedsConversion:
     def test_base64_string(self):
         assert _is_source_needs_conversion("SGVsbG8gV29ybGQ=") is False
 
+    def test_raw_base64_jpeg_not_treated_as_path(self):
+        """回归：JPEG raw base64 以 /9j/ 开头，不能被误判为文件路径"""
+        value = "/9j/" + "A" * 600
+        assert _is_source_needs_conversion(value) is False
+
+    def test_raw_base64_mp3_not_treated_as_path(self):
+        """回归：MP3 raw base64 以 //uQ 开头，不能被误判为文件路径"""
+        value = "//uQ" + "b" * 600 + "=="
+        assert _is_source_needs_conversion(value) is False
+
     def test_existing_file(self, tmp_path):
         f = tmp_path / "test.wav"
         f.write_bytes(b"RIFF" + b"\x00" * 100)

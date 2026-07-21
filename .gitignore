@@ -30,7 +30,6 @@ htmlcov/
 # Local development
 *.local
 .env
-CLAUDE.md
 
 # flexllm config files (exclude example files)
 flexllm_config.yaml

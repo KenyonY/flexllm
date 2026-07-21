@@ -3,6 +3,7 @@ Table processor for MLLM client
 专门处理表格数据的处理器类
 """
 
+import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +12,8 @@ import pandas as pd
 # 使用TYPE_CHECKING避免运行时循环引用
 if TYPE_CHECKING:
     from ..clients.mllm import MllmClient
+
+logger = logging.getLogger(__name__)
 
 
 class MllmTableProcessor:
@@ -106,16 +109,17 @@ class MllmTableProcessor:
             raise ValueError(f"读取文件失败: {str(e)}")
 
         if df.empty:
-            print("警告: 过滤后数据为空")
+            logger.warning("加载数据为空: %s", table_path)
             return df
 
         # 应用数量限制
         if max_num is not None:
             df = df.head(max_num)
 
-        print(f"加载数据完成: {len(df)} 行")
-        df = df.astype(str)
-        print(f"{df.head(2)=}")
+        logger.info("加载数据完成: %d 行", len(df))
+        # 缺失值先转空串再统一为 str：直接 astype(str) 会把 NaN 变成字符串 "nan"，
+        # 被下游当作有效文本/URL 下发
+        df = df.fillna("").astype(str)
 
         return df
 

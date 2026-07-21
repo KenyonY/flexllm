@@ -154,3 +154,91 @@ class TestImageOptimization:
         assert abs(original_ratio - new_ratio) < 0.01
         assert new_width <= max_size
         assert new_height <= max_size
+
+
+class TestStdoutNotHijacked:
+    """回归（严重 bug #1）：OpenCV 输出抑制不得替换全局 sys.stdout/stderr。
+
+    旧实现用替换 sys.stdout 的上下文管理器抑制 OpenCV 输出，线程池并发交错后
+    sys.stdout 永久指向废弃的 StringIO，整个进程 stdout 静默丢失。
+    """
+
+    def test_suppress_context_managers_removed(self):
+        import flexllm.msg_processors.unified_processor as up
+
+        assert not hasattr(up, "suppress_stdout")
+        assert not hasattr(up, "suppress_stderr")
+        assert not hasattr(up, "suppress_all_output")
+
+    def test_concurrent_processing_keeps_global_streams(self, tmp_path):
+        import sys
+        from concurrent.futures import ThreadPoolExecutor
+
+        import pytest
+
+        pytest.importorskip("cv2")
+        from PIL import Image
+
+        from flexllm.msg_processors.unified_processor import UnifiedImageProcessor
+
+        img_path = tmp_path / "t.png"
+        Image.new("RGB", (32, 32), (10, 200, 30)).save(img_path)
+
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        processor = UnifiedImageProcessor()
+        try:
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                futures = [
+                    ex.submit(processor._process_local_file_sync, str(img_path)) for _ in range(16)
+                ]
+                for f in futures:
+                    assert f.result().startswith("data:image/png")
+        finally:
+            processor.cleanup()
+
+        assert sys.stdout is original_stdout
+        assert sys.stderr is original_stderr
+
+
+class TestEncodeImageToBase64Regression:
+    """encode_image_to_base64（image_processor 内部版本）的回归测试"""
+
+    async def test_palette_mode_colors_preserved(self):
+        """回归（严重 bug #2）：P 模式（调色板）图片编码后颜色必须正确。
+
+        旧实现直接 np.array(P 模式图) 得到的是调色板索引而非 RGB，
+        编码后颜色损坏并静默发给模型。
+        """
+        import pytest
+
+        pytest.importorskip("cv2")
+        from PIL import Image
+
+        from flexllm.msg_processors.image_processor import (
+            decode_base64_to_pil,
+            encode_image_to_base64,
+        )
+
+        color = (200, 30, 60)
+        p_img = Image.new("RGB", (16, 16), color).convert("P", palette=Image.ADAPTIVE)
+        assert p_img.mode == "P"
+
+        result = await encode_image_to_base64(p_img, None)
+        assert result.startswith("data:image/png")
+
+        decoded = decode_base64_to_pil(result).convert("RGB")
+        assert decoded.getpixel((8, 8)) == color
+
+    async def test_input_image_not_mutated(self):
+        """回归（#3）：encode 不得原地修改调用方传入的 Image（thumbnail 缩放）"""
+        import pytest
+
+        pytest.importorskip("cv2")
+        from PIL import Image
+
+        from flexllm.msg_processors.image_processor import encode_image_to_base64
+
+        img = Image.new("RGB", (100, 80), (1, 2, 3))
+        await encode_image_to_base64(img, None, max_width=10)
+        assert img.size == (100, 80)

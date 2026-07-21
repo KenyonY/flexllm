@@ -150,8 +150,8 @@ git push origin main && git push origin vX.X.X
 
 ## 代码规范
 
-- **ruff** 配置：`line-length=100`，`target-version="py310"`，lint 仅启用 isort（`select=["I"]`）
-- ruff 不做风格检查（无 E/W/F 规则），主要职责是 import 排序和代码格式化
+- **ruff** 配置：`line-length=100`，`target-version="py310"`，lint 启用 isort + pyflakes（`select=["I", "F"]`）
+- ruff 不做风格检查（无 E/W 规则），职责是 import 排序、pyflakes 检查（未使用导入/变量、未定义名称）和代码格式化
 - **ruff 版本在两处钉死，升级时必须同步改**：`pyproject.toml` 的 dev/test extra
   (`ruff==x.y.z`) 与 `.pre-commit-config.yaml` 的 `rev`。两者不一致时，CI 的
   `ruff format --check` 与 pre-commit hook 会对同一份代码给出相反的格式化结果，

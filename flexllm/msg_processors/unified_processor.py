@@ -6,13 +6,11 @@
 
 import asyncio
 import base64
-import contextlib
 import gc
 import hashlib
-import io
 import logging
 import os
-import sys
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -36,25 +34,8 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
-# 导入缓存配置
-try:
-    from .image_processor import DEFAULT_CACHE_DIR, ImageCacheConfig
-
-    HAS_IMAGE_PROCESSOR = True
-except ImportError:
-    HAS_IMAGE_PROCESSOR = False
-    DEFAULT_CACHE_DIR = "cache"
-
-try:
-    from .audio_processor import extract_audio_kwargs, preprocess_audio
-
-    HAS_AUDIO_PROCESSOR = True
-except ImportError:
-    HAS_AUDIO_PROCESSOR = False
-
-    def extract_audio_kwargs(kwargs):
-        return {}
-
+from .audio_processor import extract_audio_kwargs, preprocess_audio
+from .image_processor import DEFAULT_CACHE_DIR, ImageCacheConfig
 
 try:
     from tqdm.asyncio import tqdm
@@ -62,35 +43,6 @@ try:
     TQDM_AVAILABLE = True
 except ImportError:
     TQDM_AVAILABLE = False
-
-
-@contextlib.contextmanager
-def suppress_stdout():
-    """上下文管理器，用于抑制stdout输出"""
-    old_stdout = sys.stdout
-    try:
-        sys.stdout = io.StringIO()
-        yield
-    finally:
-        sys.stdout = old_stdout
-
-
-@contextlib.contextmanager
-def suppress_stderr():
-    """上下文管理器，用于抑制stderr输出"""
-    old_stderr = sys.stderr
-    try:
-        sys.stderr = io.StringIO()
-        yield
-    finally:
-        sys.stderr = old_stderr
-
-
-@contextlib.contextmanager
-def suppress_all_output():
-    """上下文管理器，用于抑制所有输出"""
-    with suppress_stdout(), suppress_stderr():
-        yield
 
 
 @dataclass
@@ -152,66 +104,6 @@ class UnifiedProcessorConfig:
             memory_cache_size_mb=200,
             prefetch_size=20,
         )
-
-    @classmethod
-    def from_image_cache_config(cls, cache_config: "ImageCacheConfig") -> "UnifiedProcessorConfig":
-        """从旧版本ImageCacheConfig创建新配置"""
-        return cls(
-            enable_disk_cache=cache_config.enabled,
-            disk_cache_dir=cache_config.cache_dir,
-            force_refresh_disk_cache=cache_config.force_refresh,
-            retry_failed_disk_cache=cache_config.retry_failed,
-        )
-
-    @classmethod
-    def auto_detect(cls) -> "UnifiedProcessorConfig":
-        """自适应配置，根据系统资源自动调整"""
-        try:
-            import os
-
-            import psutil
-
-            # 获取系统信息
-            cpu_count = os.cpu_count() or 4
-            memory_gb = psutil.virtual_memory().total / (1024**3)
-
-            # 根据CPU核心数调整worker数量
-            max_workers = max(4, min(cpu_count, 24))
-            max_concurrent = max(6, min(cpu_count * 2, 40))
-
-            # 根据内存大小调整缓存
-            if memory_gb >= 16:
-                # 16GB+: 高性能模式
-                cache_size = 1000
-                prefetch_size = 100
-                jpeg_quality = 95
-            elif memory_gb >= 8:
-                # 8-16GB: 平衡模式
-                cache_size = 500
-                prefetch_size = 50
-                jpeg_quality = 90
-            else:
-                # <8GB: 节省模式
-                cache_size = 200
-                prefetch_size = 20
-                jpeg_quality = 80
-
-            return cls(
-                max_workers=max_workers,
-                max_concurrent=max_concurrent,
-                memory_cache_size_mb=cache_size,
-                prefetch_size=prefetch_size,
-                jpeg_quality=jpeg_quality,
-                png_compression=3,
-                enable_disk_cache=True,  # 默认启用磁盘缓存
-            )
-
-        except ImportError:
-            # 如果没有psutil，回退到默认配置
-            return cls.default()
-        except Exception:
-            # 其他异常，回退到默认配置
-            return cls.default()
 
 
 class UnifiedMemoryCache:
@@ -370,7 +262,7 @@ class UnifiedImageProcessor:
 
         # 磁盘缓存配置
         self.disk_cache_config = None
-        if self.config.enable_disk_cache and HAS_IMAGE_PROCESSOR:
+        if self.config.enable_disk_cache:
             self.disk_cache_config = ImageCacheConfig(
                 enabled=True,
                 cache_dir=self.config.disk_cache_dir,
@@ -398,17 +290,12 @@ class UnifiedImageProcessor:
         if not HAS_CV2:
             return
         try:
-            with (
-                suppress_all_output()
-                if self.config.suppress_opencv_output
-                else contextlib.nullcontext()
-            ):
-                cv2.setUseOptimized(True)
-                cv2.setNumThreads(self.config.max_workers)
-                cv2.setLogLevel(cv2.LOG_LEVEL_ERROR)
-
-                if self.config.enable_simd and hasattr(cv2, "useOptimized"):
-                    cv2.useOptimized()
+            cv2.setUseOptimized(True)
+            cv2.setNumThreads(self.config.max_workers)
+            if self.config.suppress_opencv_output:
+                # 通过 OpenCV 自带日志级别抑制输出。
+                # 严禁替换全局 sys.stdout/stderr：线程池并发下会导致进程级输出永久丢失。
+                cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_ERROR)
         except Exception:
             pass
 
@@ -509,42 +396,37 @@ class UnifiedImageProcessor:
                 "图像处理功能需要安装 opencv-python。请运行: pip install flexllm[image]"
             )
         try:
-            with (
-                suppress_all_output()
-                if self.config.suppress_opencv_output
-                else contextlib.nullcontext()
-            ):
-                # 使用OpenCV读取图像
-                img = cv2.imread(file_path, cv2.IMREAD_COLOR)
-                if img is None:
-                    raise ValueError(f"无法读取图像文件: {file_path}")
+            # 使用OpenCV读取图像
+            img = cv2.imread(file_path, cv2.IMREAD_COLOR)
+            if img is None:
+                raise ValueError(f"无法读取图像文件: {file_path}")
 
-                original_height, original_width = img.shape[:2]
+            original_height, original_width = img.shape[:2]
 
-                # 计算目标尺寸
-                target_width, target_height = self._calculate_target_size(
-                    original_width, original_height, max_width, max_height, max_pixels
+            # 计算目标尺寸
+            target_width, target_height = self._calculate_target_size(
+                original_width, original_height, max_width, max_height, max_pixels
+            )
+
+            # 如果需要调整大小
+            if target_width != original_width or target_height != original_height:
+                img = cv2.resize(
+                    img,
+                    (target_width, target_height),
+                    interpolation=cv2.INTER_LANCZOS4,
                 )
 
-                # 如果需要调整大小
-                if target_width != original_width or target_height != original_height:
-                    img = cv2.resize(
-                        img,
-                        (target_width, target_height),
-                        interpolation=cv2.INTER_LANCZOS4,
-                    )
+            # 检测原始格式并编码
+            format_type = self._detect_image_format(file_path)
+            encode_params = self._get_encode_params(format_type)
 
-                # 检测原始格式并编码
-                format_type = self._detect_image_format(file_path)
-                encode_params = self._get_encode_params(format_type)
+            ext = f".{format_type.lower()}"
+            if format_type == "JPEG":
+                ext = ".jpg"
 
-                ext = f".{format_type.lower()}"
-                if format_type == "JPEG":
-                    ext = ".jpg"
-
-                success, buffer = cv2.imencode(ext, img, encode_params)
-                if not success:
-                    raise ValueError(f"图像编码失败: {file_path}")
+            success, buffer = cv2.imencode(ext, img, encode_params)
+            if not success:
+                raise ValueError(f"图像编码失败: {file_path}")
 
             # 转换为base64
             base64_data = base64.b64encode(buffer.tobytes()).decode("utf-8")
@@ -570,35 +452,19 @@ class UnifiedImageProcessor:
         max_pixels: int | None = None,
         return_with_mime: bool = True,
     ) -> str:
-        """异步处理URL"""
+        """异步处理URL（走 image_processor，包含磁盘缓存）"""
         try:
-            # 如果有image_processor，使用它处理URL（包含磁盘缓存）
-            if HAS_IMAGE_PROCESSOR:
-                from .image_processor import encode_image_to_base64
+            from .image_processor import encode_image_to_base64
 
-                return await encode_image_to_base64(
-                    url,
-                    session,
-                    max_width,
-                    max_height,
-                    max_pixels,
-                    return_with_mime,
-                    cache_config=self.disk_cache_config,
-                )
-            else:
-                # 简单的URL处理实现
-                timeout = aiohttp.ClientTimeout(total=self.config.network_timeout)
-                async with session.get(url, timeout=timeout) as response:
-                    if response.status == 200:
-                        content = await response.read()
-                        base64_data = base64.b64encode(content).decode("utf-8")
-
-                        if return_with_mime:
-                            content_type = response.headers.get("content-type", "image/jpeg")
-                            return f"data:{content_type};base64,{base64_data}"
-                        return base64_data
-                    else:
-                        raise ValueError(f"HTTP {response.status}")
+            return await encode_image_to_base64(
+                url,
+                session,
+                max_width,
+                max_height,
+                max_pixels,
+                return_with_mime,
+                cache_config=self.disk_cache_config,
+            )
         except Exception as e:
             raise ValueError(
                 f"处理URL失败: {safe_repr_source(url)}, 错误: {safe_repr_error(str(e))}"
@@ -909,14 +775,25 @@ def get_global_unified_processor(
     return _global_unified_processor
 
 
+# base64 字符集（含 padding）。注意 "/" 也是合法 base64 字符，
+# 因此以 "/" 开头的字符串不一定是文件路径（如 JPEG 的 "/9j/..."、MP3 的 "//uQ..."）
+_BASE64_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+# raw base64 编码的媒体数据至少有数百字符；真实文件路径远短于此
+_BASE64_MIN_LEN = 256
+
+
 def _is_source_needs_conversion(value: str) -> bool:
     """判断一个字符串是否是需要转换为 base64 的文件来源（路径或 URL）"""
-    return (
-        value.startswith("/")
-        or value.startswith("http")
-        or value.startswith("file://")
-        or os.path.exists(value)
-    )
+    if value.startswith("http") or value.startswith("file://"):
+        return True
+    if os.path.exists(value):
+        return True
+    if value.startswith("/"):
+        # 排除已编码的 raw base64：长且仅含 base64 字符集的按已编码数据处理
+        if len(value) >= _BASE64_MIN_LEN and _BASE64_RE.fullmatch(value):
+            return False
+        return True
+    return False
 
 
 async def _get_raw_bytes(source: str, session: aiohttp.ClientSession | None = None) -> bytes:
@@ -1102,6 +979,10 @@ async def process_content_recursive(
                     base64_data = await processor.process_single_source(url, session, **kwargs)
                     if base64_data:
                         content["image_url"]["url"] = base64_data
+                    else:
+                        # process_single_source 失败时返回 ""，此处保留原 URL 交给后端，
+                        # 但必须让降级行为可见
+                        logger.warning(f"图像处理失败，保留原始 URL 发送: {safe_repr_source(url)}")
                 except Exception as e:
                     logger.error(
                         f"处理图像URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
@@ -1127,17 +1008,12 @@ async def process_content_recursive(
             if url and not url.startswith("data:"):
                 try:
                     audio_kw = extract_audio_kwargs(kwargs)
-                    if audio_kw and HAS_AUDIO_PROCESSOR:
+                    if audio_kw:
                         raw = await _get_raw_bytes(url, session)
                         processed, mime = preprocess_audio(raw, **audio_kw)
                         b64 = base64.b64encode(processed).decode("utf-8")
                         content["audio_url"]["url"] = f"data:{mime};base64,{b64}"
                     else:
-                        if audio_kw and not HAS_AUDIO_PROCESSOR:
-                            logger.warning(
-                                "音频预处理依赖缺失，回退到原始编码。"
-                                "请运行: pip install flexllm[audio]"
-                            )
                         base64_data = await encode_media_to_base64(
                             url, session=session, return_with_mime=True
                         )
@@ -1153,18 +1029,13 @@ async def process_content_recursive(
             if data and isinstance(data, str) and _is_source_needs_conversion(data):
                 try:
                     audio_kw = extract_audio_kwargs(kwargs)
-                    if audio_kw and HAS_AUDIO_PROCESSOR:
+                    if audio_kw:
                         raw = await _get_raw_bytes(data, session)
                         processed, _ = preprocess_audio(raw, **audio_kw)
                         content["input_audio"]["data"] = base64.b64encode(processed).decode("utf-8")
                         if "target_audio_format" in audio_kw:
                             content["input_audio"]["format"] = audio_kw["target_audio_format"]
                     else:
-                        if audio_kw and not HAS_AUDIO_PROCESSOR:
-                            logger.warning(
-                                "音频预处理依赖缺失，回退到原始编码。"
-                                "请运行: pip install flexllm[audio]"
-                            )
                         base64_data = await encode_media_to_base64(
                             data, session=session, return_with_mime=False
                         )
@@ -1242,7 +1113,7 @@ async def unified_messages_preprocess(
         return messages
 
     except Exception as e:
-        logger.error(f"消息预处理失败: {e}")
+        logger.error(f"消息预处理失败，返回可能未完全处理的消息（媒体可能仍是原始 URL/路径）: {e}")
         return messages
 
 
@@ -1541,11 +1412,6 @@ messages_preprocess = unified_messages_preprocess
 batch_messages_preprocess = unified_batch_messages_preprocess
 batch_process_messages = unified_batch_messages_preprocess
 
-# 专用别名
-optimized_batch_messages_preprocess = unified_batch_messages_preprocess
-improved_batch_messages_preprocess = unified_batch_messages_preprocess
-opencv_batch_messages_preprocess = unified_batch_messages_preprocess
-
 
 # 便捷函数
 async def unified_encode_image_to_base64(
@@ -1588,11 +1454,6 @@ async def unified_encode_image_to_base64(
         )
     else:
         raise ValueError(f"不支持的图像源类型: {type(image_source)}")
-
-
-# 向后兼容别名
-encode_image_to_base64 = unified_encode_image_to_base64
-safe_optimized_encode_image_to_base64 = unified_encode_image_to_base64
 
 
 def cleanup_global_unified_processor():

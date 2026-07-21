@@ -49,26 +49,6 @@ class ImageCacheConfig:
         """快速创建一个禁用缓存的配置"""
         return cls(enabled=False)
 
-    @classmethod
-    def default(cls) -> "ImageCacheConfig":
-        """创建默认配置（启用缓存但不强制刷新和重试失败）"""
-        return cls(enabled=True)
-
-    @classmethod
-    def with_refresh(cls) -> "ImageCacheConfig":
-        """创建启用缓存且强制刷新的配置"""
-        return cls(enabled=True, force_refresh=True)
-
-    @classmethod
-    def with_retry(cls) -> "ImageCacheConfig":
-        """创建启用缓存且重试失败链接的配置"""
-        return cls(enabled=True, retry_failed=True)
-
-    @classmethod
-    def full_refresh(cls) -> "ImageCacheConfig":
-        """创建启用缓存且同时强制刷新和重试失败的配置"""
-        return cls(enabled=True, force_refresh=True, retry_failed=True)
-
 
 def get_cache_path(url: str, cache_dir: str = DEFAULT_CACHE_DIR) -> Path:
     """获取图片的缓存路径"""
@@ -297,11 +277,11 @@ async def encode_image_to_base64(
             image_source, session, cache_config=cache_config, return_cache_path=False
         )
 
-    # Make a copy of the image to avoid modifying the original
-    # image = image.copy()
-
-    # Store original format
+    # Store original format（必须在 copy 之前读取：copy 后 format 会丢失）
     original_format = image.format or "PNG"
+
+    # 复制副本，避免原地修改调用方传入的 Image 对象
+    image = image.copy()
 
     # Resize image based on provided constraints
     target_width, target_height = get_target_size(image, max_width, max_height, max_pixels)
@@ -309,6 +289,11 @@ async def encode_image_to_base64(
         image.thumbnail((target_width, target_height), LANCZOS)
 
     mime_type = f"image/{original_format.lower()}"
+
+    # 非 RGB/RGBA 模式（P 调色板/LA/CMYK 等）必须先转 RGB：
+    # 否则 np.array 得到的是调色板索引等非 RGB 数据，编码后颜色损坏
+    if image.mode not in ("RGB", "RGBA"):
+        image = image.convert("RGB")
 
     # Convert processed image to base64
     cv_img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
@@ -602,7 +587,7 @@ def get_pil_image_sync(
                         pass  # 静默忽略错误缓存文件格式问题
 
             try:
-                response = requests.get(image_source)
+                response = requests.get(image_source, timeout=30)
                 response.raise_for_status()
                 image = Image.open(BytesIO(response.content))
 

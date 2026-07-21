@@ -3,6 +3,7 @@ Folder processor for MLLM client
 专门处理文件夹图像数据的处理器类
 """
 
+import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..clients.mllm import MllmClient
 
+logger = logging.getLogger(__name__)
+
 
 class MllmFolderProcessor:
     """
@@ -19,7 +22,8 @@ class MllmFolderProcessor:
     专门处理文件夹内图像文件与MLLM客户端的交互
     """
 
-    # 支持的图像格式
+    # 支持的图像格式（须能被 cv2.imread 读取：.svg 无法光栅化、.ico 不被 cv2 支持，
+    # 扫进来只会在预处理阶段静默失败，故不列入）
     SUPPORTED_IMAGE_EXTENSIONS = {
         ".jpg",
         ".jpeg",
@@ -29,8 +33,6 @@ class MllmFolderProcessor:
         ".webp",
         ".tiff",
         ".tif",
-        ".svg",
-        ".ico",
     }
 
     def __init__(self, mllm_client: "MllmClient"):
@@ -142,9 +144,9 @@ class MllmFolderProcessor:
         # 按文件名排序，确保结果的一致性
         image_files.sort()
 
-        print(f"扫描完成: 发现 {len(image_files)} 个图像文件")
+        logger.info("扫描完成: 发现 %d 个图像文件", len(image_files))
         if image_files:
-            print(f"示例文件: {image_files[0]}")
+            logger.debug("示例文件: %s", image_files[0])
 
         return image_files
 
@@ -242,7 +244,7 @@ class MllmFolderProcessor:
         )
 
         if not image_files:
-            print("警告: 未找到任何图像文件")
+            logger.warning("未找到任何图像文件: %s", folder_path)
             if return_image_files:
                 return [], []
             else:
@@ -293,7 +295,7 @@ class MllmFolderProcessor:
             response_list: 响应列表
         """
         if not image_files:
-            print("警告: 图像文件列表为空")
+            logger.warning("图像文件列表为空")
             return []
 
         # 验证文件存在性
@@ -302,10 +304,10 @@ class MllmFolderProcessor:
             if os.path.exists(file_path):
                 valid_files.append(file_path)
             else:
-                print(f"警告: 文件不存在，跳过: {file_path}")
+                logger.warning("文件不存在，跳过: %s", file_path)
 
         if not valid_files:
-            print("警告: 没有有效的图像文件")
+            logger.warning("没有有效的图像文件")
             return []
 
         # 构建消息列表

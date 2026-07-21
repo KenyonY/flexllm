@@ -8,7 +8,6 @@ from .image_processor import (
     decode_base64_to_pil,
     encode_base64_from_local_path,
     encode_base64_from_pil,
-    encode_image_to_base64,
     encode_media_to_base64,
     encode_to_base64,
     get_pil_image,
@@ -28,6 +27,10 @@ from .unified_processor import (
 )
 from .unified_processor import batch_process_messages as batch_messages_preprocess
 from .unified_processor import batch_process_messages as unified_batch_process_messages
+
+# 公开的 encode_image_to_base64 统一为 unified 版本（session 可选）。
+# image_processor.encode_image_to_base64（session 必填、支持磁盘缓存）仅供内部使用。
+from .unified_processor import unified_encode_image_to_base64 as encode_image_to_base64
 from .unified_processor import (
     unified_messages_preprocess as messages_preprocess,
 )
