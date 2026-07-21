@@ -591,6 +591,29 @@ class TestClaudeProvider:
                 assert len(content_chunks) > 0
                 assert len(thinking_chunks) > 0
 
+    async def test_claude_stream_usage_prompt_tokens_preserved(self):
+        """回归 #9：流式 message_delta 只带 output_tokens，不能把 message_start 的
+        input_tokens 覆盖为 0。最终 usage 的 prompt_tokens 必须非零。"""
+        cfg = MockServerConfig(port=19417, delay_min=0.01, delay_max=0.01)
+        with MockLLMServer(cfg) as server:
+            async with LLMClient(
+                provider="claude",
+                base_url=server.url,
+                model="mock-model",
+                api_key="test-key",
+            ) as client:
+                final_usage = None
+                async for chunk in client.chat_completions_stream(_msgs(), return_usage=True):
+                    if isinstance(chunk, dict) and chunk.get("type") == "usage":
+                        final_usage = chunk["usage"]
+                assert final_usage is not None, "流式应产出最终 usage 事件"
+                assert final_usage["prompt_tokens"] > 0, "message_delta 不应把 prompt_tokens 归零"
+                assert final_usage["completion_tokens"] > 0
+                assert (
+                    final_usage["total_tokens"]
+                    == final_usage["prompt_tokens"] + final_usage["completion_tokens"]
+                )
+
 
 # ============== 6. Gemini Provider ==============
 
@@ -713,6 +736,33 @@ class TestOpenAIThinking:
                     if isinstance(chunk, dict) and chunk["type"] == "content":
                         content_chunks.append(chunk["content"])
                 assert len(content_chunks) > 0
+
+    def test_extract_content_thinking_is_per_call_stateless(self):
+        """回归 #2：thinking 保留与否必须跟随每次调用的参数，不得依赖实例状态。
+
+        旧实现把 thinking 记在 self._keep_thinking（_build_request_body 写、
+        _extract_content 读），批量/并发下所有行被最后一行的值污染。修复后
+        _extract_content 从入参 thinking 决定，同一响应交错调用互不影响。
+        """
+        client = OpenAIClient(base_url="http://localhost:8000/v1", api_key="x", model="m")
+        # reasoning-parser 模式：content 与 reasoning 同时存在
+        resp = {"choices": [{"message": {"content": "答案是 4", "reasoning": "先想 2+2"}}]}
+        # 交错调用，证明无跨调用状态泄漏
+        keep1 = client._extract_content(resp, thinking=True)
+        strip1 = client._extract_content(resp, thinking=False)
+        keep2 = client._extract_content(resp, thinking=True)
+        strip2 = client._extract_content(resp, thinking=False)
+
+        assert "<think>" in keep1 and "先想 2+2" in keep1
+        assert "<think>" not in strip1 and "先想 2+2" not in strip1
+        assert keep1 == keep2, "thinking=True 结果不应被前一次 thinking=False 调用污染"
+        assert strip1 == strip2
+        # 内嵌 <think> 标签的 content 同理
+        resp2 = {"choices": [{"message": {"content": "<think>推理</think>结论"}}]}
+        assert "<think>" in client._extract_content(resp2, thinking=True)
+        assert client._extract_content(resp2, thinking=False) == "结论"
+        # 确认实例上不再残留 thinking 状态字段
+        assert not hasattr(client, "_keep_thinking")
 
 
 # ============== 8. LLMClientPool 方法测试 ==============
