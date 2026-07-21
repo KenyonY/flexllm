@@ -8,7 +8,7 @@ from typing import Annotated
 
 from .chat_helpers import interactive_chat, single_chat
 from .config import get_config
-from .errors import ErrorType, cli_error, dry_run_output
+from .errors import ErrorType, ExitCode, cli_error, dry_run_output
 from .utils import (
     apply_user_template,
     convert_to_messages,
@@ -21,6 +21,34 @@ from .utils import (
     read_file_contents,
     resolve_model_config,
 )
+
+
+def _count_batch_output(output_path: str, total: int) -> int:
+    """从输出 JSONL 统计成功条数（输出文件是断点续传的事实来源）
+
+    断点续传时跳过的记录在内存 results 中是 None，只有文件能给出真实统计。
+    文件在正常结束时已 compact（每个 index 一条，success 优先）；这里再按
+    success 优先去重一次，以兼容中途退出未 compact 的文件。
+    """
+    statuses: dict[int, str] = {}
+    try:
+        with open(output_path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                idx = record.get("index")
+                if not isinstance(idx, int) or not (0 <= idx < total):
+                    continue
+                if record.get("status") == "success" or idx not in statuses:
+                    statuses[idx] = record.get("status", "error")
+    except OSError:
+        return 0
+    return sum(1 for s in statuses.values() if s == "success")
 
 
 def register_commands(app):
@@ -41,7 +69,9 @@ def register_commands(app):
         thinking: Annotated[
             str | None,
             Option(
-                "--thinking", help="思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
+                "--thinking",
+                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
+                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
             ),
         ] = None,
         schema: Annotated[
@@ -79,7 +109,8 @@ def register_commands(app):
         基本用法:
           flexllm ask "什么是Python"
           flexllm ask "解释代码" -s "你是代码专家"
-          echo "长文本" | flexllm ask "总结一下"
+          echo "长文本" | flexllm ask              # stdin 作为问题（省略 prompt 或用 "-" 占位）
+          cat file.txt | flexllm ask -s "总结以下内容"  # 指令放 -s，正文走管道
 
         附加文件 (-f):  读取文件内容拼接到 prompt 前面
           flexllm ask -f main.py "这段代码有什么问题？"
@@ -108,9 +139,13 @@ def register_commands(app):
                 suggestion="使用 --format text 或 --format json",
                 doc="flexllm ask --help",
             )
+        # 仅在未提供 prompt（或 prompt 为 "-"）时读 stdin：
+        # 提供了 prompt 却无条件 read() 会在空闲管道（spawn 进程未关闭 stdin）上挂死
         stdin_content = None
-        if not sys.stdin.isatty():
+        if (prompt is None or prompt == "-") and not sys.stdin.isatty():
             stdin_content = sys.stdin.read().strip()
+        if prompt == "-":
+            prompt = None
 
         file_content = read_file_contents(files) if files else None
 
@@ -174,7 +209,10 @@ def register_commands(app):
             from flexllm import LLMClient
 
             async with LLMClient(model=model_id, base_url=base_url, api_key=api_key) as client:
-                return await client.chat_completions(messages, **model_params)
+                # --format json 需要真实的 usage/thinking，走 return_usage 拿 ChatCompletionResult
+                return await client.chat_completions(
+                    messages, return_usage=(format == "json"), **model_params
+                )
 
         import time
 
@@ -205,23 +243,19 @@ def register_commands(app):
                     doc="flexllm ask --help",
                     retryable=True,
                 )
-            output = str(result) if not isinstance(result, str) else result
-
             if format == "json":
-                thinking_text = None
-                usage = None
-                if hasattr(result, "data") and isinstance(result.data, dict):
-                    thinking_text = result.data.get("thinking")
-                    usage = result.data.get("usage")
+                # return_usage=True 时返回 ChatCompletionResult(content/usage/reasoning_content)
                 payload = {
-                    "content": output,
-                    "thinking": thinking_text,
-                    "usage": usage,
+                    "content": result if isinstance(result, str) else result.content,
+                    "thinking": getattr(result, "reasoning_content", None),
+                    "usage": getattr(result, "usage", None),
                     "model": model_id,
                     "elapsed_ms": elapsed_ms,
                 }
                 print(json.dumps(payload, ensure_ascii=False))
                 return
+
+            output = str(result) if not isinstance(result, str) else result
 
             if extract:
                 code = extract_code_block(output)
@@ -262,7 +296,9 @@ def register_commands(app):
         thinking: Annotated[
             str | None,
             Option(
-                "--thinking", help="思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
+                "--thinking",
+                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
+                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
             ),
         ] = None,
         schema: Annotated[
@@ -389,8 +425,7 @@ def register_commands(app):
                 base_url,
                 api_key,
                 system_prompt,
-                model_params["temperature"],
-                model_params["max_tokens"],
+                model_params,
                 stream,
                 user_template,
                 thinking=resolved_thinking,
@@ -411,8 +446,7 @@ def register_commands(app):
                 base_url,
                 api_key,
                 system_prompt,
-                model_params["temperature"],
-                model_params["max_tokens"],
+                model_params,
                 stream,
                 user_template,
                 thinking=resolved_thinking,
@@ -434,7 +468,9 @@ def register_commands(app):
         thinking: Annotated[
             str | None,
             Option(
-                "--thinking", help="启用思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
+                "--thinking",
+                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
+                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
             ),
         ] = None,
         title: Annotated[str, Option("--title", help="页面 Logo 文本")] = "flexllm",
@@ -565,7 +601,9 @@ def register_commands(app):
         thinking: Annotated[
             str | None,
             Option(
-                "--thinking", help="启用思考模式 (true/false/low/medium/high 或 budget_tokens 数值)"
+                "--thinking",
+                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
+                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
             ),
         ] = None,
         concurrency: Annotated[
@@ -738,15 +776,28 @@ def register_commands(app):
             str | None,
             Option(
                 "--thinking",
-                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值)",
+                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
+                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
             ),
         ] = None,
         cache: Annotated[
             bool | None, Option("--cache/--no-cache", help="启用/禁用响应缓存")
         ] = None,
-        return_usage: Annotated[bool, Option("--return-usage", help="输出 token 统计")] = False,
+        return_usage: Annotated[
+            bool | None,
+            Option(
+                "--return-usage/--no-return-usage",
+                help="输出 token 统计（默认读配置 batch.return_usage，缺省为 true）",
+            ),
+        ] = None,
         preprocess_msg: Annotated[bool, Option("--preprocess-msg", help="预处理图片消息")] = False,
-        track_cost: Annotated[bool, Option("--track-cost", help="在进度条中显示实时成本")] = False,
+        track_cost: Annotated[
+            bool | None,
+            Option(
+                "--track-cost/--no-track-cost",
+                help="在进度条中显示实时成本（默认读配置 batch.track_cost，缺省为 true）",
+            ),
+        ] = None,
         save_input: Annotated[
             str | None,
             Option(
@@ -764,7 +815,11 @@ def register_commands(app):
         ] = None,
         system_field: Annotated[
             str | None,
-            Option("--system-field", "-sf", help="指定 system prompt 的字段名（跳过自动格式检测）"),
+            Option(
+                "--system-field",
+                "-sf",
+                help="指定 system prompt 的字段名（可单独使用；与 -uf 同用时跳过自动格式检测）",
+            ),
         ] = None,
         user_template: Annotated[
             str | None,
@@ -956,17 +1011,23 @@ def register_commands(app):
                 api_key = model_config.get("api_key", "EMPTY")
 
         effective_cache = cache if cache is not None else batch_config["cache"]
-        effective_return_usage = return_usage or batch_config["return_usage"]
+        effective_return_usage = (
+            return_usage if return_usage is not None else batch_config["return_usage"]
+        )
         effective_preprocess_msg = preprocess_msg or batch_config["preprocess_msg"]
-        effective_track_cost = track_cost or batch_config["track_cost"]
+        effective_track_cost = track_cost if track_cost is not None else batch_config["track_cost"]
         effective_concurrency = (
             concurrency if concurrency is not None else batch_config["concurrency"]
         )
         effective_max_qps = max_qps if max_qps is not None else batch_config["max_qps"]
 
-        effective_system = system if system is not None else config.get_system(model)
+        # 统一用 effective_model（含 batch.model 兜底）解析模型级 system/user_template，
+        # 与下方 get_model_params(effective_model) 保持一致
+        effective_system = system if system is not None else config.get_system(effective_model)
         effective_user_template = (
-            user_template if user_template is not None else config.get_user_template(model)
+            user_template
+            if user_template is not None
+            else config.get_user_template(effective_model)
         )
 
         thinking_value = parse_thinking(thinking)
@@ -1044,11 +1105,23 @@ def register_commands(app):
                 # messages 内显式 system 的优先级由 convert_to_messages 兜底逻辑保证
                 rec_system = raw_params.get("system") if raw_params else None
                 rec_template = raw_params.get("user_template") if raw_params else None
-                eff_sys = rec_system if rec_system is not None else effective_system
+                # -sf 单独使用（未走 custom 格式）时，从指定字段取该行 system
+                field_system = None
+                if system_field and format_type != "custom":
+                    field_system = record.get(system_field)
+                if rec_system is not None:
+                    eff_sys = rec_system
+                elif field_system is not None:
+                    eff_sys = field_system
+                else:
+                    eff_sys = effective_system
                 eff_tmpl = rec_template if rec_template is not None else effective_user_template
                 messages, metadata = convert_to_messages(
                     record, format_type, message_fields, eff_sys, eff_tmpl
                 )
+                # -sf 指定的字段已作为 system 消费，不再透传进 metadata
+                if field_system is not None and metadata:
+                    metadata.pop(system_field, None)
                 messages_list.append(messages)
                 metadata_list.append(metadata if metadata else None)
                 params_list.append(raw_params)
@@ -1173,7 +1246,8 @@ def register_commands(app):
                     summary_payload = None
                 else:
                     summary_payload = {"raw": str(summary)}
-                success_count = sum(1 for r in results if r is not None)
+                # 以输出文件为准统计（断点续传跳过的记录在内存 results 中是 None）
+                success_count = _count_batch_output(output, len(records))
                 print(
                     json.dumps(
                         {
@@ -1578,6 +1652,22 @@ def register_commands(app):
 
         import requests
 
+        # test 只会拼 OpenAI 风格端点（/models、/chat/completions），
+        # claude/gemini 配置必然失败——诚实报告不支持，而不是打出误导性的连接失败
+        _model_config = get_config().get_model_config(model)
+        _provider = (_model_config or {}).get("provider", "openai")
+        if _provider in ("claude", "gemini"):
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "flexllm test 目前仅支持 OpenAI 兼容端点",
+                context={
+                    "model": model or (_model_config or {}).get("name"),
+                    "provider": _provider,
+                },
+                suggestion='claude/gemini 模型请直接用 flexllm ask "hi" -m <model> 验证连通性',
+                doc="flexllm test --help",
+            )
+
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
 
         if not base_url:
@@ -1590,6 +1680,7 @@ def register_commands(app):
             )
 
         result_data = {}
+        test_failed = False
 
         if not json_output:
             print("\nLLM 服务连接测试")
@@ -1626,6 +1717,7 @@ def register_commands(app):
                     print(f"   ✓ 连接成功 ({elapsed:.2f}s)")
                     print(f"   可用模型数: {model_count}")
             else:
+                test_failed = True
                 if json_output:
                     result_data["server"] = {
                         "status": "error",
@@ -1645,7 +1737,10 @@ def register_commands(app):
                         doc="flexllm test --help",
                         retryable=True,
                     )
+        except typer.Exit:
+            raise
         except Exception as e:
+            test_failed = True
             if json_output:
                 result_data["server"] = {"status": "error", "error": str(e)}
             else:
@@ -1697,6 +1792,7 @@ def register_commands(app):
                         print(f"   ✓ 调用成功 ({elapsed:.2f}s)")
                         print(f"   响应: {content[:100]}...")
                 else:
+                    test_failed = True
                     if json_output:
                         result_data["chat"] = {
                             "status": "error",
@@ -1707,6 +1803,7 @@ def register_commands(app):
                         print(f"   ✗ 调用失败: HTTP {response.status_code}")
                         print(f"   {response.text[:200]}")
             except Exception as e:
+                test_failed = True
                 if json_output:
                     result_data["chat"] = {"status": "error", "error": str(e)}
                 else:
@@ -1717,7 +1814,11 @@ def register_commands(app):
 
             print(json_module.dumps(result_data, indent=2, ensure_ascii=False))
         else:
-            print("\n测试完成")
+            print("\n测试完成" + ("（存在失败项）" if test_failed else ""))
+
+        # 任何检查失败都以非零退出码结束（与 NETWORK_ERROR 的退出码约定一致）
+        if test_failed:
+            raise typer.Exit(ExitCode.NETWORK)
 
     @app.command()
     def init(
@@ -2175,8 +2276,71 @@ models:
                 doc="flexllm mock --help",
             )
 
-        delay_min, delay_max = parse_range(delay, float)
-        response_min_len, response_max_len = parse_range(response_len, int)
+        # ── 参数校验前置：非法参数给出友好错误 + 非零退出，而不是启动后原始 traceback / 请求期 500 ──
+        try:
+            delay_min, delay_max = parse_range(delay, float)
+        except ValueError:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--delay 参数格式无效",
+                context={"arg": "-d/--delay", "received": delay, "expected": "'0.5' 或 '1-5'"},
+                suggestion="使用非负数或 'min-max' 范围，如 -d 0.5 或 -d 1-5",
+                doc="flexllm mock --help",
+            )
+        try:
+            response_min_len, response_max_len = parse_range(response_len, int)
+        except ValueError:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--response-len 参数格式无效",
+                context={
+                    "arg": "-l/--response-len",
+                    "received": response_len,
+                    "expected": "'100' 或 '10-1000'",
+                },
+                suggestion="使用正整数或 'min-max' 范围，如 -l 100 或 -l 10-1000",
+                doc="flexllm mock --help",
+            )
+
+        if delay_min < 0 or delay_max < 0 or delay_min > delay_max:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--delay 取值无效（须非负且 min <= max）",
+                context={"arg": "-d/--delay", "received": delay},
+                suggestion="如 -d 0.5 或 -d 1-5",
+                doc="flexllm mock --help",
+            )
+        if response_min_len < 1 or response_min_len > response_max_len:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--response-len 取值无效（须为正整数且 min <= max）",
+                context={"arg": "-l/--response-len", "received": response_len},
+                suggestion="如 -l 100 或 -l 10-1000",
+                doc="flexllm mock --help",
+            )
+        if not 0 <= error_rate <= 1:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--error-rate 必须在 0-1 之间",
+                context={"arg": "--error-rate", "received": error_rate},
+                suggestion="如 --error-rate 0.5 表示 50% 失败率",
+                doc="flexllm mock --help",
+            )
+        if rps < 0 or token_rate < 0:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "--rps/--token-rate 必须非负（0 表示不限制）",
+                context={"rps": rps, "token_rate": token_rate},
+                doc="flexllm mock --help",
+            )
+        if qa and not Path(qa).is_file():
+            cli_error(
+                ErrorType.IO_ERROR,
+                "QA 数据文件不存在",
+                context={"arg": "--qa", "received": qa},
+                suggestion='检查路径是否正确，QA 文件为 JSONL：每行 {"input": ..., "output": ...}',
+                doc="flexllm mock --help",
+            )
 
         config = MockServerConfig(
             port=port,
@@ -2268,7 +2432,7 @@ models:
 
             v = __version__
         except Exception:
-            v = "0.1.0"
+            v = "unknown"
         if json_output:
             import json as json_module
 

@@ -851,3 +851,116 @@ class TestToolCallHelpers:
         assert isinstance(args["count"], int)
         assert isinstance(args["rate"], float)
         assert isinstance(args["active"], bool)
+
+
+# ── 请求校验（回归：非法请求返回 400，而不是按空请求返回 200） ──
+
+
+class TestRequestValidation:
+    @pytest.mark.asyncio
+    async def test_openai_invalid_json_returns_400(self):
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/chat/completions",
+                    data=b"{not valid json",
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    assert resp.status == 400
+                    data = await resp.json()
+                    assert data["error"]["type"] == "invalid_request_error"
+
+    @pytest.mark.asyncio
+    async def test_openai_missing_messages_returns_400(self):
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/chat/completions", json={"model": "mock"}
+                ) as resp:
+                    assert resp.status == 400
+                    data = await resp.json()
+                    assert data["error"]["param"] == "messages"
+
+    @pytest.mark.asyncio
+    async def test_claude_missing_messages_returns_400(self):
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.url}/messages",
+                    json={"model": "mock", "max_tokens": 1024},
+                    headers={"x-api-key": "test", "anthropic-version": "2023-06-01"},
+                ) as resp:
+                    assert resp.status == 400
+                    data = await resp.json()
+                    assert data["type"] == "error"
+                    assert data["error"]["type"] == "invalid_request_error"
+
+    @pytest.mark.asyncio
+    async def test_gemini_missing_contents_returns_400(self):
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.gemini_url}/models/mock-model:generateContent?key=test",
+                    json={},
+                ) as resp:
+                    assert resp.status == 400
+                    data = await resp.json()
+                    assert data["error"]["status"] == "INVALID_ARGUMENT"
+
+
+# ── 流式 usage 语义（回归：贴近真实 OpenAI —— 仅 stream_options.include_usage 时发独立 usage chunk） ──
+
+
+class TestStreamUsageSemantics:
+    async def _collect_chunks(self, url: str, body: dict) -> list[dict]:
+        chunks = []
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=body) as resp:
+                assert resp.status == 200
+                async for line in resp.content:
+                    text = line.decode("utf-8").strip()
+                    if text.startswith("data: ") and text != "data: [DONE]":
+                        chunks.append(json.loads(text[6:]))
+        return chunks
+
+    @pytest.mark.asyncio
+    async def test_stream_no_usage_by_default(self):
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            chunks = await self._collect_chunks(
+                f"{server.url}/chat/completions",
+                {"model": "mock", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+            )
+            assert all("usage" not in c for c in chunks)
+
+    @pytest.mark.asyncio
+    async def test_stream_usage_as_separate_final_chunk(self):
+        port = _port()
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            chunks = await self._collect_chunks(
+                f"{server.url}/chat/completions",
+                {
+                    "model": "mock",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                },
+            )
+            usage_chunks = [c for c in chunks if "usage" in c]
+            assert len(usage_chunks) == 1
+            # usage 在 choices 为空的独立末尾 chunk 中
+            assert usage_chunks[0] is chunks[-1]
+            assert usage_chunks[0]["choices"] == []
+            assert usage_chunks[0]["usage"]["total_tokens"] > 0
+            # finish chunk 不带 usage
+            finish_chunks = [
+                c
+                for c in chunks
+                if c.get("choices") and c["choices"][0].get("finish_reason") == "stop"
+            ]
+            assert len(finish_chunks) == 1
+            assert "usage" not in finish_chunks[0]

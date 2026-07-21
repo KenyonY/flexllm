@@ -176,14 +176,17 @@ class ChatWebServer:
             if not messages or messages[0].get("role") != "system":
                 messages.insert(0, {"role": "system", "content": self.config.system_prompt})
 
-        # 应用 user_template
+        # 应用 user_template：只套用到最后一条 content 为 str 的 user 消息
+        # （与 batch/CLI 的语义一致，历史消息保持原样）
         if self.config.user_template:
-            messages = [
-                {**msg, "content": self.config.user_template.format(content=msg["content"])}
-                if msg.get("role") == "user" and isinstance(msg.get("content"), str)
-                else msg
-                for msg in messages
-            ]
+            for i in range(len(messages) - 1, -1, -1):
+                msg = messages[i]
+                if msg.get("role") == "user" and isinstance(msg.get("content"), str):
+                    messages[i] = {
+                        **msg,
+                        "content": self.config.user_template.format(content=msg["content"]),
+                    }
+                    break
 
         response = web.StreamResponse(
             status=200,

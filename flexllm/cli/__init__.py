@@ -94,6 +94,7 @@ def _fallback_cli():
 
     print("错误: 需要安装 typer: pip install typer", file=sys.stderr)
     print("或者: pip install flexllm[cli]", file=sys.stderr)
+    sys.exit(1)
 
 
 def main():

@@ -205,9 +205,9 @@ class MockLLMServer:
         if not HAS_AIOHTTP:
             raise ImportError("aiohttp is required for MockLLMServer: pip install aiohttp")
         self.config = config or MockServerConfig()
+        # 收到的请求计数。注意：仅在单进程模式（run()/直接调用 handler）下有效；
+        # start() 使用独立子进程运行服务器，父进程中该值恒为 0
         self.request_count = 0
-        self._app = None
-        self._runner = None
         self._process = None
         self._rps_limiter = RPSLimiter(self.config.rps)
         self._qa_map: dict[str, str] = self._load_qa_data(self.config.qa_path)
@@ -330,10 +330,6 @@ class MockLLMServer:
     def url(self) -> str:
         """OpenAI / Claude API 的 base URL"""
         return f"http://localhost:{self.config.port}/v1"
-
-    @property
-    def base_url(self) -> str:
-        return self.url
 
     @property
     def gemini_url(self) -> str:
@@ -606,6 +602,7 @@ class MockLLMServer:
         prompt_tokens: int,
         request_id: str,
         thinking_text: str | None = None,
+        include_usage: bool = False,
     ):
         """生成 OpenAI 格式的流式响应"""
         token_interval = 1.0 / self.config.token_rate if self.config.token_rate > 0 else 0
@@ -650,20 +647,30 @@ class MockLLMServer:
             }
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
-        # 结束标记
+        # 结束标记（贴近真实 OpenAI 行为：finish chunk 不带 usage）
         final_chunk = {
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
             "choices": [{"index": 0, "delta": {}, "logprobs": None, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
         }
         yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+        # 仅当请求带 stream_options.include_usage 时，以 choices 为空的独立末尾 chunk 发送 usage
+        if include_usage:
+            usage_chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            }
+            yield f"data: {json.dumps(usage_chunk, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     async def _stream_openai_tool_call(
@@ -674,6 +681,7 @@ class MockLLMServer:
         model: str,
         prompt_tokens: int,
         request_id: str,
+        include_usage: bool = False,
     ):
         """生成 OpenAI 格式的流式 tool_call 响应"""
         token_interval = 1.0 / self.config.token_rate if self.config.token_rate > 0 else 0
@@ -737,20 +745,29 @@ class MockLLMServer:
             }
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
-        # 结束标记
+        # 结束标记（贴近真实 OpenAI 行为：finish chunk 不带 usage）
         final_chunk = {
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": int(time.time()),
             "model": model,
             "choices": [{"index": 0, "delta": {}, "logprobs": None, "finish_reason": "tool_calls"}],
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            },
         }
         yield f"data: {json.dumps(final_chunk, ensure_ascii=False)}\n\n"
+        if include_usage:
+            usage_chunk = {
+                "id": request_id,
+                "object": "chat.completion.chunk",
+                "created": int(time.time()),
+                "model": model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            }
+            yield f"data: {json.dumps(usage_chunk, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
     async def _handle_chat_completions(self, request: web.Request) -> web.Response:
@@ -759,14 +776,40 @@ class MockLLMServer:
         self.request_count += 1
         request_id = f"chatcmpl-{uuid.uuid4().hex[:24]}"
 
+        # 请求校验：与真实 OpenAI API 一致，非法请求返回 400 而不是按空请求返回 200
         try:
             data = await request.json()
         except Exception:
-            data = {}
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Invalid JSON in request body",
+                        "type": "invalid_request_error",
+                        "param": None,
+                        "code": "invalid_json",
+                    }
+                },
+                status=400,
+            )
 
-        messages = data.get("messages", [])
+        messages = data.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "'messages' is a required property and must be a non-empty array",
+                        "type": "invalid_request_error",
+                        "param": "messages",
+                        "code": "invalid_request_error",
+                    }
+                },
+                status=400,
+            )
         model = data.get("model", self.config.model)
         stream = data.get("stream", False)
+        # 真实 OpenAI 行为：仅当 stream_options.include_usage 时流式末尾发 usage chunk
+        stream_options = data.get("stream_options") or {}
+        include_usage = bool(stream_options.get("include_usage"))
         include_thinking = self._should_include_thinking(data)
 
         await asyncio.sleep(self._get_delay())
@@ -810,7 +853,13 @@ class MockLLMServer:
                 )
                 await response.prepare(request)
                 async for chunk in self._stream_openai_tool_call(
-                    tool_name, tool_args, tool_call_id, model, prompt_tokens, request_id
+                    tool_name,
+                    tool_args,
+                    tool_call_id,
+                    model,
+                    prompt_tokens,
+                    request_id,
+                    include_usage=include_usage,
                 ):
                     await response.write(chunk.encode("utf-8"))
                 await response.write_eof()
@@ -877,7 +926,12 @@ class MockLLMServer:
             )
             await response.prepare(request)
             async for chunk in self._stream_response(
-                response_text, model, prompt_tokens, request_id, thinking_text
+                response_text,
+                model,
+                prompt_tokens,
+                request_id,
+                thinking_text,
+                include_usage=include_usage,
             ):
                 await response.write(chunk.encode("utf-8"))
             await response.write_eof()
@@ -1128,12 +1182,33 @@ class MockLLMServer:
         self.request_count += 1
         request_id = f"msg_{uuid.uuid4().hex[:24]}"
 
+        # 请求校验：与真实 Claude API 一致，非法请求返回 400
         try:
             data = await request.json()
         except Exception:
-            data = {}
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "Invalid JSON in request body",
+                    },
+                },
+                status=400,
+            )
 
-        messages = data.get("messages", [])
+        messages = data.get("messages")
+        if not isinstance(messages, list) or not messages:
+            return web.json_response(
+                {
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": "messages: Field required and must be a non-empty array",
+                    },
+                },
+                status=400,
+            )
         model = data.get("model", self.config.model)
         stream = data.get("stream", False)
         include_thinking = self._should_include_thinking(data)
@@ -1191,8 +1266,8 @@ class MockLLMServer:
             )
 
         user_text = self._extract_last_user_text(messages, "claude")
-        # Claude 没有 response_format，但如果请求中带了也兼容处理
-        response_text = self._generate_response_text(user_text)
+        # 真实 Claude API 没有 response_format；请求方带了也兼容处理（生成合法 JSON）
+        response_text = self._generate_response_text(user_text, data.get("response_format"))
         thinking_text = self._generate_thinking_text() if include_thinking else None
         completion_tokens = self._estimate_tokens(response_text)
         if thinking_text:
@@ -1311,12 +1386,33 @@ class MockLLMServer:
         model_action = request.match_info["model_action"]
         is_stream = "streamGenerateContent" in model_action
 
+        # 请求校验：与真实 Gemini API 一致，非法请求返回 400
         try:
             data = await request.json()
         except Exception:
-            data = {}
+            return web.json_response(
+                {
+                    "error": {
+                        "code": 400,
+                        "message": "Invalid JSON payload received.",
+                        "status": "INVALID_ARGUMENT",
+                    }
+                },
+                status=400,
+            )
 
-        contents = data.get("contents", [])
+        contents = data.get("contents")
+        if not isinstance(contents, list) or not contents:
+            return web.json_response(
+                {
+                    "error": {
+                        "code": 400,
+                        "message": "contents is not specified",
+                        "status": "INVALID_ARGUMENT",
+                    }
+                },
+                status=400,
+            )
         include_thinking = self._should_include_thinking(data)
 
         await asyncio.sleep(self._get_delay())
@@ -1703,19 +1799,6 @@ class MockLLMServer:
         # MCP (JSON-RPC over HTTP)
         app.router.add_post("/mcp", self._handle_mcp)
         return app
-
-    async def start_async(self):
-        """异步启动服务器"""
-        self._app = self._create_app()
-        self._runner = web.AppRunner(self._app)
-        await self._runner.setup()
-        site = web.TCPSite(self._runner, "0.0.0.0", self.config.port)
-        await site.start()
-
-    async def stop_async(self):
-        """异步停止服务器"""
-        if self._runner:
-            await self._runner.cleanup()
 
     def _run_server(self):
         """在独立进程中运行服务器"""

@@ -85,13 +85,26 @@ class TestGetKwargs:
         assert kwargs["max_tokens"] == 1024
 
 
+def _make_server_with_client(**client_kwargs) -> ServeServer:
+    """构造带底层 client 的 ServeServer（_parse_result 按 client 类型分发解析）"""
+    from flexllm import LLMClient
+
+    defaults = {"model": "test-model", "base_url": "http://localhost:8001/v1", "api_key": "EMPTY"}
+    defaults.update(client_kwargs)
+    server = ServeServer(
+        ServeConfig(model=defaults["model"], base_url=defaults.get("base_url", ""))
+    )
+    server._client = LLMClient(**defaults)
+    return server
+
+
 class TestParseResult:
     def test_normal_response(self):
         raw = {
             "choices": [{"message": {"content": "回答内容"}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
         }
-        result = ServeServer._parse_result(raw)
+        result = _make_server_with_client()._parse_result(raw)
         assert result["content"] == "回答内容"
         assert result["thinking"] is None
         assert result["usage"]["total_tokens"] == 30
@@ -101,7 +114,7 @@ class TestParseResult:
             "choices": [{"message": {"content": "答案", "reasoning": "思考过程"}}],
             "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
         }
-        result = ServeServer._parse_result(raw)
+        result = _make_server_with_client()._parse_result(raw)
         assert result["content"] == "答案"
         assert result["thinking"] == "思考过程"
 
@@ -110,7 +123,7 @@ class TestParseResult:
             "choices": [{"message": {"content": "<think>思考中</think>最终答案"}}],
             "usage": {"prompt_tokens": 5, "completion_tokens": 10, "total_tokens": 15},
         }
-        result = ServeServer._parse_result(raw)
+        result = _make_server_with_client()._parse_result(raw)
         assert result["content"] == "最终答案"
         assert result["thinking"] == "思考中"
 
@@ -118,7 +131,7 @@ class TestParseResult:
         raw = {
             "choices": [{"message": {"content": "内容"}}],
         }
-        result = ServeServer._parse_result(raw)
+        result = _make_server_with_client()._parse_result(raw)
         assert result["content"] == "内容"
         assert result["thinking"] is None
         assert result["usage"] is None
@@ -128,9 +141,26 @@ class TestParseResult:
             "choices": [{"message": {"content": "纯内容", "reasoning": ""}}],
             "usage": {},
         }
-        result = ServeServer._parse_result(raw)
+        result = _make_server_with_client()._parse_result(raw)
         assert result["content"] == "纯内容"
         assert result["thinking"] is None  # 空字符串转为 None
+
+    def test_claude_response_dispatch(self):
+        """回归：serve 接 Claude 配置模型时按 ClaudeClient 解析（不再硬编码 OpenAI）"""
+        server = _make_server_with_client(
+            model="claude-sonnet-4-6", base_url=None, api_key="sk-ant-test", provider="claude"
+        )
+        raw = {
+            "content": [
+                {"type": "thinking", "thinking": "推理过程"},
+                {"type": "text", "text": "Claude 的回答"},
+            ],
+            "usage": {"input_tokens": 10, "output_tokens": 20},
+        }
+        result = server._parse_result(raw)
+        assert result["content"] == "Claude 的回答"
+        assert result["thinking"] == "推理过程"
+        assert result["usage"]["input_tokens"] == 10
 
 
 class TestParseThinking:
@@ -170,3 +200,21 @@ class TestParseThinking:
 
         with pytest.raises(typer.Exit):
             _parse_thinking("invalid_value")
+
+
+class TestServeConfigDefaults:
+    """默认配置与路由（并入自已删除的 test_mcp_server.py）"""
+
+    def test_default_config(self):
+        config = ServeConfig()
+        assert config.port == 8000
+        assert config.host == "0.0.0.0"
+
+    def test_create_app_routes(self):
+        server = ServeServer(ServeConfig())
+        app = server._create_app()
+
+        routes = [r.resource.canonical for r in app.router.routes() if hasattr(r, "resource")]
+        assert "/api/generate" in routes
+        assert "/health" in routes
+        assert "/api/config" in routes

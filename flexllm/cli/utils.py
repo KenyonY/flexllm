@@ -53,6 +53,23 @@ def resolve_model_config(
             )
         return model, base_url, api_key
 
+    # pool 型模型（endpoints 列表）没有单一 base_url，当前命令无法使用，
+    # 明确报错而不是把 endpoints 泄进请求体或发出非法请求
+    if model_config.get("endpoints") and not model_config.get("base_url"):
+        from .errors import ErrorType, cli_error
+
+        cli_error(
+            ErrorType.INVALID_ARGS,
+            "pool 型模型（endpoints）仅 batch 命令支持",
+            context={
+                "model": model_config.get("name", model_config.get("id")),
+                "endpoints_count": len(model_config.get("endpoints") or []),
+            },
+            suggestion="此命令请改用单 endpoint 模型（flexllm list 查看），"
+            "多 endpoint 负载均衡请使用 flexllm batch 并配置 batch.endpoints",
+            doc="flexllm batch --help",
+        )
+
     resolved_base_url = base_url or model_config.get("base_url")
     resolved_api_key = api_key or model_config.get("api_key", "EMPTY")
 

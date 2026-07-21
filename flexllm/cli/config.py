@@ -12,7 +12,17 @@ class FlexLLMConfig:
     """配置管理"""
 
     # 元信息字段，不作为模型调用参数传递
-    META_FIELDS = {"id", "name", "provider", "base_url", "api_key", "system", "user_template"}
+    META_FIELDS = {
+        "id",
+        "name",
+        "provider",
+        "base_url",
+        "api_key",
+        "system",
+        "user_template",
+        "endpoints",
+        "fallback",
+    }
 
     CONFIG_PATHS = [
         Path("flexllm_config.yaml"),
@@ -24,11 +34,15 @@ class FlexLLMConfig:
 
         load_dotenv()
         self._config_path = Path(config_path) if config_path else None
+        self._loaded_path: Path | None = None
         self.config = self._load_config()
 
     def _load_config(self) -> dict:
         """加载配置文件"""
-        # 优先使用指定的配置文件路径
+        # 显式指定的配置文件路径不存在时立即报错（fail fast，不静默回落）
+        if self._config_path is not None and not self._config_path.exists():
+            raise FileNotFoundError(f"指定的配置文件不存在: {self._config_path}")
+
         paths = [self._config_path] if self._config_path else self.CONFIG_PATHS
         for path in paths:
             if path.exists():
@@ -40,6 +54,7 @@ class FlexLLMConfig:
                     )
                 with open(path, encoding="utf-8") as f:
                     config = yaml.safe_load(f) or {}
+                self._loaded_path = path
                 return config
 
         # 从环境变量构建配置
@@ -66,28 +81,29 @@ class FlexLLMConfig:
         return {}
 
     def get_model_config(self, model_name_or_id: str = None) -> dict | None:
-        """获取模型配置"""
+        """获取模型配置
+
+        优先级链（高 → 低）：
+        1. CLI 参数（--base-url/--api-key，由调用方在结果之上覆盖）
+        2. 配置文件具名模型（-m 显式选中的模型条目，原样返回，环境变量不覆盖）
+        3. 环境变量（FLEXLLM_*/OPENAI_*，仅在未从配置文件选中模型时作为默认配置来源）
+        4. 配置文件 default（default 指向的模型，其次第一个模型）
+
+        即：显式选择（-m 命中配置文件具名模型）优先于环境变量；
+        环境变量只在「未显式选中模型」或「显式名称未命中」时生效。
+        """
         models = self.config.get("models", [])
 
-        # 先检查环境变量
         env_base_url = os.environ.get("FLEXLLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
         env_api_key = os.environ.get("FLEXLLM_API_KEY") or os.environ.get("OPENAI_API_KEY")
         env_model = os.environ.get("FLEXLLM_MODEL") or os.environ.get("OPENAI_MODEL")
 
         if model_name_or_id:
-            # 精确匹配 name 或 id
+            # 显式选择：精确匹配 name 或 id，命中则原样返回（不被环境变量覆盖）
             for m in models:
                 if m.get("name") == model_name_or_id or m.get("id") == model_name_or_id:
-                    result = dict(m)
-                    # 环境变量覆盖
-                    if env_base_url:
-                        result["base_url"] = env_base_url
-                    if env_api_key:
-                        result["api_key"] = env_api_key
-                    if env_model:
-                        result["id"] = env_model
-                    return result
-            # 如果有环境变量，作为 fallback 返回
+                    return dict(m)
+            # 未命中配置文件时，环境变量作为 fallback 端点
             if env_base_url:
                 return {
                     "id": model_name_or_id,
@@ -96,46 +112,35 @@ class FlexLLMConfig:
                     "api_key": env_api_key or "EMPTY",
                 }
             return None
-        else:
-            # 使用默认模型
-            default = self.config.get("default")
-            if default:
-                for m in models:
-                    if m.get("name") == default or m.get("id") == default:
-                        result = dict(m)
-                        if env_base_url:
-                            result["base_url"] = env_base_url
-                        if env_api_key:
-                            result["api_key"] = env_api_key
-                        if env_model:
-                            result["id"] = env_model
-                        return result
-            # 返回第一个模型
-            if models:
-                result = dict(models[0])
-                if env_base_url:
-                    result["base_url"] = env_base_url
-                if env_api_key:
-                    result["api_key"] = env_api_key
-                if env_model:
-                    result["id"] = env_model
-                return result
-            # 环境变量兜底
-            if env_base_url:
-                return {
-                    "id": env_model or "default",
-                    "name": env_model or "default",
-                    "base_url": env_base_url,
-                    "api_key": env_api_key or "EMPTY",
-                }
-            return None
+
+        # 未显式选择模型：环境变量优先于配置文件 default
+        if env_model:
+            # FLEXLLM_MODEL/OPENAI_MODEL 命中配置文件具名模型时，等同 -m 选中
+            for m in models:
+                if m.get("name") == env_model or m.get("id") == env_model:
+                    return dict(m)
+        if env_base_url:
+            return {
+                "id": env_model or "default",
+                "name": env_model or "default",
+                "base_url": env_base_url,
+                "api_key": env_api_key or "EMPTY",
+            }
+
+        # 配置文件 default
+        default = self.config.get("default")
+        if default:
+            for m in models:
+                if m.get("name") == default or m.get("id") == default:
+                    return dict(m)
+        # 兜底：第一个模型
+        if models:
+            return dict(models[0])
+        return None
 
     def get_config_path(self) -> Path | None:
-        """获取当前使用的配置文件路径"""
-        for path in self.CONFIG_PATHS:
-            if path.exists():
-                return path
-        return None
+        """获取实际加载的配置文件路径（未从文件加载时返回 None）"""
+        return self._loaded_path
 
     def _resolve_model_name(self, model_name_or_id: str = None) -> str | None:
         """解析模型名称，未指定时使用默认模型"""

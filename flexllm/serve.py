@@ -90,17 +90,15 @@ class ServeServer:
             kwargs["max_tokens"] = data["max_tokens"]
         return kwargs
 
-    @staticmethod
-    def _parse_result(raw_data: dict) -> dict:
-        """从原始响应中提取 thinking、content 和 usage"""
-        from .clients.openai import OpenAIClient
+    def _parse_result(self, raw_data: dict) -> dict:
+        """从原始响应中提取 thinking、content 和 usage
 
-        parsed = OpenAIClient.parse_thoughts(raw_data)
-        usage = None
-        try:
-            usage = raw_data.get("usage")
-        except Exception:
-            pass
+        解析交给 client 自身的 parse_thoughts（按 provider 分发到
+        OpenAI/Claude/Gemini 对应实现），不硬编码 OpenAI 格式。
+        """
+        parsed = self._client.parse_thoughts(raw_data)
+        # usage 字段名因 API 而异：OpenAI/Claude 用 usage，Gemini 用 usageMetadata
+        usage = raw_data.get("usage") or raw_data.get("usageMetadata")
         return {
             "content": parsed["answer"],
             "thinking": parsed["thought"] or None,
@@ -255,9 +253,10 @@ class ServeServer:
             await response.write(f"data: {error_event}\n\n".encode("utf-8"))
             elapsed = time.perf_counter() - start
             logger.error("POST /api/generate/stream error %.3fs error=%s", elapsed, e)
+        else:
+            elapsed = time.perf_counter() - start
+            logger.info("POST /api/generate/stream 200 %.3fs", elapsed)
 
-        elapsed = time.perf_counter() - start
-        logger.info("POST /api/generate/stream 200 %.3fs", elapsed)
         await response.write_eof()
         return response
 
