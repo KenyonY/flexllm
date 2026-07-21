@@ -18,8 +18,6 @@ from ..msg_processors.unified_processor import (
 )
 from .openai import OpenAIClient
 
-_DEFAULT_SAFETY = {"input_level": "none", "input_image_level": "none"}
-
 
 class MllmClientBase(ABC):
     """
@@ -164,7 +162,8 @@ class MllmClient(MllmClientBase):
             temperature: 温度参数
             max_tokens: 最大生成token数
             top_p: top_p参数
-            safety: 安全级别
+            safety: 安全级别（非标准参数，仅显式传入时注入请求体；
+                默认 None 不发送，避免严格端点 400）
             show_progress: 是否显示每一步的进度条和统计信息
             **kwargs: 其他参数
 
@@ -173,14 +172,14 @@ class MllmClient(MllmClientBase):
         """
         if model is None:
             model = self.model
-        if safety is None:
-            safety = _DEFAULT_SAFETY
 
         # 使用持有的处理器实例进行预处理，保持缓存效果
         messages_list = await self._preprocess_messages_with_instance(
             messages_list,
             show_progress=show_progress,
         )
+        if safety is not None:
+            kwargs["safety"] = safety
         response_list, _ = await self.client.chat_completions_batch(
             messages_list=messages_list,
             model=model,
@@ -188,7 +187,6 @@ class MllmClient(MllmClientBase):
             max_tokens=max_tokens,
             top_p=top_p,
             return_summary=True,
-            safety=safety,
             show_progress=show_progress,
             **kwargs,
         )
@@ -334,8 +332,6 @@ class MllmClient(MllmClientBase):
         """
         if model is None:
             model = self.model
-        if safety is None:
-            safety = _DEFAULT_SAFETY
 
         # 默认选择函数(如果未提供)，简单返回第一个响应
         if selector_fn is None:
@@ -352,6 +348,8 @@ class MllmClient(MllmClientBase):
             expanded_messages_list,
             show_progress=show_progress,
         )
+        if safety is not None:
+            kwargs["safety"] = safety
         all_responses, _ = await self.client.chat_completions_batch(
             messages_list=messages_list,
             model=model,
@@ -359,7 +357,6 @@ class MllmClient(MllmClientBase):
             max_tokens=max_tokens,
             top_p=top_p,
             return_summary=True,
-            safety=safety,
             show_progress=show_progress,
             **kwargs,
         )

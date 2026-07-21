@@ -101,7 +101,6 @@ class LLMClientPool:
         model: str = None,
         # 多 endpoint 参数
         endpoints: list[dict | EndpointConfig] = None,
-        clients: list = None,  # 已废弃的参数，保留向后兼容
         fallback: bool = True,
         max_fallback_attempts: int = None,
         failure_threshold: int | float = float("inf"),
@@ -137,7 +136,6 @@ class LLMClientPool:
 
             # 多 endpoint 模式参数
             endpoints: Endpoint 配置列表，每个元素可以是 dict 或 EndpointConfig
-            clients: （已废弃）已创建的客户端列表
             fallback: 是否启用故障转移（某个 endpoint 失败时尝试其他）
             max_fallback_attempts: 最大故障转移次数，默认为 endpoint 数量
             failure_threshold: 连续失败多少次后标记为不健康
@@ -180,9 +178,9 @@ class LLMClientPool:
 
         # 判断是单 endpoint 还是多 endpoint 模式
         # 单模式：提供了 base_url，或者 provider 是 gemini/claude（它们不需要 base_url）
-        # 多模式：提供了 endpoints 或 clients
+        # 多模式：提供了 endpoints
         # 无参数：抛出错误
-        has_multi_endpoint = endpoints is not None or clients is not None
+        has_multi_endpoint = endpoints is not None
 
         # 如果没有提供多 endpoint 参数，检查是否是单 endpoint 模式
         if not has_multi_endpoint:
@@ -199,12 +197,10 @@ class LLMClientPool:
             has_single_endpoint = base_url is not None
 
         if not has_single_endpoint and not has_multi_endpoint:
-            raise ValueError("必须提供 base_url（单 endpoint）或 endpoints/clients（多 endpoint）")
+            raise ValueError("必须提供 base_url（单 endpoint）或 endpoints（多 endpoint）")
 
         if has_single_endpoint and has_multi_endpoint:
-            raise ValueError(
-                "不能同时提供 base_url 和 endpoints/clients，请选择单或多 endpoint 模式"
-            )
+            raise ValueError("不能同时提供 base_url 和 endpoints，请选择单或多 endpoint 模式")
 
         # pool 级全局限制器：注入到每个底层客户端的 ConcurrentRequester 中，
         # 在唯一的请求执行点（_send_single_request）生效，天然覆盖单条/批量/迭代
@@ -241,14 +237,11 @@ class LLMClientPool:
             )
         else:
             # ========== 多 endpoint 模式 ==========
-            if not endpoints and not clients:
-                raise ValueError("多 endpoint 模式必须提供 endpoints 或 clients")
-            if endpoints and clients:
-                raise ValueError("endpoints 和 clients 只能二选一")
+            if not endpoints:
+                raise ValueError("多 endpoint 模式必须提供 endpoints")
 
             self._init_multi_mode(
                 endpoints=endpoints,
-                clients=clients,
                 fallback=fallback,
                 max_fallback_attempts=max_fallback_attempts,
                 failure_threshold=failure_threshold,
@@ -516,7 +509,6 @@ class LLMClientPool:
     def _init_multi_mode(
         self,
         endpoints: list,
-        clients: list,
         fallback: bool,
         max_fallback_attempts: int,
         failure_threshold: float,
@@ -538,89 +530,61 @@ class LLMClientPool:
         self._provider = None
         self._model = None
 
-        if clients:
-            # 使用已有的 clients（向后兼容，但已废弃）
-            # 需要从 LLMClient 包装器中提取底层客户端
-            self._clients = []
-            self._endpoints = []
-            for c in clients:
-                # 检查是否是 LLMClient（有 _client 属性）
-                if hasattr(c, "_client"):
-                    self._clients.append(c._client)  # 提取底层客户端
-                    self._endpoints.append(
-                        EndpointConfig(
-                            base_url=c._client._base_url,
-                            api_key=c._client._api_key or "EMPTY",
-                            model=c._model if hasattr(c, "_model") else None,
-                        )
-                    )
-                else:
-                    # 已经是底层客户端
-                    self._clients.append(c)
-                    self._endpoints.append(
-                        EndpointConfig(
-                            base_url=c._base_url,
-                            api_key=c._api_key or "EMPTY",
-                            model=getattr(c, "_model", None),
-                        )
-                    )
+        # 从 endpoints 创建底层 clients
+        self._endpoints = []
+        self._clients = []
+
+        num_endpoints = len(endpoints)
+
+        # 确定有效的 client retry_times
+        # fallback 模式下，用户指定的 retry_times 是"总重试次数"，会在多个 endpoint 间分配
+        if fallback:
+            user_retry_times = retry_times if retry_times is not None else 0
+            effective_retry_times = user_retry_times // num_endpoints
         else:
-            # 从 endpoints 创建底层 clients
-            self._endpoints = []
-            self._clients = []
+            # 非 fallback 模式
+            effective_retry_times = retry_times if retry_times is not None else 3
 
-            num_endpoints = len(endpoints)
+        for ep in endpoints:
+            if isinstance(ep, dict):
+                ep = EndpointConfig(**ep)
+            self._endpoints.append(ep)
 
-            # 确定有效的 client retry_times
-            # fallback 模式下，用户指定的 retry_times 是"总重试次数"，会在多个 endpoint 间分配
-            if fallback:
-                user_retry_times = retry_times if retry_times is not None else 0
-                effective_retry_times = user_retry_times // num_endpoints
-            else:
-                # 非 fallback 模式
-                effective_retry_times = retry_times if retry_times is not None else 3
+            # 确定 rate limit 配置（endpoint 级别优先）
+            ep_concurrency = (
+                ep.concurrency_limit if ep.concurrency_limit is not None else concurrency_limit
+            )
+            ep_max_qps = ep.max_qps if ep.max_qps is not None else max_qps
+            # endpoint 级 proxy 覆盖 pool 顶层默认
+            ep_proxy = ep.proxy if ep.proxy is not None else proxy
 
-            for ep in endpoints:
-                if isinstance(ep, dict):
-                    ep = EndpointConfig(**ep)
-                self._endpoints.append(ep)
+            # 自动推断 provider
+            provider = ep.provider
+            if provider == "auto":
+                provider = self._infer_provider(ep.base_url, False)
 
-                # 确定 rate limit 配置（endpoint 级别优先）
-                ep_concurrency = (
-                    ep.concurrency_limit if ep.concurrency_limit is not None else concurrency_limit
-                )
-                ep_max_qps = ep.max_qps if ep.max_qps is not None else max_qps
-                # endpoint 级 proxy 覆盖 pool 顶层默认
-                ep_proxy = ep.proxy if ep.proxy is not None else proxy
-
-                # 自动推断 provider
-                provider = ep.provider
-                if provider == "auto":
-                    provider = self._infer_provider(ep.base_url, False)
-
-                # 合并参数
-                client_kwargs = {
-                    "provider": provider,
-                    "base_url": ep.base_url,
-                    "api_key": ep.api_key,
-                    "model": ep.model,
-                    "concurrency_limit": ep_concurrency,
-                    "max_qps": ep_max_qps,
-                    "timeout": timeout,
-                    "retry_times": effective_retry_times,
-                    "cache_image": cache_image,
-                    "cache_dir": cache_dir,
-                    "proxy": ep_proxy,
-                    "cache": cache,
-                    **kwargs,
-                    **(ep.extra or {}),
-                }
-                # 直接创建底层客户端
-                self._clients.append(self._create_base_client(**client_kwargs))
+            # 合并参数
+            client_kwargs = {
+                "provider": provider,
+                "base_url": ep.base_url,
+                "api_key": ep.api_key,
+                "model": ep.model,
+                "concurrency_limit": ep_concurrency,
+                "max_qps": ep_max_qps,
+                "timeout": timeout,
+                "retry_times": effective_retry_times,
+                "cache_image": cache_image,
+                "cache_dir": cache_dir,
+                "proxy": ep_proxy,
+                "cache": cache,
+                **kwargs,
+                **(ep.extra or {}),
+            }
+            # 直接创建底层客户端
+            self._clients.append(self._create_base_client(**client_kwargs))
 
         # 创建路由器
-        # concurrency_limit 直接取底层 client 的实际值：endpoints / legacy clients
-        # 两条构造路径的 ground truth 都在 client 上，不需要分别推导
+        # concurrency_limit 直接取底层 client 的实际值（ground truth 在 client 上）
         provider_configs = [
             ProviderConfig(
                 base_url=ep.base_url,
@@ -636,10 +600,9 @@ class LLMClientPool:
             recovery_time=recovery_time,
         )
 
-        # endpoint -> client 映射
-        self._client_map = {
-            ep.base_url: client for ep, client in zip(self._endpoints, self._clients)
-        }
+        # provider -> client 映射：以 ProviderConfig 对象身份为键。
+        # 不能用 base_url 作键：相同 base_url 不同 api_key 的 endpoint 会坍缩成一个
+        self._client_map = {id(pc): client for pc, client in zip(provider_configs, self._clients)}
 
         for client in self._clients:
             self._inject_pool_limits(client)
@@ -658,7 +621,7 @@ class LLMClientPool:
         client._client._pool_rate_limiter = self._pool_rate_limiter
 
     def _acquire_client(
-        self, tried: set[str]
+        self, tried: list[ProviderConfig]
     ) -> tuple[LLMClientBase, ProviderConfig] | tuple[None, None]:
         """容量感知地获取一个未尝试过的 client
 
@@ -668,7 +631,7 @@ class LLMClientPool:
         provider = self._router.acquire(exclude=tried)
         if provider is None:
             return None, None
-        return self._client_map[provider.base_url], provider
+        return self._client_map[id(provider)], provider
 
     async def chat_completions(
         self,
@@ -693,7 +656,10 @@ class LLMClientPool:
             **kwargs: 其他参数
 
         Returns:
-            与 LLMClient.chat_completions 返回值一致
+            与 LLMClient.chat_completions 返回值一致。
+            请求失败时（所有可用 endpoint 都失败）与单模式一致：
+            返回最后一次失败的 RequestResult（status="error"），不抛异常。
+            仅当失败源于本地异常（非 HTTP 请求失败）时才向上抛出。
         """
         kwargs = self._merge_config_params(kwargs)
         messages = self._prepare_messages(messages)
@@ -712,14 +678,15 @@ class LLMClientPool:
 
         # 多 endpoint 模式：容量感知选路 + fallback
         last_error = None
-        tried_providers = set()
+        last_error_result = None  # 请求失败时的 RequestResult（区别于本地异常）
+        tried_providers: list[ProviderConfig] = []
 
         for _ in range(self._max_fallback_attempts):
             client, provider = self._acquire_client(tried_providers)
             if provider is None:
                 break  # 健康的 endpoint 都已尝试过
 
-            tried_providers.add(provider.base_url)
+            tried_providers.append(provider)
 
             try:
                 result = await client.chat_completions(
@@ -732,13 +699,14 @@ class LLMClientPool:
                     **kwargs,
                 )
 
-                # 检查是否返回了 RequestResult（表示失败）
+                # 检查是否返回了 RequestResult（表示请求失败）
                 if hasattr(result, "status") and result.status != "success":
-                    # 从 result.data 中提取错误信息
-                    error_msg = "unknown"
-                    if hasattr(result, "data") and isinstance(result.data, dict):
-                        error_msg = result.data.get("error", "unknown")
-                    raise RuntimeError(error_msg)
+                    last_error_result = result
+                    self._router.mark_failed(provider)
+                    logger.debug(f"Endpoint {provider.base_url} 请求失败: {result.data}")
+                    if not self._fallback:
+                        return result
+                    continue  # 尝试下一个 endpoint
 
                 self._router.mark_success(provider)
                 return result
@@ -753,6 +721,10 @@ class LLMClientPool:
             finally:
                 self._router.release(provider)
 
+        # 所有 endpoint 都失败：与单模式行为一致，请求失败返回 RequestResult 而非抛异常
+        if last_error_result is not None:
+            logger.warning("所有 endpoint 都失败了，返回最后一次失败的 RequestResult")
+            return last_error_result
         raise last_error or RuntimeError("所有 endpoint 都失败了")
 
     def chat_completions_sync(
@@ -872,6 +844,7 @@ class LLMClientPool:
                 return_summary=return_summary,
                 return_cost_report=return_cost_report,
                 track_cost=track_cost,
+                preprocess_msg=preprocess_msg,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
@@ -888,7 +861,9 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 return_summary=return_summary,
+                return_cost_report=return_cost_report,
                 track_cost=track_cost,
+                preprocess_msg=preprocess_msg,
                 output_jsonl=output_jsonl,
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
@@ -907,6 +882,7 @@ class LLMClientPool:
         return_summary: bool = False,
         return_cost_report: bool = False,
         track_cost: bool = False,
+        preprocess_msg: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
@@ -916,7 +892,7 @@ class LLMClientPool:
     ):
         """使用单个 endpoint + fallback 的批量调用"""
         last_error = None
-        tried_providers = set()
+        tried_providers: list[ProviderConfig] = []
 
         for _ in range(self._max_fallback_attempts):
             # 整批算 1 个 in-flight：计数不精确，但能让单条调用避开正在跑批的 endpoint
@@ -924,7 +900,7 @@ class LLMClientPool:
             if provider is None:
                 break  # 健康的 endpoint 都已尝试过
 
-            tried_providers.add(provider.base_url)
+            tried_providers.append(provider)
 
             try:
                 result = await client.chat_completions_batch(
@@ -936,6 +912,7 @@ class LLMClientPool:
                     return_summary=return_summary,
                     return_cost_report=return_cost_report,
                     track_cost=track_cost,
+                    preprocess_msg=preprocess_msg,
                     output_jsonl=output_jsonl,
                     flush_interval=flush_interval,
                     metadata_list=metadata_list,
@@ -966,7 +943,9 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = True,
         return_summary: bool = False,
+        return_cost_report: bool = False,
         track_cost: bool = False,
+        preprocess_msg: bool = False,
         output_jsonl: str | None = None,
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
@@ -989,12 +968,18 @@ class LLMClientPool:
         cached_count = 0
         start_time = time.perf_counter()
 
+        # 消息预处理（图片/视频转 base64 等）：与单模式一致，在缓存查询之前做，
+        # 保证缓存键基于预处理后的 messages
+        messages_list = await self._clients[0]._preprocess_messages_batch(
+            messages_list, preprocess_msg
+        )
+
         # per-record 生成参数（剥除消息构造类键），用于覆盖 kwargs 与缓存键
         gen_params_list = build_gen_params_list(params_list)
 
-        # 获取所有 endpoint 的 base_url 集合（用于 fallback 判断）
-        all_endpoints = {ep.base_url for ep in self._endpoints}
-        num_endpoints = len(all_endpoints)
+        # fallback 判断以 endpoint（ProviderConfig 对象）为粒度：
+        # 相同 base_url 不同 api_key 是不同 endpoint，不能用 base_url 集合
+        num_endpoints = len(self._clients)
 
         # 获取响应缓存（如果有的话，使用第一个 client 的缓存）
         response_cache = None
@@ -1015,21 +1000,29 @@ class LLMClientPool:
         )
         completed_indices = set(writer.completed_indices)
 
-        # 恢复已完成的记录到 results（断点续传）
+        # 恢复已完成的记录到 results（断点续传）。
+        # 恢复项按当前调用的 return_usage 语义包装，保证返回列表类型一致
+        # （文件里的 output 已含 prefix，usage 有则恢复，没有为 None）
         file_restored_count = len(completed_indices)
         if output_jsonl and completed_indices:
             from .batch_helpers import resume_from_jsonl
 
             _, records = resume_from_jsonl(output_jsonl, messages_list, save_input)
             for record in records:
-                results[record["index"]] = record["output"]
+                if return_usage and not return_raw:
+                    results[record["index"]] = ChatCompletionResult(
+                        content=record["output"], usage=record.get("usage")
+                    )
+                else:
+                    results[record["index"]] = record["output"]
 
         # 检查缓存命中（如果启用了缓存）—— 批量查询，单次 IPC 往返
         # 多 endpoint 不同模型且未指定 model 时，跳过 pool 级缓存（键无法统一），
-        # 由各 base client 的 chat_completions 各自处理缓存
+        # 由各 base client 的 chat_completions 各自处理缓存。
+        # return_raw 跳过缓存（缓存只存提取后的 content，与 base client 行为一致）
         effective_model = model or self._endpoints[0].model
         all_same_model = model or len({ep.model for ep in self._endpoints}) == 1
-        if response_cache is not None and all_same_model:
+        if response_cache is not None and all_same_model and not return_raw:
             # 过滤出未完成的 messages
             pending = [
                 (idx, msg) for idx, msg in enumerate(messages_list) if idx not in completed_indices
@@ -1047,19 +1040,24 @@ class LLMClientPool:
                 )
                 for idx, cached_result in zip(pending_indices, cached_responses):
                     if cached_result is not None:
+                        # 缓存存的 content 不含 prefill 前缀，与 base client 一致在此拼回
+                        content = cached_result["content"]
+                        prefix = LLMClientBase._trailing_assistant_prefix(messages_list[idx])
+                        if prefix and content is not None:
+                            content = prefix + content
                         if return_usage:
                             results[idx] = ChatCompletionResult(
-                                content=cached_result["content"],
+                                content=content,
                                 usage=cached_result.get("usage"),
                             )
                         else:
-                            results[idx] = cached_result["content"]
+                            results[idx] = content
                         completed_indices.add(idx)
                         cached_count += 1
                         # 写入输出文件（断点续传）
                         writer.write_result(
                             idx,
-                            cached_result["content"],
+                            content,
                             usage=cached_result.get("usage"),
                         )
             if cached_count > 0:
@@ -1124,18 +1122,23 @@ class LLMClientPool:
             worker_model = model or provider.model
 
             while not all_done.is_set():
-                try:
-                    idx, msg, tried_endpoints = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    async with lock:
-                        if active_tasks == 0 and queue.empty():
+                # claim(取任务)与 active_tasks 自增必须在同一把锁内原子完成：
+                # 否则"取走末个任务但尚未计数"的窗口会被其他 worker 的空队列检查
+                # 误判为全部完成 → all_done 提前置位 → fallback 重新入队的任务
+                # 再无消费者而永久丢失（results[idx] 恒 None 且无错误记录）。
+                async with lock:
+                    try:
+                        idx, msg, tried_endpoints = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        if active_tasks == 0:
                             all_done.set()
                             break
+                        idx = None
+                    else:
+                        active_tasks += 1
+                if idx is None:
                     await asyncio.sleep(0.05)
                     continue
-
-                async with lock:
-                    active_tasks += 1
 
                 # 如果已尝试过当前 endpoint，放回队列让其他 worker 处理
                 if my_endpoint in tried_endpoints:
@@ -1386,14 +1389,14 @@ class LLMClientPool:
         # 流式不经过 ConcurrentRequester、不占 endpoint semaphore，但占服务端资源，
         # 因此计入 in-flight（覆盖整个流的生命周期）
         last_error = None
-        tried_providers = set()
+        tried_providers: list[ProviderConfig] = []
 
         for _ in range(self._max_fallback_attempts):
             client, provider = self._acquire_client(tried_providers)
             if provider is None:
                 break  # 健康的 endpoint 都已尝试过
 
-            tried_providers.add(provider.base_url)
+            tried_providers.append(provider)
 
             try:
                 async for chunk in client.chat_completions_stream(
@@ -1503,18 +1506,22 @@ class LLMClientPool:
             worker_model = model or provider.model
 
             while not all_done.is_set():
-                try:
-                    idx, msg, tried = task_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    async with lock:
-                        if active_tasks == 0 and task_queue.empty():
+                # claim(取任务)与 active_tasks 自增在同一把锁内原子完成，
+                # 杜绝末个任务被取走但尚未计数的窗口被误判为全部完成而丢任务
+                # （详见 _batch_distributed 中同款修复）。
+                async with lock:
+                    try:
+                        idx, msg, tried = task_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        if active_tasks == 0:
                             all_done.set()
                             break
+                        idx = None
+                    else:
+                        active_tasks += 1
+                if idx is None:
                     await asyncio.sleep(0.05)
                     continue
-
-                async with lock:
-                    active_tasks += 1
 
                 if my_endpoint in tried:
                     if len(tried) >= num_endpoints:

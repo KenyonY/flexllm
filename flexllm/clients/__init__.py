@@ -12,8 +12,8 @@ flexllm.clients - LLM 客户端实现
 - ChainOfThoughtClient: 链式推理
 """
 
-from .base import BatchResultItem, ChatCompletionResult, LLMClientBase, ToolCall
-from .chain_of_thought import ChainOfThoughtClient, Step
+from .base import ChatCompletionResult, LLMClientBase, ToolCall
+from .chain_of_thought import ChainOfThoughtClient, LinearStep, Step
 from .claude import ClaudeClient
 from .gemini import GeminiClient
 from .llm import LLMClient
@@ -31,7 +31,6 @@ __all__ = [
     # 基础类
     "LLMClientBase",
     "ChatCompletionResult",
-    "BatchResultItem",
     "ToolCall",
     # 客户端
     "LLMClient",
@@ -49,4 +48,5 @@ __all__ = [
     # Chain of Thought
     "ChainOfThoughtClient",
     "Step",
+    "LinearStep",
 ]

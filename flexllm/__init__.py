@@ -158,12 +158,12 @@ from .batch_tools import MllmFolderProcessor, MllmTableProcessor
 # 响应缓存
 from .cache import ResponseCache, ResponseCacheConfig
 from .clients import (
-    BatchResultItem,
     ChainOfThoughtClient,
     ChatCompletionResult,
     ClaudeClient,
     EndpointConfig,
     GeminiClient,
+    LinearStep,
     LLMClient,
     LLMClientBase,
     LLMClientPool,
@@ -205,7 +205,6 @@ __all__ = [
     "LLMClient",
     # 结果类型
     "ChatCompletionResult",
-    "BatchResultItem",
     "ToolCall",
     # Token 计数
     "count_tokens",
@@ -232,6 +231,7 @@ __all__ = [
     # Chain of Thought
     "ChainOfThoughtClient",
     "Step",
+    "LinearStep",
     # 解析工具
     "extract_code_snippets",
     "parse_to_code",

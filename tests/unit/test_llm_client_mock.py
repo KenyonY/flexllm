@@ -319,7 +319,7 @@ class TestBatch:
 
     @pytest.mark.asyncio
     async def test_batch_return_raw(self, mock_llm_server):
-        """批量请求 + return_raw：跳过缓存，结果仍为 str"""
+        """批量请求 + return_raw：跳过缓存，返回原始响应 JSON dict 列表"""
         async with LLMClient(
             base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY"
         ) as client:
@@ -327,11 +327,11 @@ class TestBatch:
                 _batch_msgs(3), show_progress=False, return_raw=True
             )
             assert len(results) == 3
-            # return_raw 在 batch 中只影响缓存行为（跳过缓存），
-            # 最终返回值仍然是提取后的 str
+            # return_raw=True: 每个元素是后端原始响应 dict（含 choices/usage 等）
             for r in results:
                 assert r is not None
-                assert isinstance(r, str)
+                assert isinstance(r, dict)
+                assert "choices" in r
 
 
 # ============== 3. chat_completions_stream ==============

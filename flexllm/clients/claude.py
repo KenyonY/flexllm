@@ -130,6 +130,11 @@ class ClaudeClient(LLMClientBase):
                 - True: 启用扩展思考（默认 budget_tokens=10000）
                 - int: 启用扩展思考并指定 budget_tokens
                 - None: 使用模型默认行为
+
+                Claude API 要求 max_tokens > thinking.budget_tokens。启用思考且
+                max_tokens ≤ budget_tokens 时（含默认 max_tokens=4096 的情况），
+                自动抬高 max_tokens = budget_tokens + 4096，保证请求合法且
+                思考后仍有输出空间。
             response_format: 响应格式控制
                 - {"type": "json_object"}: 输出 JSON
                 - {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}:
@@ -162,6 +167,16 @@ class ClaudeClient(LLMClientBase):
                     else json_instruction
                 )
 
+        # Claude 扩展思考模式：API 要求 max_tokens > budget_tokens，
+        # 不满足时自动抬高 max_tokens = budget_tokens + 4096（见 docstring）
+        budget_tokens = None
+        if thinking is True:
+            budget_tokens = 10000
+        elif isinstance(thinking, int) and thinking > 0:
+            budget_tokens = thinking
+        if budget_tokens is not None and max_tokens <= budget_tokens:
+            max_tokens = budget_tokens + 4096
+
         body = {
             "model": model,
             "max_tokens": max_tokens,
@@ -179,11 +194,8 @@ class ClaudeClient(LLMClientBase):
         if top_k is not None:
             body["top_k"] = top_k
 
-        # Claude 扩展思考模式
-        if thinking is True:
-            body["thinking"] = {"type": "enabled", "budget_tokens": 10000}
-        elif isinstance(thinking, int) and thinking > 0:
-            body["thinking"] = {"type": "enabled", "budget_tokens": thinking}
+        if budget_tokens is not None:
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
         elif thinking is False:
             body["thinking"] = {"type": "disabled"}
 
@@ -365,7 +377,7 @@ class ClaudeClient(LLMClientBase):
 
         return {"role": claude_role, "content": content}
 
-    def _extract_content(self, response_data: dict) -> str | None:
+    def _extract_content(self, response_data: dict, **gen_kwargs) -> str | None:
         """提取 Claude 响应中的文本内容"""
         try:
             content_blocks = response_data.get("content", [])
@@ -413,22 +425,8 @@ class ClaudeClient(LLMClientBase):
             return None
 
     # ========== 流式响应 ==========
-
-    def _extract_stream_content(self, data: dict) -> str | None:
-        """从 Claude 流式响应中提取内容"""
-        if data.get("type") == "content_block_delta":
-            delta = data.get("delta", {})
-            if delta.get("type") == "text_delta":
-                return delta.get("text")
-        return None
-
-    def _extract_stream_usage(self, data: dict) -> dict | None:
-        """Claude 不在通用 SSE 中返回 usage，由 chat_completions_stream 单独处理"""
-        return None
-
-    def _prepare_stream_body(self, body: dict, return_usage: bool) -> dict:
-        """Claude 不需要 stream_options"""
-        return body
+    # ClaudeClient 完整覆写 chat_completions_stream，
+    # 基类的 _extract_stream_* / _prepare_stream_body 钩子不会被调用，无需覆写
 
     async def chat_completions_stream(
         self,
@@ -544,15 +542,20 @@ class ClaudeClient(LLMClientBase):
                                             yield text
                                 continue
 
-                            # message_delta 中的 usage
+                            # message_delta 中的 usage：只带 output_tokens（增量事件
+                            # 不含 input_tokens），必须与 message_start 的记录合并，
+                            # 整体覆盖会把 prompt_tokens 归零
                             if event_type == "message_delta":
                                 usage = data.get("usage")
                                 if usage:
+                                    prompt_tokens = usage.get("input_tokens") or (
+                                        usage_data.get("prompt_tokens", 0) if usage_data else 0
+                                    )
+                                    completion_tokens = usage.get("output_tokens", 0)
                                     usage_data = {
-                                        "prompt_tokens": usage.get("input_tokens", 0),
-                                        "completion_tokens": usage.get("output_tokens", 0),
-                                        "total_tokens": usage.get("input_tokens", 0)
-                                        + usage.get("output_tokens", 0),
+                                        "prompt_tokens": prompt_tokens,
+                                        "completion_tokens": completion_tokens,
+                                        "total_tokens": prompt_tokens + completion_tokens,
                                     }
 
                             # message_start 中的 usage（输入 tokens）
@@ -561,8 +564,9 @@ class ClaudeClient(LLMClientBase):
                                 if msg_usage:
                                     usage_data = {
                                         "prompt_tokens": msg_usage.get("input_tokens", 0),
-                                        "completion_tokens": 0,
-                                        "total_tokens": msg_usage.get("input_tokens", 0),
+                                        "completion_tokens": msg_usage.get("output_tokens", 0),
+                                        "total_tokens": msg_usage.get("input_tokens", 0)
+                                        + msg_usage.get("output_tokens", 0),
                                     }
 
                         except json.JSONDecodeError:

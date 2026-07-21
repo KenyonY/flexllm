@@ -203,6 +203,18 @@ class GeminiClient(LLMClientBase):
         if thinking_config:
             gen_config["thinkingConfig"] = thinking_config
 
+        # 透传其余 kwargs（与 OpenAI/Claude 客户端行为一致，不静默丢弃）：
+        # 顶层键直接进 body，生成参数（snake_case 自动转 camelCase）进 generationConfig，
+        # 无法映射的丢弃并给出 warning
+        for key, value in kwargs.items():
+            camel_key = self._snake_to_camel(key)
+            if camel_key in self._TOP_LEVEL_KEYS:
+                body[camel_key] = value
+            elif camel_key in self._GENERATION_CONFIG_KEYS:
+                gen_config[camel_key] = value
+            else:
+                logger.warning(f"GeminiClient 无法映射参数 {key!r} 到 Gemini API，已忽略")
+
         if gen_config:
             body["generationConfig"] = gen_config
         if safety_settings:
@@ -210,7 +222,42 @@ class GeminiClient(LLMClientBase):
 
         return body
 
-    def _extract_content(self, response_data: dict) -> str | None:
+    # Gemini generateContent 请求体的合法键（用于 **kwargs 透传映射）
+    _TOP_LEVEL_KEYS = frozenset(
+        {"tools", "toolConfig", "safetySettings", "systemInstruction", "cachedContent", "labels"}
+    )
+    _GENERATION_CONFIG_KEYS = frozenset(
+        {
+            "candidateCount",
+            "stopSequences",
+            "maxOutputTokens",
+            "temperature",
+            "topP",
+            "topK",
+            "seed",
+            "presencePenalty",
+            "frequencyPenalty",
+            "responseLogprobs",
+            "logprobs",
+            "responseMimeType",
+            "responseSchema",
+            "responseJsonSchema",
+            "responseModalities",
+            "thinkingConfig",
+            "mediaResolution",
+            "speechConfig",
+        }
+    )
+
+    @staticmethod
+    def _snake_to_camel(name: str) -> str:
+        """snake_case → camelCase（已是 camelCase 的原样返回）"""
+        if "_" not in name:
+            return name
+        head, *rest = name.split("_")
+        return head + "".join(part.capitalize() for part in rest)
+
+    def _extract_content(self, response_data: dict, **gen_kwargs) -> str | None:
         try:
             candidates = response_data.get("candidates", [])
             if not candidates:

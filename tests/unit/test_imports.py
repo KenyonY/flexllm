@@ -50,11 +50,10 @@ class TestImports:
 
     def test_import_base_client(self):
         """Test base client imports"""
-        from flexllm import BatchResultItem, ChatCompletionResult, LLMClientBase
+        from flexllm import ChatCompletionResult, LLMClientBase
 
         assert LLMClientBase is not None
         assert ChatCompletionResult is not None
-        assert BatchResultItem is not None
 
     def test_import_async_api(self):
         """Test async_api imports"""

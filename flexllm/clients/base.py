@@ -24,7 +24,6 @@ from ..pricing.cost_tracker import BudgetExceededError, CostTracker, CostTracker
 from .batch_helpers import (
     JsonlWriter,
     build_gen_params_list,
-    compact_output_file,
     extract_save_input,
     resume_from_jsonl,
     validate_batch_params,
@@ -34,7 +33,7 @@ if TYPE_CHECKING:
     from ..async_api.interface import RequestResult
 
 
-# 向后兼容的别名（pool.py 和 test_resume_jsonl.py 都 import 这些）
+# 向后兼容的别名（仅 tests/unit/test_resume_jsonl.py 仍在 import，库内代码直接用 batch_helpers）
 _extract_save_input = extract_save_input
 _resume_from_jsonl = resume_from_jsonl
 
@@ -57,18 +56,6 @@ class ChatCompletionResult:
     reasoning_content: str | None = None  # 思考内容（DeepSeek-R1、Qwen3 等）
     tool_calls: list["ToolCall"] | None = None  # 工具调用列表
     queue_time: float | None = None  # 客户端排队耗时（semaphore + QPS 桶），缓存命中时为 None
-
-
-@dataclass
-class BatchResultItem:
-    """批量请求中单条结果，包含索引、内容和 usage"""
-
-    index: int
-    content: str | None
-    usage: dict | None = None
-    status: str = "success"  # success, error, cached
-    error: str | None = None
-    latency: float = 0.0
 
 
 class LLMClientBase(ABC):
@@ -179,7 +166,15 @@ class LLMClientBase(ABC):
     ) -> dict: ...
 
     @abstractmethod
-    def _extract_content(self, response_data: dict) -> str | None: ...
+    def _extract_content(self, response_data: dict, **gen_kwargs) -> str | None:
+        """提取响应内容
+
+        Args:
+            response_data: 原始响应 JSON
+            **gen_kwargs: 该请求的生成参数（如 thinking），供子类按请求粒度决定提取行为。
+                批量场景下每条请求可能有不同参数，因此不能存实例状态。
+        """
+        ...
 
     def _extract_usage(self, response_data: dict) -> dict | None:
         """提取 usage 信息（子类可覆盖）"""
@@ -359,7 +354,7 @@ class LLMClientBase(ABC):
         if return_raw:
             return data
         if data.status == "success":
-            content = self._extract_content(data.data)
+            content = self._extract_content(data.data, **kwargs)
             usage = self._extract_usage(data.data)
 
             # 写入缓存（始终存储 usage; content 不含 prefix）
@@ -460,7 +455,8 @@ class LLMClientBase(ABC):
         Args:
             messages_list: 消息列表
             model: 模型名称
-            return_raw: 是否返回原始响应
+            return_raw: 是否返回原始响应 JSON dict 列表（跳过响应缓存，不做 prefix 拼接；
+                output_jsonl 的 output 字段写入原始 dict）。优先级高于 return_usage。
             return_usage: 是否返回包含 usage 的结果（ChatCompletionResult 列表）
             show_progress: 是否显示进度条
             return_summary: 是否返回执行摘要
@@ -489,8 +485,10 @@ class LLMClientBase(ABC):
             缓存由初始化时的 cache 参数控制。
             切换 save_input 模式可能导致断点续传校验失败，这是预期行为。
 
-        Raises:
-            BudgetExceededError: 当超过预算硬限制时（由 cost_tracker 配置）
+            预算控制（cost_tracker 配置硬限制时）：批量中超预算不抛异常，而是停止发起
+            新请求，已完成的结果正常返回（未完成的为 None），日志记录 warning，
+            summary（如有）末尾追加预算中止标注。这与单条 chat_completions
+            （超预算时抛 BudgetExceededError）不同：批量场景抛异常会丢弃已完成结果。
         """
         # track_cost 需要 usage 信息
         if track_cost:
@@ -511,12 +509,14 @@ class LLMClientBase(ABC):
             extra = gen_params_list[idx] if gen_params_list else None
             return {**kwargs, **extra} if extra else kwargs
 
-        use_cache = self._response_cache is not None
+        # return_raw 跳过缓存（缓存只存提取后的 content，与原始响应语义不符）
+        use_cache = self._response_cache is not None and not return_raw
 
         # Prefill 拼接前缀:逐条样本预计算,缓存与底层返回均不含 prefix,只在输出与返回处拼回
+        # return_raw 返回原始 dict,不参与拼接
         prefix_list = (
             [self._trailing_assistant_prefix(m) for m in messages_list]
-            if include_prefix
+            if include_prefix and not return_raw
             else [None] * len(messages_list)
         )
 
@@ -527,9 +527,15 @@ class LLMClientBase(ABC):
                 return p + content
             return content
 
-        def extractor(result):
-            """提取 content 和 usage（用于缓存存储, content 不含 prefix）"""
-            content = self._extract_content(result.data)
+        def extractor(result, idx: int):
+            """提取 content 和 usage（用于缓存存储, content 不含 prefix）
+
+            return_raw 时 content 即原始响应 dict（usage 仍提取，用于成本追踪/输出记录）。
+            """
+            if return_raw:
+                content = result.data
+            else:
+                content = self._extract_content(result.data, **merged_kwargs(idx))
             usage = self._extract_usage(result.data)
             return {"content": content, "usage": usage}
 
@@ -560,6 +566,11 @@ class LLMClientBase(ABC):
         )
         completed_indices = writer.completed_indices
 
+        # responses/progress 在 try 外初始化：预算超限提前跳出时二者必须有定义
+        responses: list = [None] * len(messages_list)
+        progress = None
+        budget_exceeded = False
+
         try:
             # 计算实际需要执行的索引（排除文件中已完成的）
             if completed_indices:
@@ -571,6 +582,9 @@ class LLMClientBase(ABC):
                 cached_responses, uncached_indices = self._response_cache.get_batch(
                     messages_list, model=effective_model, params_list=gen_params_list, **kwargs
                 )
+                # 提前绑定：后续对 cached_responses 的原地写入即对 responses 的写入，
+                # 预算超限提前跳出时已完成部分不丢失
+                responses = cached_responses
 
                 # 将缓存命中的写入文件（如果文件中没有）
                 for i, resp in enumerate(cached_responses):
@@ -583,7 +597,6 @@ class LLMClientBase(ABC):
                 actual_uncached = [i for i in uncached_indices if i not in completed_indices]
                 cache_hit_count = len(messages_list) - len(uncached_indices)
 
-                progress = None
                 if cache_hit_count > 0:
                     logger.info(f"缓存命中: {cache_hit_count}/{len(messages_list)}")
                 if actual_uncached:
@@ -623,7 +636,7 @@ class LLMClientBase(ABC):
                                 writer.write_result(original_idx, None, "error", error_msg)
                                 continue
                             try:
-                                extracted = extractor(result)
+                                extracted = extractor(result, original_idx)
                                 cached_responses[original_idx] = extracted
                                 # 写入缓存（per-record 参数纳入键，与 get_batch 对齐）
                                 self._response_cache.set(
@@ -659,16 +672,12 @@ class LLMClientBase(ABC):
                                 writer.write_result(original_idx, None, "error", str(e))
                         if batch.is_final:
                             progress = batch.progress
-
-                responses = cached_responses
             else:
                 # 不使用缓存，直接批量执行（流式处理以支持增量保存）
                 indices_to_run = [
                     i for i in range(len(messages_list)) if i not in completed_indices
                 ]
-                responses = [None] * len(messages_list)
 
-                progress = None
                 if indices_to_run:
                     request_params = [
                         {
@@ -703,7 +712,7 @@ class LLMClientBase(ABC):
                                 writer.write_result(original_idx, None, "error", error_msg)
                                 continue
                             try:
-                                extracted = extractor(result)
+                                extracted = extractor(result, original_idx)
                                 responses[original_idx] = extracted
                                 writer.write_result(
                                     original_idx,
@@ -731,16 +740,21 @@ class LLMClientBase(ABC):
                             progress = batch.progress
 
         except BudgetExceededError:
-            # 预算超限时也要正常结束处理
-            pass
+            # 超预算 → 停止发新请求，已完成的正常返回（见 docstring Note）
+            budget_exceeded = True
+            logger.warning("预算超限，批量提前中止：停止发起新请求，返回已完成结果")
 
         finally:
             writer.close()
 
         summary = progress.summary(print_to_console=False) if progress else None
+        if budget_exceeded and isinstance(summary, str):
+            summary += "\n| ⚠ 预算超限，批量提前中止（未完成请求返回 None）\n"
 
-        # 转换返回值格式（prefill 场景统一在此拼接 prefix）
-        if return_usage:
+        # 转换返回值格式（prefill 场景统一在此拼接 prefix；return_raw 返回原始 dict）
+        if return_raw:
+            final_responses = [r["content"] if r is not None else None for r in responses]
+        elif return_usage:
             final_responses = [
                 to_chat_result(r, i) if r is not None else None for i, r in enumerate(responses)
             ]
@@ -761,10 +775,6 @@ class LLMClientBase(ABC):
             else:
                 result = (final_responses, cost_report)
         return result
-
-    def _compact_output_file(self, file_path: str):
-        """去重输出文件，保留每个 index 的最新成功记录（委托给 batch_helpers）"""
-        compact_output_file(file_path)
 
     def chat_completions_batch_sync(
         self,
@@ -902,42 +912,50 @@ class LLMClientBase(ABC):
                     messages_list, model=effective_model, **kwargs
                 )
 
-                # 先 yield 缓存命中的结果
-                for i, resp in enumerate(cached_responses):
-                    if resp is not None:
-                        merged_content = with_prefix(i, resp["content"])
-                        if i not in completed_indices:
-                            writer.write_result(i, merged_content, usage=resp.get("usage"))
-                        from types import SimpleNamespace
-
-                        yielded_count += 1
-                        cached_count += 1
-                        success_count += 1
-                        is_last = yielded_count == total_count
-
-                        cached_result = SimpleNamespace(
-                            content=merged_content,
-                            usage=resp.get("usage"),
-                            original_idx=i,
-                            latency=0.0,
-                            status="cached",
-                            error=None,
-                            data=None,
-                            summary=None,
-                        )
-                        if is_last:
-                            cached_result.summary = {
-                                "total": total_count,
-                                "success": success_count,
-                                "failed": total_count - success_count,
-                                "cached": cached_count,
-                                "elapsed": time.time() - start_time,
-                                "avg_latency": total_latency / max(yielded_count - cached_count, 1),
-                            }
-                        yield cached_result
-
-            # 过滤掉文件中已完成的
+            # 过滤掉文件中已完成的（断点续传恢复项不重新请求、也不 yield）
             actual_uncached = [i for i in uncached_indices if i not in completed_indices]
+            # 本次实际会 yield 的条数 = 缓存命中数 + 待执行数。
+            # 不能用 total_count 判断 is_last：文件恢复的跳过项永远不会被 yield
+            expected_yields = sum(1 for r in cached_responses if r is not None) + len(
+                actual_uncached
+            )
+
+            def make_summary():
+                return {
+                    "total": total_count,
+                    "success": success_count,
+                    "failed": yielded_count - success_count,
+                    "cached": cached_count,
+                    "elapsed": time.time() - start_time,
+                    "avg_latency": total_latency / max(yielded_count - cached_count, 1),
+                }
+
+            # 先 yield 缓存命中的结果
+            from types import SimpleNamespace
+
+            for i, resp in enumerate(cached_responses):
+                if resp is not None:
+                    merged_content = with_prefix(i, resp["content"])
+                    if i not in completed_indices:
+                        writer.write_result(i, merged_content, usage=resp.get("usage"))
+
+                    yielded_count += 1
+                    cached_count += 1
+                    success_count += 1
+
+                    cached_result = SimpleNamespace(
+                        content=merged_content,
+                        usage=resp.get("usage"),
+                        original_idx=i,
+                        latency=0.0,
+                        status="cached",
+                        error=None,
+                        data=None,
+                        summary=None,
+                    )
+                    if yielded_count == expected_yields:
+                        cached_result.summary = make_summary()
+                    yield cached_result
 
             if actual_uncached:
                 logger.info(f"待执行: {len(actual_uncached)}/{len(messages_list)}")
@@ -962,7 +980,7 @@ class LLMClientBase(ABC):
                     for result in batch.completed_requests:
                         original_idx = actual_uncached[result.request_id]
                         yielded_count += 1
-                        is_last = yielded_count == total_count
+                        is_last = yielded_count == expected_yields
 
                         # 检查请求状态
                         if result.status != "success":
@@ -980,7 +998,9 @@ class LLMClientBase(ABC):
                         else:
                             try:
                                 content = (
-                                    self._extract_content(result.data) if result.data else None
+                                    self._extract_content(result.data, **kwargs)
+                                    if result.data
+                                    else None
                                 )
                                 usage = self._extract_usage(result.data)
                                 # 写入缓存(存原始,不含 prefix)
@@ -1008,14 +1028,7 @@ class LLMClientBase(ABC):
                         # 最后一个 result 添加 summary
                         result.summary = None
                         if is_last:
-                            result.summary = {
-                                "total": total_count,
-                                "success": success_count,
-                                "failed": total_count - success_count,
-                                "cached": cached_count,
-                                "elapsed": time.time() - start_time,
-                                "avg_latency": total_latency / max(yielded_count - cached_count, 1),
-                            }
+                            result.summary = make_summary()
                         yield result
 
         finally:
@@ -1129,6 +1142,10 @@ class LLMClientBase(ABC):
                                     yield content
                         except json.JSONDecodeError:
                             continue
+
+                # 流在 thinking 阶段结束（无后续 content）时补发闭合标签
+                if _thinking_started:
+                    yield "</think>"
 
                 if return_usage and _last_usage:
                     yield {"type": "usage", "usage": _last_usage}

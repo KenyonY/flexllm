@@ -649,8 +649,14 @@ class ChainOfThoughtClient:
         step_info: StepExecutionInfo,
         chain_info: ChainExecutionInfo,
         show_step_details: bool = False,
-    ) -> str | None:
-        """执行单个步骤，包含重试逻辑"""
+    ) -> tuple[str, list[dict[str, Any]]] | None:
+        """执行单个步骤，包含重试逻辑
+
+        Returns:
+            (response_content, messages) 元组；失败返回 None。
+            messages 一并返回，避免调用方为记录历史再次调用 prepare_messages_fn
+            （prepare_messages_fn 可能有副作用或非幂等）。
+        """
         last_error = None
 
         for attempt in range(self.execution_config.max_retries + 1):
@@ -713,7 +719,7 @@ class ChainOfThoughtClient:
                         chain_logger.success(f"{chain_prefix}   🔄 重试成功")
 
                 step_info.status = StepStatus.COMPLETED
-                return response_content
+                return response_content, messages
 
             except asyncio.TimeoutError:
                 step_info.status = StepStatus.TIMEOUT
@@ -824,7 +830,7 @@ class ChainOfThoughtClient:
 
                 try:
                     # 执行步骤（包含重试逻辑）
-                    response_content = await self._execute_step_with_retry(
+                    step_outcome = await self._execute_step_with_retry(
                         step,
                         context,
                         controller,
@@ -833,16 +839,18 @@ class ChainOfThoughtClient:
                         show_step_details,
                     )
 
-                    if response_content is None:
+                    if step_outcome is None:
                         break  # 步骤执行失败或被取消
+
+                    response_content, step_messages = step_outcome
 
                     step_info.end_time = time.time()
                     step_info.execution_time = step_info.end_time - (step_info.start_time or 0)
 
-                    # 记录步骤结果
+                    # 记录步骤结果（复用执行时构造的 messages，不再重复调用 prepare_messages_fn）
                     step_result = StepResult(
                         step_name=current_step_name,
-                        messages=step.prepare_messages_fn(context),
+                        messages=step_messages,
                         response=response_content,
                         model_params=step.model_params,
                         execution_time=step_info.execution_time,

@@ -47,7 +47,12 @@ class ProviderRouter:
     Provider 路由器
 
     选路策略：容量感知（acquire/release，在健康且未饱和的 provider 中选负载率最低者，
-    全部饱和时退回轮询），或纯轮询（get_next）。支持健康检查和自动恢复。
+    全部饱和时退回轮询）。支持健康检查和自动恢复。
+
+    Provider 匹配语义：release/mark_failed/mark_success 按 acquire 返回的
+    ProviderConfig 对象身份（is）匹配，其次按值相等（==）兜底。
+    不按 base_url 匹配——相同 base_url 不同 api_key 的 endpoint 是不同 provider，
+    按 base_url 匹配会导致健康状态串扰。
     """
 
     def __init__(
@@ -93,9 +98,14 @@ class ProviderRouter:
 
         return healthy if healthy else self._providers  # 全挂时返回所有
 
+    @staticmethod
+    def _matches(status: ProviderStatus, provider: ProviderConfig) -> bool:
+        """按对象身份（优先）或值相等匹配 provider"""
+        return status.config is provider or status.config == provider
+
     def get_next(self) -> ProviderConfig:
         """
-        获取下一个可用的 provider（轮询策略）
+        获取下一个可用的 provider（纯轮询策略，不计 in-flight）
 
         Returns:
             ProviderConfig
@@ -106,28 +116,30 @@ class ProviderRouter:
             self._index += 1
             return provider
 
-    def acquire(self, exclude: set[str] | None = None) -> ProviderConfig | None:
+    def acquire(self, exclude: list[ProviderConfig] | None = None) -> ProviderConfig | None:
         """
         容量感知选路：在健康且未饱和的 provider 中选负载率最低者
 
         in-flight 计数 +1，请求结束后必须配对调用 release()（try/finally 保证）。
 
         选路规则：
-        - 过滤：健康 且 base_url 不在 exclude 中
+        - 过滤：健康 且 不在 exclude 中（按 ProviderConfig 对象匹配，非 base_url）
         - 未饱和（in_flight < concurrency_limit）的候选按 in_flight/concurrency_limit
           比值取最低——异构限额下比绝对计数公平
         - 全部饱和时退回轮询，此时排队是正确行为
 
         Args:
-            exclude: 需要跳过的 base_url 集合（fallback 场景传入已尝试过的 endpoint）
+            exclude: 需要跳过的 ProviderConfig 列表（fallback 场景传入已尝试过的 provider）
 
         Returns:
             选中的 ProviderConfig；无候选（健康的都被排除）时返回 None
         """
-        exclude = exclude or set()
+        exclude = exclude or []
         with self._lock:
             candidates = [
-                p for p in self._get_healthy_providers() if p.config.base_url not in exclude
+                p
+                for p in self._get_healthy_providers()
+                if not any(self._matches(p, e) for e in exclude)
             ]
             if not candidates:
                 return None
@@ -165,7 +177,7 @@ class ProviderRouter:
         """
         with self._lock:
             for p in self._providers:
-                if p.config.base_url == provider.base_url:
+                if self._matches(p, provider):
                     p.in_flight = max(0, p.in_flight - 1)
                     break
 
@@ -178,7 +190,7 @@ class ProviderRouter:
         """
         with self._lock:
             for p in self._providers:
-                if p.config.base_url == provider.base_url:
+                if self._matches(p, provider):
                     p.failures += 1
                     p.last_failure = time.time()
                     if p.failures >= self.failure_threshold:
@@ -194,7 +206,7 @@ class ProviderRouter:
         """
         with self._lock:
             for p in self._providers:
-                if p.config.base_url == provider.base_url:
+                if self._matches(p, provider):
                     p.failures = 0
                     p.is_healthy = True
                     break

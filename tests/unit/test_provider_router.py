@@ -260,14 +260,17 @@ class TestCapacityAwareRouting:
 
     def test_exclude_filters_candidates(self):
         router = self._make_router([10, 10])
+        p1 = router._providers[0].config
 
-        provider = router.acquire(exclude={"http://api1.com/v1"})
+        provider = router.acquire(exclude=[p1])
         assert provider.base_url == "http://api2.com/v1"
 
     def test_all_excluded_returns_none(self):
         router = self._make_router([10, 10])
+        p1 = router._providers[0].config
+        p2 = router._providers[1].config
 
-        provider = router.acquire(exclude={"http://api1.com/v1", "http://api2.com/v1"})
+        provider = router.acquire(exclude=[p1, p2])
         assert provider is None
 
     def test_unhealthy_not_selected(self):

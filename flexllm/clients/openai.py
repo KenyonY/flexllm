@@ -6,15 +6,11 @@ OpenAI 兼容 API 客户端
 
 import logging
 import re
-from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
 from ..cache import ResponseCacheConfig
 from .base import LLMClientBase
-
-if TYPE_CHECKING:
-    pass
 
 
 class OpenAIClient(LLMClientBase):
@@ -157,6 +153,11 @@ class OpenAIClient(LLMClientBase):
                 - False: 禁用思考（Ollama: think=False, vLLM: enable_thinking=False）
                 - True: 启用思考（Ollama: think=True, vLLM: enable_thinking=True）
                 - None: 使用模型默认行为
+
+        Note:
+            think / chat_template_kwargs 是 Ollama / vLLM 的非标准扩展字段，
+            官方 OpenAI 端点（api.openai.com）严格校验请求体会返回 400，
+            因此对官方端点不注入这两个字段；其他端点维持现状。
         """
         processed_messages = self._convert_audio_url_to_input_audio(messages)
 
@@ -164,17 +165,14 @@ class OpenAIClient(LLMClientBase):
         if max_tokens is not None:
             body["max_tokens"] = max_tokens
 
-        # 思考模式控制：同时发送多种格式，由服务端选择性处理
-        if thinking is True:
-            body["think"] = True  # Ollama
-            body["chat_template_kwargs"] = {"enable_thinking": True}  # vLLM
-            self._keep_thinking = True
-        elif thinking is False:
-            body["think"] = False  # Ollama
-            body["chat_template_kwargs"] = {"enable_thinking": False}  # vLLM
-            self._keep_thinking = False
-        else:
-            self._keep_thinking = False
+        # 思考模式控制：同时发送多种格式，由服务端选择性处理。
+        # 官方 OpenAI 端点不认识这些字段且严格校验（400），跳过注入。
+        # 提取阶段是否保留思考内容不在此处记录状态（并发/批量下实例状态会互相污染），
+        # 而是由 _extract_content 按各自请求的 thinking 参数决定
+        is_official_openai = bool(self._base_url) and "api.openai.com" in self._base_url
+        if thinking is not None and not is_official_openai:
+            body["think"] = thinking  # Ollama
+            body["chat_template_kwargs"] = {"enable_thinking": thinking}  # vLLM
 
         # Prefill: messages 末尾是 assistant message → 让模型从该 content 继续生成
         # vLLM 需要同时关闭 add_generation_prompt 并启用 continue_final_message
@@ -198,11 +196,18 @@ class OpenAIClient(LLMClientBase):
 
         return re.sub(r"^.*?</think>\s*", "", content, count=1, flags=re.DOTALL)
 
-    def _extract_content(self, response_data: dict) -> str | None:
+    def _extract_content(
+        self, response_data: dict, thinking: bool | None = None, **gen_kwargs
+    ) -> str | None:
+        """提取内容；thinking=True 的请求保留思考内容（<think> 包裹），否则剥离。
+
+        thinking 来自该请求自身的生成参数（由基类透传），不依赖实例状态，
+        批量/并发下各请求互不影响。
+        """
         try:
             message = response_data["choices"][0]["message"]
             content = message.get("content") or ""
-            keep_thinking = getattr(self, "_keep_thinking", False)
+            keep_thinking = thinking is True
 
             # reasoning-parser 模式：思考内容在独立的 reasoning 字段
             reasoning = message.get("reasoning") or message.get("reasoning_content")
@@ -295,7 +300,9 @@ class OpenAIClient(LLMClientBase):
         try:
             message = response_data.get("choices", [{}])[0].get("message", {})
             content = message.get("content", "")
-            reasoning = message.get("reasoning", "")
+            # 与 _extract_content 一致：reasoning（Ollama 等）与 reasoning_content
+            # （DeepSeek/vLLM reasoning-parser 等）两种字段都支持
+            reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
 
             # 如果有 reasoning 字段，直接使用
             if reasoning:
