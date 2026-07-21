@@ -500,6 +500,18 @@ class MllmClient(MllmClientBase):
         if hasattr(self, "client") and self.client:
             self.client.close()
 
+    async def acleanup(self):
+        """异步清理资源：在异步上下文中必须走 client.aclose()，否则底层
+        ConcurrentRequester 会走同步 close() 的 fire-and-forget 任务，
+        事件循环关闭时留下 'Task was destroyed but it is pending' 警告。
+        """
+        if hasattr(self, "processor_instance") and self.processor_instance:
+            self.processor_instance.cleanup()
+            self.processor_instance = None
+
+        if hasattr(self, "client") and self.client:
+            await self.client.aclose()
+
     def close(self):
         """关闭客户端，释放资源（别名方法，与 LLMClientBase 接口一致）"""
         self.cleanup()
@@ -514,7 +526,7 @@ class MllmClient(MllmClientBase):
         return self
 
     async def __aexit__(self, *args):
-        self.cleanup()
+        await self.acleanup()
 
     def __del__(self):
         """
