@@ -1,4 +1,5 @@
 import asyncio
+import contextvars
 import itertools
 import time
 from asyncio import Queue
@@ -9,7 +10,13 @@ from typing import (
     Any,
 )
 
-from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from aiohttp import (
+    ClientConnectionError,
+    ClientPayloadError,
+    ClientSession,
+    ClientTimeout,
+    TCPConnector,
+)
 
 from ..utils.core import async_retry
 from .interface import RequestResult
@@ -32,6 +39,30 @@ class RetryableHTTPError(Exception):
         super().__init__(f"HTTP {status_code}")
 
 
+class JSONDecodeHTTPError(Exception):
+    """2xx 响应但响应体不是合法 JSON（如网关返回 text/html）。
+
+    确定性错误：重试不会改变结果，不进入重试；保留响应体文本供上层报错。
+    """
+
+    def __init__(self, status_code: int, body_text: str | None):
+        self.status_code = status_code
+        self.body_text = body_text
+        super().__init__(f"HTTP {status_code}: response body is not valid JSON")
+
+
+# 可重试的异常：网络/超时类瞬态错误 + 服务端明确可重试的状态码。
+# 确定性错误（ContentTypeError、InvalidURL、TypeError 等）重试也不会成功，不在其中。
+# 与 _make_requests 的 HTTP 状态码分类（429/5xx 可重试，其他 4xx 不重试）保持一致。
+RETRYABLE_EXCEPTIONS = (
+    RetryableHTTPError,  # 429 / 5xx（_make_requests 主动抛出）
+    ClientConnectionError,  # 连接断开/重置/OS 层网络错误（含 ServerTimeoutError）
+    ClientPayloadError,  # 响应体传输中断
+    asyncio.TimeoutError,  # 请求超时（Py3.11+ 即内建 TimeoutError）
+    TimeoutError,
+)
+
+
 def validate_proxy(proxy: str | None) -> str | None:
     """校验正向代理 URL，仅接受 http(s)://
 
@@ -52,24 +83,19 @@ def validate_proxy(proxy: str | None) -> str | None:
 
 class RateLimiter:
     """
-    速率限制器
+    速率限制器（aiolimiter 漏桶算法）
+
+    支持边界：limiter 做 lazy init 并在检测到 event loop 变化时重建，
+    仅支持"串行多次 asyncio.run"场景；多个 event loop 并发使用同一实例不受支持。
 
     Args:
-        max_qps: 每秒最大请求数
-        use_bucket: 是否使用漏桶算法（aiolimiter），默认 True
-                    False 时使用简单的锁+sleep 实现
+        max_qps: 每秒最大请求数，支持小数（如 0.5 表示每 2 秒 1 个请求）
     """
 
-    def __init__(self, max_qps: float | None = None, use_bucket: bool = True):
+    def __init__(self, max_qps: float | None = None):
         self.max_qps = max_qps
-        self._use_bucket = use_bucket
-
         # lazy init，避免绑定错误的 event loop（多次 asyncio.run 场景）
         self._limiter = None
-        self._lock: asyncio.Lock | None = None
-        self._last_request_time = 0
-        if max_qps and not use_bucket:
-            self._min_interval = 1 / max_qps
 
     def _get_limiter(self):
         """获取或创建 limiter（确保绑定到当前 event loop）
@@ -77,7 +103,7 @@ class RateLimiter:
         注：_loop 是 asyncio 对象的内部属性，可能在 Python 版本间变化，
         使用 getattr 安全获取。
         """
-        if not self.max_qps or not self._use_bucket:
+        if not self.max_qps:
             return None
         try:
             loop = asyncio.get_running_loop()
@@ -89,53 +115,42 @@ class RateLimiter:
             if self._limiter is None:
                 from aiolimiter import AsyncLimiter
 
-                self._limiter = AsyncLimiter(self.max_qps, 1)
+                # AsyncLimiter 要求容量 >= 单次 acquire 量（1）。
+                # max_qps < 1 时 AsyncLimiter(max_qps, 1) 的容量不足 1，
+                # acquire(1) 会直接抛 ValueError，因此换算为
+                # "1 个请求每 1/max_qps 秒"，速率等价且容量恰为 1。
+                if self.max_qps < 1:
+                    self._limiter = AsyncLimiter(1, 1 / self.max_qps)
+                else:
+                    self._limiter = AsyncLimiter(self.max_qps, 1)
         except RuntimeError:
             # 没有运行的 event loop，不应该发生（acquire 在 async 中调用）
             pass
         return self._limiter
 
-    def _get_lock(self) -> asyncio.Lock:
-        """获取或创建 Lock（确保绑定到当前 event loop）"""
-        try:
-            loop = asyncio.get_running_loop()
-            if self._lock is not None:
-                lock_loop = getattr(self._lock, "_loop", None)
-                if lock_loop is not None and lock_loop is not loop:
-                    self._lock = None
-            if self._lock is None:
-                self._lock = asyncio.Lock()
-        except RuntimeError:
-            # 没有运行的 event loop，不应该发生
-            if self._lock is None:
-                self._lock = asyncio.Lock()
-        return self._lock
-
     async def acquire(self):
         if not self.max_qps:
             return
-        if self._use_bucket:
-            await self._get_limiter().acquire()
-        else:
-            # 锁保证串行：否则多个协程读到同一个 _last_request_time，
-            # 睡同样的时长后一起醒来，QPS 会被突破
-            async with self._get_lock():
-                elapsed = time.perf_counter() - self._last_request_time
-                if elapsed < self._min_interval:
-                    await asyncio.sleep(self._min_interval - elapsed)
-                self._last_request_time = time.perf_counter()
+        await self._get_limiter().acquire()
 
 
 class ConcurrencyLimiter:
     """并发上限限制器（asyncio.Semaphore 的 lazy 重绑定包装）
 
-    lazy init 以避免绑定错误的 event loop（多次 asyncio.run 场景），与 RateLimiter 一致。
+    lazy init 以避免绑定错误的 event loop（多次 asyncio.run 场景），与 RateLimiter 一致，
+    同样仅支持"串行多次 asyncio.run"；多个 event loop 并发使用同一实例不受支持。
     多个 ConcurrentRequester 共享同一实例时，即构成跨 endpoint 的全局并发硬上限。
     """
 
     def __init__(self, limit: int):
         self.limit = limit
         self._semaphore: asyncio.Semaphore | None = None
+        # __aenter__ 记录本次 acquire 用的信号量，__aexit__ 释放同一个对象：
+        # 若两次之间发生 loop 切换导致 _semaphore 被重建，release 错对象会
+        # 造成新信号量凭空多出配额。ContextVar 随 task 隔离，并发安全。
+        self._held: contextvars.ContextVar[asyncio.Semaphore | None] = contextvars.ContextVar(
+            "concurrency_limiter_held", default=None
+        )
 
     def _get_semaphore(self) -> asyncio.Semaphore:
         try:
@@ -152,11 +167,15 @@ class ConcurrencyLimiter:
         return self._semaphore
 
     async def __aenter__(self):
-        await self._get_semaphore().acquire()
+        semaphore = self._get_semaphore()
+        await semaphore.acquire()
+        self._held.set(semaphore)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        self._semaphore.release()
+        semaphore = self._held.get()
+        self._held.set(None)
+        semaphore.release()
 
 
 class ConcurrentRequester:
@@ -254,7 +273,12 @@ class ConcurrentRequester:
 
     @asynccontextmanager
     async def _get_session(self):
-        """获取或创建 session（复用模式，确保绑定到当前 event loop）"""
+        """获取或创建 session（复用模式，确保绑定到当前 event loop）
+
+        支持边界：与 RateLimiter/ConcurrencyLimiter 一致，loop 变化时重建仅覆盖
+        "串行多次 asyncio.run"；多个 event loop 并发共用同一 requester 不受支持
+        （旧 loop 上的在途请求会在 session 被替换后失败）。
+        """
         # 如果 session 无效（不存在、已关闭、或绑定到不同的 loop），创建新的
         if not self._is_session_valid():
             # 清理旧的 session（如果存在）
@@ -344,16 +368,25 @@ class ConcurrentRequester:
                 # 其他 4xx（认证/参数/404 等）重试也不会成功：不重试，
                 # 保留响应体交由调用方生成错误结果
                 return response, await ConcurrentRequester._read_body(response)
-            data = await response.json()
+            try:
+                data = await response.json()
+            except Exception as e:
+                # 2xx 但响应体不是 JSON（如网关/代理返回 text/html）：
+                # 确定性失败，不进入重试，保留响应体文本供上层报错
+                try:
+                    text = await response.text()
+                except Exception:
+                    text = None
+                raise JSONDecodeHTTPError(response.status, text) from e
             return response, data
 
     async def make_requests(self, session: ClientSession, method: str, url: str, **kwargs):
         if self._proxy:
             # setdefault：per-request 显式传入的 proxy 优先于客户端级配置
             kwargs.setdefault("proxy", self._proxy)
-        return await async_retry(self.retry_times, self.retry_delay)(self._make_requests)(
-            session, method, url, **kwargs
-        )
+        return await async_retry(
+            self.retry_times, self.retry_delay, exceptions=RETRYABLE_EXCEPTIONS
+        )(self._make_requests)(session, method, url, **kwargs)
 
     async def _send_single_request(
         self,
@@ -381,7 +414,8 @@ class ConcurrentRequester:
                 response, data = await self.make_requests(session, method, url, **kwargs)
                 latency = time.perf_counter() - t_enqueue
 
-                if response.status != 200:
+                # 与 _make_requests 的分类一致：>= 400 才是错误（201/204 等 2xx 是成功）
+                if response.status >= 400:
                     error_info = {
                         "status_code": response.status,
                         "response_data": data,
@@ -413,6 +447,20 @@ class ConcurrentRequester:
                         "status_code": e.status_code,
                         "response_data": e.response_data,
                         "error": f"HTTP {e.status_code}",
+                    },
+                    status="error",
+                    meta=meta,
+                    latency=time.perf_counter() - t_enqueue,
+                    queue_time=queue_time,
+                )
+            except JSONDecodeHTTPError as e:
+                # 2xx 但响应体不是 JSON：确定性错误，保留原始文本
+                return RequestResult(
+                    request_id=request_id,
+                    data={
+                        "status_code": e.status_code,
+                        "response_data": {"raw": e.body_text},
+                        "error": "Invalid JSON in response body",
                     },
                     status="error",
                     meta=meta,
@@ -470,46 +518,56 @@ class ConcurrentRequester:
             active_tasks[task] = idx
             return task
 
-        # 填满初始窗口
-        for item in items_iter:
-            create_task(item, item_id)
-            item_id += 1
-            if len(active_tasks) >= concurrency_limit:
-                break
+        try:
+            # 填满初始窗口
+            for item in items_iter:
+                create_task(item, item_id)
+                item_id += 1
+                if len(active_tasks) >= concurrency_limit:
+                    break
 
-        # 滑动窗口处理
-        while active_tasks:
-            # 等待任意一个任务完成
-            done, _ = await asyncio.wait(active_tasks.keys(), return_when=asyncio.FIRST_COMPLETED)
-
-            # 处理所有完成的任务，并立即填补空位
-            for task in done:
-                result = await task
-                del active_tasks[task]
-
-                if progress:
-                    progress.update(result)
-                completed_batch.append(result)
-
-                # 立即创建新任务填补空位（真正的滑动窗口）
-                try:
-                    next_item = next(items_iter)
-                    create_task(next_item, item_id)
-                    item_id += 1
-                except StopIteration:
-                    pass  # 没有更多 items 了
-
-            # 检查是否需要 yield 结果
-            is_final = len(active_tasks) == 0
-            if len(completed_batch) >= batch_size or (is_final and completed_batch):
-                if is_final and progress:
-                    progress.summary()
-                yield StreamingResult(
-                    completed_requests=sorted(completed_batch, key=lambda x: x.request_id),
-                    progress=progress,
-                    is_final=is_final,
+            # 滑动窗口处理
+            while active_tasks:
+                # 等待任意一个任务完成
+                done, _ = await asyncio.wait(
+                    active_tasks.keys(), return_when=asyncio.FIRST_COMPLETED
                 )
-                completed_batch = []
+
+                # 处理所有完成的任务，并立即填补空位
+                for task in done:
+                    result = await task
+                    del active_tasks[task]
+
+                    if progress:
+                        progress.update(result)
+                    completed_batch.append(result)
+
+                    # 立即创建新任务填补空位（真正的滑动窗口）
+                    try:
+                        next_item = next(items_iter)
+                        create_task(next_item, item_id)
+                        item_id += 1
+                    except StopIteration:
+                        pass  # 没有更多 items 了
+
+                # 检查是否需要 yield 结果
+                is_final = len(active_tasks) == 0
+                if len(completed_batch) >= batch_size or (is_final and completed_batch):
+                    if is_final and progress:
+                        progress.summary()
+                    yield StreamingResult(
+                        completed_requests=sorted(completed_batch, key=lambda x: x.request_id),
+                        progress=progress,
+                        is_final=is_final,
+                    )
+                    completed_batch = []
+        finally:
+            # 消费端提前退出（break / 异常上抛 / 生成器被 close）时，
+            # 取消窗口内在途的 HTTP 请求任务，避免后台继续发请求烧钱
+            if active_tasks:
+                for task in active_tasks:
+                    task.cancel()
+                await asyncio.gather(*active_tasks, return_exceptions=True)
 
     async def _stream_requests(
         self,
@@ -540,41 +598,45 @@ class ConcurrentRequester:
             input_price_per_1m: 输入价格（$/1M tokens）
             output_price_per_1m: 输出价格（$/1M tokens）
         """
-        progress = None
-        if batch_size is None:
-            batch_size = self._concurrency_limit
-        if total_requests is None and show_progress:
-            request_params, params_for_counting = itertools.tee(request_params)
-            total_requests = sum(1 for _ in params_for_counting)
+        try:
+            progress = None
+            if batch_size is None:
+                batch_size = self._concurrency_limit
+            if total_requests is None and show_progress:
+                request_params, params_for_counting = itertools.tee(request_params)
+                total_requests = sum(1 for _ in params_for_counting)
 
-        if show_progress and total_requests is not None:
-            config = progress_config or ProgressBarConfig()
-            progress = ProgressTracker(
-                total_requests,
-                config=config,
-                model_name=model_name,
-                input_price_per_1m=input_price_per_1m,
-                output_price_per_1m=output_price_per_1m,
-            )
+            if show_progress and total_requests is not None:
+                config = progress_config or ProgressBarConfig()
+                progress = ProgressTracker(
+                    total_requests,
+                    config=config,
+                    model_name=model_name,
+                    input_price_per_1m=input_price_per_1m,
+                    output_price_per_1m=output_price_per_1m,
+                )
 
-        async with self._get_session() as session:
-            async for result in self.process_with_concurrency_window(
-                items=request_params,
-                process_func=lambda params, request_id: self._send_single_request(
-                    session=session,
-                    request_id=request_id,
-                    url=url,
-                    method=method,
-                    meta=params.pop("meta", None),
-                    **params,
-                ),
-                concurrency_limit=self._concurrency_limit,
-                progress=progress,
-                batch_size=batch_size,
-            ):
-                await queue.put(result)
-
-        await queue.put(None)
+            async with self._get_session() as session:
+                async for result in self.process_with_concurrency_window(
+                    items=request_params,
+                    process_func=lambda params, request_id: self._send_single_request(
+                        session=session,
+                        request_id=request_id,
+                        url=url,
+                        method=method,
+                        meta=params.pop("meta", None),
+                        **params,
+                    ),
+                    concurrency_limit=self._concurrency_limit,
+                    progress=progress,
+                    batch_size=batch_size,
+                ):
+                    await queue.put(result)
+        finally:
+            # 结束哨兵必达：生产者异常时若不入队，消费者会在 queue.get() 上永久挂起，
+            # 真实异常只能等 GC 时以 "Task exception was never retrieved" 出现。
+            # 真实异常由消费侧 finally 中 await task 取回并传播。
+            await queue.put(None)
 
     async def aiter_stream_requests(
         self,
@@ -612,8 +674,18 @@ class ConcurrentRequester:
                     break
                 yield result
         finally:
+            # 无论正常结束还是消费侧提前退出，都要收尾生产者任务：
+            # - 提前退出：cancel 后 await，触发窗口内在途请求的取消
+            # - 生产者自身异常：await 取回并向上传播，不能静默吞掉
             if not task.done():
                 task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass  # 我们主动取消的，不向上传播
+            else:
+                # 已结束：正常返回或重新抛出生产者的真实异常
+                await task
 
     async def process_requests(
         self,

@@ -38,39 +38,37 @@ def _get_model_pricing():
     return _get_pricing_module()["get_pricing"]()
 
 
-# 使用类属性实现延迟加载
 class _LazyModelPricing:
-    _cache = None
+    """MODEL_PRICING 兼容视图：每次访问透传 get_pricing()
+
+    不做本地快照——get_pricing() 自身有缓存，且每日自动更新 / reload_pricing()
+    后这里能立即看到新价。__getitem__ miss 时按 mapping 契约抛 KeyError。
+    """
+
+    @property
+    def _data(self):
+        return _get_model_pricing()
 
     def __getitem__(self, key):
-        if self._cache is None:
-            self._cache = _get_model_pricing()
-        return self._cache.get(key)
+        return self._data[key]
 
     def __iter__(self):
-        if self._cache is None:
-            self._cache = _get_model_pricing()
-        return iter(self._cache)
+        return iter(self._data)
+
+    def __len__(self):
+        return len(self._data)
 
     def get(self, key, default=None):
-        if self._cache is None:
-            self._cache = _get_model_pricing()
-        return self._cache.get(key, default)
+        return self._data.get(key, default)
 
     def items(self):
-        if self._cache is None:
-            self._cache = _get_model_pricing()
-        return self._cache.items()
+        return self._data.items()
 
     def keys(self):
-        if self._cache is None:
-            self._cache = _get_model_pricing()
-        return self._cache.keys()
+        return self._data.keys()
 
     def __contains__(self, key):
-        if self._cache is None:
-            self._cache = _get_model_pricing()
-        return key in self._cache
+        return key in self._data
 
 
 # 为了向后兼容，保留 MODEL_PRICING 变量（延迟加载）

@@ -71,15 +71,6 @@ class TestCacheBatch:
         assert cached[1] is None
         assert uncached == [1]
 
-    def test_get_batch_stats(self, cache):
-        """验证 stats 统计"""
-        msgs = [self._msg("q0"), self._msg("q1")]
-        cache.set_batch(msgs[:1], [{"content": "a0"}], model="m1")
-
-        cache.get_batch(msgs, model="m1")
-        assert cache._stats["hits"] == 1
-        assert cache._stats["misses"] == 1
-
     def test_disabled_cache_batch(self, disabled_cache):
         """禁用缓存时 batch 操作正常返回"""
         msgs = [self._msg("q0")]

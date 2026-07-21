@@ -3,13 +3,13 @@
 """
 模型定价自动更新脚本
 
-从 OpenRouter API 获取所有模型定价，更新到 pricing.json
+从 OpenRouter API 获取所有模型定价，更新到 ~/.flexllm/pricing_data.json
 
 使用方法:
     # 预览更新内容
     python -m flexllm.pricing.updater
 
-    # 直接更新 pricing.json
+    # 直接更新 pricing_data.json
     python -m flexllm.pricing.updater --apply
 
     # 输出 JSON 格式
@@ -18,6 +18,7 @@
 
 import argparse
 import json
+import os
 import re
 import urllib.request
 from datetime import datetime
@@ -127,10 +128,10 @@ def collect_pricing() -> dict[str, dict[str, float]]:
 
         input_price, output_price = pricing
 
-        # 如果同一模型有多个版本，保留价格最低的
+        # 如果同一模型有多个版本，保留价格最低的（input 优先，相等时比 output）
         if name in pricing_map:
             existing = pricing_map[name]
-            if input_price >= existing["input"]:
+            if (input_price, output_price) >= (existing["input"], existing["output"]):
                 continue
 
         pricing_map[name] = {
@@ -165,8 +166,12 @@ def save_pricing_data(pricing_map: dict[str, dict[str, float]], path: Path) -> b
 
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
+        # 写临时文件 + 原子替换：每进程当日首次 get_pricing() 都可能触发后台更新，
+        # 多进程直接写同一文件会交错出损坏的 JSON
+        tmp_path = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
         return True
     except Exception as e:
         print(f"Error writing {path}: {e}")
@@ -183,7 +188,7 @@ def main():
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="直接更新 data.json（默认只预览）",
+        help="直接更新 pricing_data.json（默认只预览）",
     )
     parser.add_argument(
         "--json",
@@ -205,11 +210,11 @@ def main():
         if update_pricing_file(pricing_map):
             print(f"✓ Successfully updated pricing_data.json ({len(pricing_map)} models)")
         else:
-            print("✗ Failed to update data.json")
+            print("✗ Failed to update pricing_data.json")
             exit(1)
     else:
         print("\n" + "=" * 60)
-        print("Preview (use --apply to update data.json):")
+        print("Preview (use --apply to update pricing_data.json):")
         print("=" * 60 + "\n")
 
         for name in sorted(pricing_map.keys())[:30]:

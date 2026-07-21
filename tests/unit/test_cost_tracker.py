@@ -122,9 +122,8 @@ class TestCostTracker:
         tracker = CostTracker(config)
         assert tracker.enabled is False
 
-        # Record should return True and not track anything
-        result = tracker.record({"prompt_tokens": 100, "completion_tokens": 50}, "gpt-4o")
-        assert result is True
+        # Record should not track anything
+        tracker.record({"prompt_tokens": 100, "completion_tokens": 50}, "gpt-4o")
         report = tracker.get_report()
         assert report.request_count == 0
 
@@ -161,10 +160,28 @@ class TestCostTracker:
         config = CostTrackerConfig.tracking_only()
         tracker = CostTracker(config)
 
-        result = tracker.record(None, "gpt-4o")
-        assert result is True
+        tracker.record(None, "gpt-4o")
         report = tracker.get_report()
         assert report.request_count == 0
+
+    def test_unknown_model_records_zero_cost(self):
+        """未知模型（如自建免费模型）成本按 0 计，不 fallback 到其他模型的价格
+
+        回归：曾按 gpt-4o-mini 计费，自建模型积累假账单会触发 BudgetExceededError。
+        """
+        config = CostTrackerConfig.with_budget(limit=0.01)
+        tracker = CostTracker(config)
+
+        # 大量 token 也不应产生成本，更不应触发预算熔断
+        for _ in range(5):
+            tracker.record(
+                {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000},
+                "my-selfhosted-model-not-in-pricing",
+            )
+
+        report = tracker.get_report()
+        assert report.total_cost == 0.0
+        assert report.request_count == 5
 
     def test_budget_limit(self):
         """Test budget limit raises exception."""

@@ -57,7 +57,9 @@ def _load_pricing_from_file(path: Path) -> dict[str, dict[str, float]]:
             name: {"input": p["input"] / 1e6, "output": p["output"] / 1e6}
             for name, p in models.items()
         }
-    except (json.JSONDecodeError, KeyError, TypeError):
+    except (json.JSONDecodeError, KeyError, TypeError) as e:
+        # 文件损坏（如并发写坏）不阻断使用，但必须留下线索，否则全部模型静默变为无定价
+        logger.warning("定价文件 %s 解析失败，本次按无定价数据处理: %s", path, e)
         return {}
 
 
@@ -164,9 +166,16 @@ def get_model_pricing(model: str) -> dict[str, float] | None:
     return None
 
 
+# 已提示过"未计费"的未知模型，避免批量调用时刷屏
+_unknown_models_logged: set[str] = set()
+
+
 def estimate_cost(input_tokens: int, output_tokens: int = 0, model: str = "gpt-4o") -> float:
     """
     估算 API 调用成本
+
+    查不到定价的模型（如自建/免费模型）返回 0.0，不做任何 fallback 计费：
+    按别的模型的价格记假账会积累出虚假成本，甚至触发预算熔断。
 
     Args:
         input_tokens: 输入 token 数
@@ -174,13 +183,15 @@ def estimate_cost(input_tokens: int, output_tokens: int = 0, model: str = "gpt-4
         model: 模型名称
 
     Returns:
-        估算成本 (美元)
+        估算成本 (美元)；无定价数据时为 0.0
     """
     pricing = get_model_pricing(model)
 
     if not pricing:
-        # 默认使用 gpt-4o-mini 的价格
-        pricing = get_model_pricing("gpt-4o-mini") or {"input": 0.15e-6, "output": 0.6e-6}
+        if model not in _unknown_models_logged:
+            _unknown_models_logged.add(model)
+            logger.info("模型 %s 无定价数据，成本按 0 计（不计费）", model)
+        return 0.0
 
     return input_tokens * pricing["input"] + output_tokens * pricing["output"]
 

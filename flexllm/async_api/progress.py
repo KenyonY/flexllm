@@ -82,8 +82,9 @@ class ProgressTracker:
         self._last_refresh_time = 0.0
         self._min_refresh_interval = 0.05  # 最小刷新间隔 50ms
 
-        # TTY 检测：非 TTY 环境使用里程碑输出
-        self._is_tty = sys.stdout.isatty()
+        # TTY 检测：非 TTY 环境使用里程碑输出。渲染全部走 stderr，检测也必须看 stderr：
+        # 否则 stdout 重定向到文件时会把 \r 动画写进日志
+        self._is_tty = sys.stderr.isatty()
         self._milestones = set(range(10, 101, 10))  # 10%, 20%, ..., 100%
         self._reported_milestones: set[int] = set()
 
@@ -531,20 +532,3 @@ class ProgressTracker:
                 # 在Windows GBK环境下，如果出现编码错误，使用普通print
                 print(summary, file=sys.stderr)
         return summary
-
-
-if __name__ == "__main__":
-    from .interface import RequestResult
-
-    config = ProgressBarConfig()
-    tracker = ProgressTracker(100, config)
-    for i in range(100):
-        time.sleep(0.1)
-        tracker.update(
-            result=RequestResult(
-                request_id=i,
-                data=None,
-                status="success",
-                latency=0.1,
-            )
-        )

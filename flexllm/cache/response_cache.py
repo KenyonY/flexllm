@@ -44,11 +44,6 @@ class ResponseCacheConfig:
         return cls(enabled=False)
 
     @classmethod
-    def default(cls) -> "ResponseCacheConfig":
-        """默认配置：禁用缓存"""
-        return cls(enabled=False)
-
-    @classmethod
     def with_ttl(cls, ttl: int = 3600, cache_dir: str = None) -> "ResponseCacheConfig":
         """
         启用缓存，自定义 TTL
@@ -78,7 +73,6 @@ class ResponseCache:
 
     def __init__(self, config: ResponseCacheConfig | None = None):
         self.config = config or ResponseCacheConfig.disabled()
-        self._stats = {"hits": 0, "misses": 0}
         self._db: "FlaxKV | None" = None
 
         if self.config.enabled:
@@ -119,14 +113,7 @@ class ResponseCache:
             return None
 
         cache_key = self._make_key(messages, model, **kwargs)
-        result = self._db.get(cache_key)
-
-        if result is not None:
-            self._stats["hits"] += 1
-        else:
-            self._stats["misses"] += 1
-
-        return result
+        return self._db.get(cache_key)
 
     def set(self, messages: list[dict], response: Any, model: str = "", **kwargs) -> None:
         """
@@ -178,10 +165,7 @@ class ResponseCache:
         uncached_indices = []
         for i, result in enumerate(results):
             cached.append(result)
-            if result is not None:
-                self._stats["hits"] += 1
-            else:
-                self._stats["misses"] += 1
+            if result is None:
                 uncached_indices.append(i)
         return cached, uncached_indices
 
@@ -198,35 +182,8 @@ class ResponseCache:
         if items:
             self._db.batch_set(items)
 
-    def clear(self) -> int:
-        """清空缓存"""
-        if self._db is None:
-            return 0
-        keys = list(self._db.keys())
-        count = len(keys)
-        for key in keys:
-            del self._db[key]
-        return count
-
     def close(self):
         """关闭缓存"""
         if self._db is not None:
             self._db.close()
             self._db = None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        self.close()
-
-    @property
-    def stats(self) -> dict[str, Any]:
-        """返回缓存统计"""
-        total = self._stats["hits"] + self._stats["misses"]
-        hit_rate = self._stats["hits"] / total if total > 0 else 0
-        return {
-            **self._stats,
-            "total": total,
-            "hit_rate": round(hit_rate, 4),
-        }

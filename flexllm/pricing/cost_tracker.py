@@ -146,7 +146,7 @@ class CostTracker:
     def enabled(self) -> bool:
         return self._config.enabled
 
-    def record(self, usage: dict | None, model: str) -> bool:
+    def record(self, usage: dict | None, model: str) -> None:
         """
         记录一次 API 调用的成本
 
@@ -154,14 +154,11 @@ class CostTracker:
             usage: API 返回的 usage 字典，包含 prompt_tokens, completion_tokens 等
             model: 模型名称
 
-        Returns:
-            True 表示可以继续，False 表示应该停止（但不强制）
-
         Raises:
             BudgetExceededError: 当超过硬限制时
         """
         if not self._config.enabled or usage is None:
-            return True
+            return
 
         # 提取 token 数量
         input_tokens = usage.get("prompt_tokens", 0)
@@ -199,8 +196,6 @@ class CostTracker:
                     self._report.total_cost,
                     self._config.budget_warning,
                 )
-
-        return True
 
     def get_report(self) -> CostReport:
         """获取当前成本报告"""

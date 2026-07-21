@@ -92,11 +92,9 @@ class TestEstimateCost:
         assert with_output > input_only
 
     def test_estimate_cost_unknown_model(self):
-        """Test cost estimation for unknown model uses default."""
+        """未知模型无定价数据：成本为 0.0，不做 fallback 计费"""
         cost = estimate_cost(input_tokens=1000, output_tokens=0, model="unknown-model")
-        # Should return some default cost
-        assert isinstance(cost, float)
-        assert cost >= 0
+        assert cost == 0.0
 
 
 class TestEstimateBatchCost:
