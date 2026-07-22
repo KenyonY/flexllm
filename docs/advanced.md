@@ -830,18 +830,46 @@ models:
     proxy: http://gateway:8080
 ```
 
-### 仅支持 HTTP(S) 代理
+### SOCKS 代理
 
-`proxy` 只接受 `http://` 与 `https://`，传 `socks5://` 会在构造时直接报错：
+SOCKS 需要额外依赖：
+
+```bash
+pip install 'flexllm[socks]'   # 装 aiohttp-socks
+```
+
+```python
+client = LLMClient(base_url="...", proxy="socks5://gateway:1080")
+client = LLMClient(base_url="...", proxy="socks5://user:pass@gateway:1080")
+
+# ssh -D 起的动态转发同样可用
+client = LLMClient(base_url="...", proxy="socks5://127.0.0.1:1080")
+```
+
+| Scheme | 说明 |
+|--------|------|
+| `http://` `https://` | aiohttp 原生，无需额外依赖 |
+| `socks5://` `socks4://` | 需 `flexllm[socks]` |
+| `socks5h://` | 等价于 `socks5://`，自动规范化 |
+
+**域名由代理解析**：SOCKS5 默认 `rdns=True`，目标域名原样交给代理侧解析，
+不在本地解析。VPN 网关场景下这是关键——目标域名往往只有网关那侧能解析，
+这也是 `socks5h://` 的语义，所以两者等价。
+
+**未安装依赖时在构造时报错**，而不是发请求时才炸：
 
 ```python
 LLMClient(base_url="...", proxy="socks5://gw:1080")
-# ValueError: 不支持的代理 scheme: 'socks5://gw:1080'。仅支持 http:// 与 https://
+# ValueError: SOCKS 代理 'socks5://gw:1080' 需要额外依赖：pip install 'flexllm[socks]'
 ```
 
-原因是 aiohttp 不支持 SOCKS，且**不校验 scheme**——给它 `socks5://` 它会照样往该
-端口发 HTTP `CONNECT`，在 SOCKS 服务端上表现为难以定位的连接错误。与其让它在运行时
-以令人困惑的方式失败，不如构造时就拒绝。若确需 SOCKS，可用 `ssh -L` 在本地转成
-HTTP 端口，或在网关上跑 squid / tinyproxy。
+其他 scheme（`socks6://`、`ftp://` 等）一律在构造时拒绝。aiohttp **不校验
+scheme**，给它未知 scheme 它会照样往该端口发 HTTP `CONNECT`，表现为难以定位的
+连接错误——与其运行时以令人困惑的方式失败，不如构造时就拒绝。
+
+> 实现差异：HTTP 代理走 aiohttp 的 per-request `proxy=` 参数，SOCKS 必须在
+> connector 层建隧道。因此 SOCKS 的粒度是 per-client / per-endpoint（每个
+> client 独占一个 connector），无法 per-request——这正好覆盖了按 endpoint
+> 区分走不走代理的需求。
 
 代理对流式（`chat_completions_stream`）与非流式请求同样生效。

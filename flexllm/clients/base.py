@@ -103,7 +103,8 @@ class LLMClientBase(ABC):
             cache_image: 是否缓存图片
             cache_dir: 图片缓存目录
             proxy: 正向代理 URL，形如 http://gateway:8080 或
-                   http://user:pass@gateway:8080（仅支持 http(s)://，不支持 SOCKS）。
+                   socks5://user:pass@gateway:1080。支持 http(s):// 与
+                   socks4/socks5/socks5h://（SOCKS 需 pip install 'flexllm[socks]'）。
                    用于目标 base_url 仅经某网关可达的场景。不传时仍会沿用
                    HTTP_PROXY/HTTPS_PROXY/NO_PROXY 环境变量（trust_env=True）。
             cache: 响应缓存配置

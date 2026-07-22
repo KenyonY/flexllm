@@ -1,8 +1,8 @@
-"""正向代理（issue #11）测试
+"""正向代理（issue #11）测试 —— HTTP(S) 代理路径
 
-仅支持 http(s):// —— aiohttp 不支持 SOCKS，且不校验 scheme：给它 socks5:// 它会
-照样往该端口发 HTTP CONNECT，在 SOCKS 服务端上表现为难以定位的连接错误。因此在
-构造时就拒绝，而不是留到运行时。
+HTTP 代理走 aiohttp 的 per-request `proxy=` 参数。SOCKS 走 connector 层，
+另见 test_socks_proxy.py。未知 scheme 在构造时就拒绝而非留到运行时：aiohttp
+不校验 scheme，会照样往该端口发 HTTP CONNECT，表现为难以定位的连接错误。
 """
 
 import pytest
@@ -23,14 +23,10 @@ class TestValidateProxy:
     def test_none_passes_through(self):
         assert validate_proxy(None) is None
 
-    @pytest.mark.parametrize("bad", ["socks5://gw:1080", "socks4://gw:1080", "socks5h://gw:1080"])
-    def test_rejects_socks(self, bad):
+    @pytest.mark.parametrize("bad", ["socks6://gw:1080", "ftp://gw:21", "gw:8080"])
+    def test_rejects_unknown_scheme(self, bad):
         with pytest.raises(ValueError, match="不支持的代理 scheme"):
             validate_proxy(bad)
-
-    def test_rejects_missing_scheme(self):
-        with pytest.raises(ValueError, match="不支持的代理 scheme"):
-            validate_proxy("gw:8080")
 
 
 class TestProxyInjection:
@@ -121,7 +117,12 @@ class TestProxyPlumbing:
 
     def test_invalid_proxy_fails_at_construction(self):
         with pytest.raises(ValueError, match="不支持的代理 scheme"):
-            LLMClient(base_url="http://x/v1", api_key="k", proxy="socks5://gw:1080")
+            LLMClient(base_url="http://x/v1", api_key="k", proxy="socks6://gw:1080")
+
+    def test_socks_proxy_plumbed_through(self):
+        c = LLMClient(base_url="http://x/v1", api_key="k", model="m", proxy="socks5://gw:1080")
+        assert c._single_client._client._proxy == "socks5://gw:1080"
+        assert c._single_client._client._proxy_is_socks is True
 
 
 class TestProxyFromConfig:

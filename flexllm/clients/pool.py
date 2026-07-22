@@ -155,10 +155,11 @@ class LLMClientPool:
                 fallback=False 时为单 client 重试次数，默认为 3
             cache_image: 是否缓存图片
             cache_dir: 图片缓存目录
-            proxy: 正向代理 URL（http://gateway:8080，支持 http://user:pass@host:port）。
+            proxy: 正向代理 URL（http://gateway:8080 或 socks5://gateway:1080，
+                均支持 scheme://user:pass@host:port）。
                 多 endpoint 模式下为各 endpoint 的默认值，可被 EndpointConfig.proxy 覆盖，
                 从而做到"部分 endpoint 经网关、部分直连"——这是进程级环境变量做不到的。
-                仅支持 http(s)://，不支持 SOCKS（aiohttp 限制）。
+                SOCKS 需额外依赖：pip install 'flexllm[socks]'。
             use_vertex_ai: 是否使用 Vertex AI（仅 Gemini）
             project_id: GCP 项目 ID（仅 Vertex AI）
             location: GCP 区域（仅 Vertex AI）

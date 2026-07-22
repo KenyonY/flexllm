@@ -97,20 +97,47 @@ def parse_retry_after(value: str | None) -> float | None:
     return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
-def validate_proxy(proxy: str | None) -> str | None:
-    """校验正向代理 URL，仅接受 http(s)://
+# SOCKS 代理走 connector 层（aiohttp 原生的 proxy= 参数只支持 HTTP CONNECT），
+# 需要可选依赖 aiohttp-socks。socks5h 是 curl 的写法，python_socks 不认，
+# 但 SOCKS5 的 rdns 默认为 True（域名交由代理解析）即 socks5h 语义，故等价规范化。
+SOCKS_SCHEMES = ("socks4", "socks5", "socks5h")
 
-    aiohttp 不支持 SOCKS，且不校验 scheme：传 socks5:// 它会照样往该端口发
-    HTTP CONNECT，在 SOCKS 服务端上表现为莫名其妙的连接错误。与其让它在运行时
-    以难以定位的方式失败，不如构造时就报错。
+
+def is_socks_proxy(proxy: str | None) -> bool:
+    """代理是否为 SOCKS（决定走 connector 层还是 aiohttp 的 proxy= 参数）"""
+    if not proxy:
+        return False
+    return proxy.split("://", 1)[0].lower() in SOCKS_SCHEMES
+
+
+def validate_proxy(proxy: str | None) -> str | None:
+    """校验并规范化正向代理 URL。
+
+    接受 http(s):// 与 socks4/socks5/socks5h://，其余 scheme 直接报错：
+    aiohttp 不校验 scheme，传未知 scheme 它会照样往该端口发 HTTP CONNECT，
+    在 SOCKS 服务端上表现为莫名其妙的连接错误。与其让它在运行时以难以定位的
+    方式失败，不如构造时就报错。
+
+    SOCKS 依赖 aiohttp-socks，未安装时同样在构造时报错而非发请求时才炸。
     """
     if proxy is None:
         return None
     scheme = proxy.split("://", 1)[0].lower() if "://" in proxy else ""
+    if scheme in SOCKS_SCHEMES:
+        try:
+            import aiohttp_socks  # noqa: F401
+        except ImportError as e:
+            raise ValueError(
+                f"SOCKS 代理 {proxy!r} 需要额外依赖：pip install 'flexllm[socks]'"
+            ) from e
+        if scheme == "socks5h":
+            # python_socks 不认 socks5h；SOCKS5 默认 rdns=True，语义完全等价
+            return "socks5://" + proxy.split("://", 1)[1]
+        return proxy
     if scheme not in ("http", "https"):
         raise ValueError(
-            f"不支持的代理 scheme: {proxy!r}。仅支持 http:// 与 https:// "
-            f"（aiohttp 不支持 SOCKS）。带认证用 http://user:pass@host:port。"
+            f"不支持的代理 scheme: {proxy!r}。支持 http://、https:// 与 "
+            f"socks4://、socks5://、socks5h://。带认证用 scheme://user:pass@host:port。"
         )
     return proxy
 
@@ -257,6 +284,7 @@ class ConcurrentRequester:
     ):
         self._concurrency_limit = concurrency_limit
         self._proxy = validate_proxy(proxy)
+        self._proxy_is_socks = is_socks_proxy(self._proxy)
         if timeout:
             self._timeout = ClientTimeout(total=timeout, connect=min(10.0, timeout))
         else:
@@ -282,9 +310,18 @@ class ConcurrentRequester:
 
     def _create_session(self) -> ClientSession:
         """创建新的 session（内部使用）"""
-        self._connector = TCPConnector(
+        connector_kwargs = dict(
             limit=self._concurrency_limit + 10, limit_per_host=0, force_close=False
         )
+        if self._proxy_is_socks:
+            # SOCKS 必须在 connector 层建隧道：aiohttp 的 proxy= 参数只会发 HTTP
+            # CONNECT。ProxyConnector 继承自 TCPConnector，其余逻辑（loop 绑定
+            # 检查、关闭）无需区分。依赖已在 validate_proxy 中校验过。
+            from aiohttp_socks import ProxyConnector
+
+            self._connector = ProxyConnector.from_url(self._proxy, **connector_kwargs)
+        else:
+            self._connector = TCPConnector(**connector_kwargs)
         self._session = ClientSession(
             timeout=self._timeout, connector=self._connector, trust_env=True
         )
@@ -418,8 +455,10 @@ class ConcurrentRequester:
             return response, data
 
     async def make_requests(self, session: ClientSession, method: str, url: str, **kwargs):
-        if self._proxy:
-            # setdefault：per-request 显式传入的 proxy 优先于客户端级配置
+        if self._proxy and not self._proxy_is_socks:
+            # setdefault：per-request 显式传入的 proxy 优先于客户端级配置。
+            # SOCKS 例外：隧道已由 connector 建立，再传 proxy= 会让 aiohttp
+            # 对着 SOCKS 端口发 HTTP CONNECT。
             kwargs.setdefault("proxy", self._proxy)
         return await async_retry(
             self.retry_times, self.retry_delay, exceptions=RETRYABLE_EXCEPTIONS
