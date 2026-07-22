@@ -6,7 +6,9 @@
 
 ### 背景
 
-当前 `max_qps` 是静态配置，遇到 429 错误时只会重试，不会调整请求速率，可能持续触发限流。
+当前 `max_qps` 是静态配置。遇到 429 时已能按服务端 `Retry-After` 或指数退避正确等待
+（见 [advanced.md 自动重试](advanced.md#自动重试)），但请求速率本身不会下调——
+退避只作用于失败的那条请求，其余并发请求仍以原速率涌向已限流的服务端。
 
 ### 目标
 
@@ -22,10 +24,10 @@
 
 ```python
 # 现有用法（不变）
-executor = ConcurrentExecutor(concurrency_limit=10, max_qps=50)
+requester = ConcurrentRequester(concurrency_limit=10, max_qps=50)
 
 # 启用自适应（新增）
-executor = ConcurrentExecutor(
+requester = ConcurrentRequester(
     concurrency_limit=10,
     max_qps=50,        # 硬上限
     adaptive=True,     # 启用自适应
@@ -35,7 +37,8 @@ executor = ConcurrentExecutor(
 
 #### 实现方案
 
-扩展现有 `RateLimiter` 类：
+扩展 `async_api/core.py` 的 `RateLimiter` 类。注意现有实现基于 aiolimiter 的
+`AsyncLimiter` 且做了 lazy init（绑定当前 event loop），动态改速率需要重建 limiter：
 
 ```python
 class RateLimiter:
@@ -82,20 +85,18 @@ class RateLimiter:
 
 #### 集成到错误处理
 
-利用现有的 `error_handler` 回调机制：
+`_make_requests` 已把 429 归类为 `RetryableHTTPError`（携带 `status_code` 与
+`retry_after`），在 `ConcurrentRequester._send_single_request` 的重试出口处挂钩即可：
 
 ```python
-# ConcurrentExecutor._execute_single_task 中
-except Exception as e:
-    # 检测 429 错误
-    if self._is_rate_limit_error(e):
+# _send_single_request 中
+except RetryableHTTPError as e:
+    if e.status_code == 429:
         self._rate_limiter.on_rate_limit()
-
-    # 现有重试逻辑...
+    ...
 
 # 成功时
 self._rate_limiter.on_success()
-return ExecutionResult(...)
 ```
 
 #### 使用示例
@@ -129,5 +130,8 @@ batch:
 
 ### 可选扩展
 
-- 解析 `Retry-After` 响应头，精确等待
 - 进度条显示当前 QPS
+
+### 已完成
+
+- 解析 `Retry-After` 响应头精确等待 + 指数退避与抖动

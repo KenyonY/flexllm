@@ -17,8 +17,8 @@ client = LLMClient(
     cache: ResponseCacheConfig = None,   # 缓存配置
     concurrency_limit: int = 10,         # 最大并发数
     max_qps: float = None,               # QPS 限制
-    retry_times: int = 3,                # 重试次数
-    retry_delay: float = 1.0,            # 重试延迟（秒）
+    retry_times: int = 3,                # 最大尝试次数（含首次调用）
+    retry_delay: float = 1.0,            # 退避基数（秒），指数退避+抖动
     timeout: int = 120,                  # 请求超时（秒）
 )
 ```

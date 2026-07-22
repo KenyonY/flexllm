@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 import re
 from contextvars import ContextVar
 from functools import wraps
@@ -9,21 +10,50 @@ from functools import wraps
 # 用于在 async_retry 重试时通知外部（如进度条）
 retry_callback: ContextVar[callable] = ContextVar("retry_callback", default=None)
 
+# 退避上限：服务端给出的 Retry-After 可能是几百秒，批量任务不能被单个请求拖死
+DEFAULT_MAX_RETRY_DELAY = 60.0
+
+
+def compute_retry_delay(
+    attempt: int,
+    base_delay: float,
+    max_delay: float = DEFAULT_MAX_RETRY_DELAY,
+    retry_after: float | None = None,
+) -> float:
+    """计算第 attempt 次失败后的等待时长（attempt 从 0 开始）。
+
+    - 服务端给出 Retry-After 时以它为准（它知道配额何时恢复，比本地猜测准），
+      但仍封顶到 max_delay，并向上抖动 0~25%：批量场景下成百上千个请求会收到
+      相同的 Retry-After，不抖动则会在同一时刻齐发，再次把服务端打挂。
+      只向上抖是因为早于服务端要求重试必然再吃一次 429。
+    - 没有 Retry-After 时用指数退避 + equal jitter（delay/2 + rand(0, delay/2)）：
+      固定延迟会让并发失败的请求同步重试，形成惊群。
+    """
+    if retry_after is not None:
+        return min(retry_after, max_delay) * (1 + random.random() * 0.25)
+    delay = min(base_delay * (2**attempt), max_delay)
+    return delay / 2 + random.random() * delay / 2
+
 
 def async_retry(
     retry_times: int = 3,
     retry_delay: float = 1.0,
     exceptions: tuple = (Exception,),
     logger=None,
+    max_delay: float = DEFAULT_MAX_RETRY_DELAY,
 ):
     """
     Async retry decorator
 
+    重试间隔为指数退避 + 抖动；异常若带 `retry_after` 属性（如 HTTP 429 的
+    Retry-After 响应头），则以该值为准。
+
     Args:
-        retry_times: Maximum retry count
-        retry_delay: Delay between retries (seconds)
-        exceptions: Exception types to retry on
+        retry_times: 最大尝试次数（含首次调用）
+        retry_delay: 退避基数（秒），实际间隔为 retry_delay * 2**attempt 加抖动
+        exceptions: 需要重试的异常类型
         logger: Logger instance
+        max_delay: 单次退避上限（秒）
     """
     if logger is None:
         logger = logging.getLogger(__name__)
@@ -42,7 +72,14 @@ def async_retry(
                     callback = retry_callback.get()
                     if callback:
                         callback()
-                    await asyncio.sleep(retry_delay)
+                    delay = compute_retry_delay(
+                        attempt,
+                        retry_delay,
+                        max_delay,
+                        retry_after=getattr(e, "retry_after", None),
+                    )
+                    await asyncio.sleep(delay)
+            # retry_times<=0 时上面的循环体不执行，仍需保证至少调用一次
             return await func(*args, **kwargs)
 
         return wrapper

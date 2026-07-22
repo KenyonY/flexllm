@@ -1,11 +1,14 @@
 import asyncio
 import contextvars
 import itertools
+import math
 import time
 from asyncio import Queue
 from collections.abc import AsyncGenerator, Callable, Iterable
 from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import (
     Any,
 )
@@ -31,11 +34,15 @@ class StreamingResult:
 
 
 class RetryableHTTPError(Exception):
-    """可重试的 HTTP 错误（429 限流 / 5xx 服务端错误），携带响应体供重试耗尽后上报"""
+    """可重试的 HTTP 错误（429 限流 / 5xx 服务端错误），携带响应体供重试耗尽后上报
 
-    def __init__(self, status_code: int, response_data: Any):
+    retry_after 来自响应头，async_retry 会优先用它决定退避时长。
+    """
+
+    def __init__(self, status_code: int, response_data: Any, retry_after: float | None = None):
         self.status_code = status_code
         self.response_data = response_data
+        self.retry_after = retry_after
         super().__init__(f"HTTP {status_code}")
 
 
@@ -61,6 +68,33 @@ RETRYABLE_EXCEPTIONS = (
     asyncio.TimeoutError,  # 请求超时（Py3.11+ 即内建 TimeoutError）
     TimeoutError,
 )
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """解析 Retry-After 响应头（RFC 7231），返回需等待的秒数。
+
+    两种合法形式：delta-seconds（`Retry-After: 20`）与 HTTP-date
+    （`Retry-After: Wed, 21 Oct 2015 07:28:00 GMT`）。无法解析时返回 None，
+    由调用方退回指数退避——头部格式异常不该让请求直接失败。
+    """
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        seconds = float(value)
+        if math.isfinite(seconds):
+            return max(0.0, seconds)
+        return None
+    except ValueError:
+        pass
+    try:
+        when = parsedate_to_datetime(value)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        # RFC 规定 HTTP-date 为 GMT，缺时区信息时按 UTC 解释
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
 
 def validate_proxy(proxy: str | None) -> str | None:
@@ -360,9 +394,12 @@ class ConcurrentRequester:
     async def _make_requests(session: ClientSession, method: str, url: str, **kwargs):
         async with session.request(method, url, **kwargs) as response:
             if response.status == 429 or response.status >= 500:
-                # 限流/服务端错误：抛异常进入 async_retry 重试，携带响应体
+                # 限流/服务端错误：抛异常进入 async_retry 重试，携带响应体。
+                # Retry-After 由服务端给出配额恢复时间，比本地指数退避准确。
                 raise RetryableHTTPError(
-                    response.status, await ConcurrentRequester._read_body(response)
+                    response.status,
+                    await ConcurrentRequester._read_body(response),
+                    retry_after=parse_retry_after(response.headers.get("Retry-After")),
                 )
             if response.status >= 400:
                 # 其他 4xx（认证/参数/404 等）重试也不会成功：不重试，
