@@ -110,6 +110,25 @@ def is_socks_proxy(proxy: str | None) -> bool:
     return proxy.split("://", 1)[0].lower() in SOCKS_SCHEMES
 
 
+def create_proxied_session(proxy: str | None, **session_kwargs) -> tuple[ClientSession, dict]:
+    """为独立 session（各客户端的流式路径）构造带代理的 ClientSession。
+
+    返回 `(session, request_kwargs)`：SOCKS 的隧道由 connector 建立，此时
+    request_kwargs 为空——再传 `proxy=` 会让 aiohttp 对着 SOCKS 端口发 HTTP
+    CONNECT；HTTP 代理反之，走 request 级 `proxy=` 参数。
+
+    流式路径不走 ConcurrentRequester（各客户端自建 session），这里与
+    `ConcurrentRequester._create_session` / `make_requests` 保持同一套语义。
+    """
+    if is_socks_proxy(proxy):
+        from aiohttp_socks import ProxyConnector
+
+        connector = ProxyConnector.from_url(proxy)
+        return ClientSession(connector=connector, trust_env=True, **session_kwargs), {}
+    session = ClientSession(trust_env=True, **session_kwargs)
+    return session, ({"proxy": proxy} if proxy else {})
+
+
 def validate_proxy(proxy: str | None) -> str | None:
     """校验并规范化正向代理 URL。
 

@@ -23,14 +23,15 @@ def compute_retry_delay(
     """计算第 attempt 次失败后的等待时长（attempt 从 0 开始）。
 
     - 服务端给出 Retry-After 时以它为准（它知道配额何时恢复，比本地猜测准），
-      但仍封顶到 max_delay，并向上抖动 0~25%：批量场景下成百上千个请求会收到
-      相同的 Retry-After，不抖动则会在同一时刻齐发，再次把服务端打挂。
-      只向上抖是因为早于服务端要求重试必然再吃一次 429。
+      并向上抖动 0~25%：批量场景下成百上千个请求会收到相同的 Retry-After，
+      不抖动则会在同一时刻齐发，再次把服务端打挂。只向上抖是因为早于服务端
+      要求重试必然再吃一次 429。基数先压到 max_delay/1.25，使抖动后的结果
+      仍不超过 max_delay——max_delay 是硬上限，同时抖动在任何情况下都不失效。
     - 没有 Retry-After 时用指数退避 + equal jitter（delay/2 + rand(0, delay/2)）：
       固定延迟会让并发失败的请求同步重试，形成惊群。
     """
     if retry_after is not None:
-        return min(retry_after, max_delay) * (1 + random.random() * 0.25)
+        return min(retry_after, max_delay / 1.25) * (1 + random.random() * 0.25)
     delay = min(base_delay * (2**attempt), max_delay)
     return delay / 2 + random.random() * delay / 2
 

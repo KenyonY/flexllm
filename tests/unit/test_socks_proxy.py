@@ -7,11 +7,13 @@ CONNECT，SOCKS 必须在 connector 层建隧道（aiohttp-socks 的 ProxyConnec
 """
 
 import asyncio
+import json
 import socket
 
 import pytest
 from aiohttp import web
 
+from flexllm import LLMClient
 from flexllm.async_api.core import ConcurrentRequester, is_socks_proxy, validate_proxy
 
 
@@ -156,6 +158,37 @@ class EchoServer:
         return f"http://{host}:{self.port}/test"
 
 
+class SseServer:
+    """返回 OpenAI 风格 SSE 流的目标服务器"""
+
+    def __init__(self):
+        self._runner = None
+        self.port = None
+
+    async def _handler(self, request):
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        for piece in ("Hello", " world"):
+            payload = json.dumps({"choices": [{"delta": {"content": piece}}]})
+            await resp.write(f"data: {payload}\n\n".encode())
+        await resp.write(b"data: [DONE]\n\n")
+        await resp.write_eof()
+        return resp
+
+    async def __aenter__(self):
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", self._handler)
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        await site.start()
+        self.port = site._server.sockets[0].getsockname()[1]
+        return self
+
+    async def __aexit__(self, *args):
+        await self._runner.cleanup()
+
+
 async def _request_via(proxy: str, target_url: str):
     requester = ConcurrentRequester(concurrency_limit=2, retry_times=1, proxy=proxy, timeout=10)
     try:
@@ -242,6 +275,30 @@ class TestSocks5EndToEnd:
 
         assert result.status == "success", result.data
         assert proxy.targets[0][0] == "localhost"
+
+    async def test_streaming_routed_through_socks5(self):
+        """流式路径不走 ConcurrentRequester，各客户端自建 session
+
+        回归：三处流式路径（base/gemini/claude）原本固定用 TCPConnector 并传
+        proxy= kwarg，SOCKS 下 aiohttp 会对着 SOCKS 端口发 HTTP CONNECT，
+        表现为代理侧收到一条 ASCII 被当成 IPv6 的垃圾目标地址。
+        """
+        async with SseServer() as target, Socks5Server() as proxy:
+            client = LLMClient(
+                base_url=f"http://127.0.0.1:{target.port}/v1",
+                api_key="k",
+                model="m",
+                proxy=proxy.url(),
+            )
+            chunks = [
+                c
+                async for c in client.chat_completions_stream(
+                    messages=[{"role": "user", "content": "hi"}]
+                )
+            ]
+
+        assert "".join(chunks) == "Hello world"
+        assert [t[1] for t in proxy.targets] == [target.port]
 
     async def test_failure_surfaces_when_proxy_refuses(self):
         """代理不可达时应作为错误结果返回，而不是静默成功"""

@@ -582,8 +582,11 @@ client = LLMClient(
 
 | 情况 | 等待时长 |
 |------|----------|
-| 响应带 `Retry-After` 头 | 以服务端给出的值为准，封顶 60 秒，向上抖动 0~25% |
-| 无 `Retry-After` | 指数退避 `retry_delay * 2**n`，封顶 60 秒，equal jitter |
+| 响应带 `Retry-After` 头 | 以服务端给出的值为准，向上抖动 0~25% |
+| 无 `Retry-After` | 指数退避 `retry_delay * 2**n`，equal jitter |
+
+两种情况都以 60 秒为硬上限（抖动后也不越过），避免服务端返回 `Retry-After: 600`
+时把整个批量任务拖死。
 
 `Retry-After` 同时支持秒数（`Retry-After: 20`）与 HTTP-date 两种形式，格式
 无法解析时退回指数退避。服务端明确告知配额恢复时间时按它等待，比本地猜测准确——
@@ -872,4 +875,6 @@ scheme**，给它未知 scheme 它会照样往该端口发 HTTP `CONNECT`，表�
 > client 独占一个 connector），无法 per-request——这正好覆盖了按 endpoint
 > 区分走不走代理的需求。
 
-代理对流式（`chat_completions_stream`）与非流式请求同样生效。
+两种代理对流式（`chat_completions_stream`）与非流式请求同样生效。流式路径不走
+`ConcurrentRequester`（各客户端自建 session），但通过 `create_proxied_session()`
+共用同一套代理语义。

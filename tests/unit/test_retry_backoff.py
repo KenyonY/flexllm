@@ -65,8 +65,21 @@ class TestComputeRetryDelay:
         assert all(30.0 <= s <= 37.5 for s in samples)
 
     def test_retry_after_capped(self):
-        """服务端要求等 600 秒时不能把整个批量任务拖死"""
-        assert compute_retry_delay(0, 1.0, max_delay=60.0, retry_after=600.0) <= 75.0
+        """服务端要求等 600 秒时不能把整个批量任务拖死
+
+        max_delay 是硬上限：抖动后也不得越过它，否则参数名就是谎话。
+        """
+        samples = [
+            compute_retry_delay(0, 1.0, max_delay=60.0, retry_after=600.0) for _ in range(200)
+        ]
+        assert all(s <= 60.0 for s in samples)
+
+    def test_jitter_survives_capping(self):
+        """被 max_delay 截断后抖动不能失效——否则一批请求又会同时重发"""
+        samples = {
+            compute_retry_delay(0, 1.0, max_delay=60.0, retry_after=600.0) for _ in range(50)
+        }
+        assert len(samples) > 1
 
 
 class TestAsyncRetryCallSemantics:

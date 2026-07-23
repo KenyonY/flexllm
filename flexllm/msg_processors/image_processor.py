@@ -15,6 +15,7 @@ import numpy as np
 import requests
 from PIL import Image
 
+from ..async_api.core import RetryableHTTPError, parse_retry_after
 from ..utils.core import async_retry, safe_repr_source
 
 logger = logging.getLogger(__name__)
@@ -355,6 +356,14 @@ def decode_base64_to_bytes(base64_string):
 @async_retry(retry_times=3, retry_delay=0.3)
 async def _get_image_from_http(session, image_source):
     async with session.get(image_source) as response:
+        if response.status == 429 or response.status >= 500:
+            # 与 HTTP 层同一套语义：限流/服务端错误带上 Retry-After，
+            # 让 async_retry 按服务端给的时长退避而不是本地猜测
+            raise RetryableHTTPError(
+                response.status,
+                None,
+                retry_after=parse_retry_after(response.headers.get("Retry-After")),
+            )
         response.raise_for_status()
         content = await response.read()
         image = Image.open(BytesIO(content))

@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from ..async_api.progress import ProgressBarConfig, ProgressTracker
+from ..utils.core import compute_retry_delay
 from .openai import OpenAIClient
 
 # Rich库安全导入和使用
@@ -743,16 +744,19 @@ class ChainOfThoughtClient:
                     chain_logger.error(f"{chain_prefix}❌ 步骤 '{step_info.step_name}' 执行失败")
                     chain_logger.error(f"{chain_prefix}   🐛 错误类型: {type(e).__name__}")
                     chain_logger.error(f"{chain_prefix}   📝 错误信息: {str(e)}")
-                    if attempt < self.execution_config.max_retries:
-                        chain_logger.warning(
-                            f"{chain_prefix}   🔄 将在 {self.execution_config.retry_delay}秒后重试..."
-                        )
                 last_error = e
                 await self.monitor.on_error(e, chain_info)
 
-            # 如果不是最后一次尝试，等待重试间隔
+            # 不是最后一次尝试则退避后重试。用指数退避 + 抖动而非固定间隔：
+            # 多条链并发时往往同时失败，固定间隔会让它们同步重试形成惊群。
             if attempt < self.execution_config.max_retries:
-                await asyncio.sleep(self.execution_config.retry_delay)
+                delay = compute_retry_delay(attempt, self.execution_config.retry_delay)
+                if show_step_details:
+                    chain_short_id = chain_info.chain_id.split("_")[-1][-4:]
+                    chain_logger.warning(
+                        f"[链条{chain_short_id}]    🔄 将在 {delay:.1f} 秒后重试..."
+                    )
+                await asyncio.sleep(delay)
 
         # 所有重试都失败了
         if last_error:

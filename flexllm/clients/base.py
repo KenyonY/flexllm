@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Union
 
 logger = logging.getLogger(__name__)
 
-from ..async_api import ConcurrentRequester, validate_proxy
+from ..async_api import ConcurrentRequester, create_proxied_session, validate_proxy
 from ..async_api.progress import ProgressBarConfig
 from ..cache import ResponseCache, ResponseCacheConfig
 from ..msg_processors.image_processor import ImageCacheConfig
@@ -1079,13 +1079,14 @@ class LLMClientBase(ABC):
         effective_timeout = timeout if timeout is not None else self._timeout
         aio_timeout = aiohttp.ClientTimeout(total=effective_timeout)
 
-        async with aiohttp.ClientSession(trust_env=True) as session:
+        session, proxy_kwargs = create_proxied_session(self._proxy)
+        async with session:
             async with session.post(
                 effective_url,
                 json=body,
                 headers=headers,
                 timeout=aio_timeout,
-                proxy=self._proxy,
+                **proxy_kwargs,
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()

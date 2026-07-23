@@ -10,6 +10,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from ..async_api import create_proxied_session
 from ..cache import ResponseCacheConfig
 from .base import LLMClientBase
 
@@ -468,13 +469,14 @@ class GeminiClient(LLMClientBase):
         effective_timeout = timeout if timeout is not None else self._timeout
         aio_timeout = aiohttp.ClientTimeout(total=effective_timeout)
 
-        async with aiohttp.ClientSession(trust_env=True) as session:
+        session, proxy_kwargs = create_proxied_session(self._proxy)
+        async with session:
             async with session.post(
                 effective_url,
                 json=body,
                 headers=headers,
                 timeout=aio_timeout,
-                proxy=self._proxy,
+                **proxy_kwargs,
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
