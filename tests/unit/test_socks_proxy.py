@@ -130,9 +130,14 @@ class Socks5Server:
 
 
 class EchoServer:
-    """返回固定 JSON 的目标服务器"""
+    """返回固定 JSON 的目标服务器
 
-    def __init__(self):
+    host 可指定为 127.0.0.2：aiohttp 对 127.0.0.1/localhost 目标强制 bypass
+    环境代理，env-proxy 相关测试必须用非 bypass 的回环地址才能触发劫持路径。
+    """
+
+    def __init__(self, host: str = "127.0.0.1"):
+        self.host = host
         self._runner = None
         self.port = None
         self.hit_count = 0
@@ -146,7 +151,7 @@ class EchoServer:
         app.router.add_post("/test", self._handler)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        site = web.TCPSite(self._runner, self.host, 0)
         await site.start()
         self.port = site._server.sockets[0].getsockname()[1]
         return self
@@ -154,14 +159,19 @@ class EchoServer:
     async def __aexit__(self, *args):
         await self._runner.cleanup()
 
-    def url(self, host: str = "127.0.0.1") -> str:
-        return f"http://{host}:{self.port}/test"
+    def url(self, host: str | None = None) -> str:
+        return f"http://{host or self.host}:{self.port}/test"
 
 
 class SseServer:
-    """返回 OpenAI 风格 SSE 流的目标服务器"""
+    """返回 OpenAI 风格 SSE 流的目标服务器
 
-    def __init__(self):
+    host 语义同 EchoServer：env-proxy 测试需用 127.0.0.2 绕开 aiohttp
+    对 127.0.0.1/localhost 的环境代理 bypass。
+    """
+
+    def __init__(self, host: str = "127.0.0.1"):
+        self.host = host
         self._runner = None
         self.port = None
 
@@ -180,7 +190,7 @@ class SseServer:
         app.router.add_post("/v1/chat/completions", self._handler)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        site = web.TCPSite(self._runner, self.host, 0)
         await site.start()
         self.port = site._server.sockets[0].getsockname()[1]
         return self
@@ -316,10 +326,13 @@ class TestSocks5EndToEnd:
         SOCKS 路径不传 per-request proxy= 参数，此前 session 仍 trust_env=True，
         aiohttp 会按 HTTP_PROXY 把连接目标改成环境代理地址，再经 SOCKS 隧道
         去连它（在对端不存在）——显式配置反被环境变量覆盖。
+
+        目标必须用 127.0.0.2：aiohttp 对 127.0.0.1/localhost 强制 bypass
+        环境代理，用它们劫持路径不触发，测试会永远绿。
         """
-        monkeypatch.setenv("HTTP_PROXY", "http://198.51.100.1:9999")
-        monkeypatch.setenv("http_proxy", "http://198.51.100.1:9999")
-        async with EchoServer() as target, Socks5Server() as proxy:
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.3:9")
+        monkeypatch.setenv("http_proxy", "http://127.0.0.3:9")
+        async with EchoServer(host="127.0.0.2") as target, Socks5Server() as proxy:
             result = await _request_via(proxy.url(), target.url())
 
         assert result.status == "success", result.data
@@ -328,11 +341,11 @@ class TestSocks5EndToEnd:
 
     async def test_env_proxy_does_not_hijack_socks_streaming(self, monkeypatch):
         """流式路径（create_proxied_session）同样不受环境代理劫持"""
-        monkeypatch.setenv("HTTP_PROXY", "http://198.51.100.1:9999")
-        monkeypatch.setenv("http_proxy", "http://198.51.100.1:9999")
-        async with SseServer() as target, Socks5Server() as proxy:
+        monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.3:9")
+        monkeypatch.setenv("http_proxy", "http://127.0.0.3:9")
+        async with SseServer(host="127.0.0.2") as target, Socks5Server() as proxy:
             client = LLMClient(
-                base_url=f"http://127.0.0.1:{target.port}/v1",
+                base_url=f"http://127.0.0.2:{target.port}/v1",
                 api_key="k",
                 model="m",
                 proxy=proxy.url(),
