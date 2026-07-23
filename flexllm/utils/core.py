@@ -32,7 +32,9 @@ def compute_retry_delay(
     """
     if retry_after is not None:
         return min(retry_after, max_delay / 1.25) * (1 + random.random() * 0.25)
-    delay = min(base_delay * (2**attempt), max_delay)
+    # 指数先封顶再乘：2**attempt 是任意精度整数，attempt>=1024 时与 float
+    # 相乘会 OverflowError，中断重试并吞掉真实的 HTTP 错误
+    delay = min(base_delay * 2 ** min(attempt, 32), max_delay)
     return delay / 2 + random.random() * delay / 2
 
 

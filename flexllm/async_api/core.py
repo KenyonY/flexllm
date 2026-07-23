@@ -124,7 +124,10 @@ def create_proxied_session(proxy: str | None, **session_kwargs) -> tuple[ClientS
         from aiohttp_socks import ProxyConnector
 
         connector = ProxyConnector.from_url(proxy)
-        return ClientSession(connector=connector, trust_env=True, **session_kwargs), {}
+        # trust_env 必须关：SOCKS 不走 per-request proxy= 参数，trust_env=True
+        # 时 aiohttp 会按 HTTP_PROXY/HTTPS_PROXY 改写连接目标，让 SOCKS 隧道
+        # 去连环境代理地址（在对端通常不存在），显式配置反被环境变量劫持
+        return ClientSession(connector=connector, trust_env=False, **session_kwargs), {}
     session = ClientSession(trust_env=True, **session_kwargs)
     return session, ({"proxy": proxy} if proxy else {})
 
@@ -151,7 +154,15 @@ def validate_proxy(proxy: str | None) -> str | None:
             ) from e
         if scheme == "socks5h":
             # python_socks 不认 socks5h；SOCKS5 默认 rdns=True，语义完全等价
-            return "socks5://" + proxy.split("://", 1)[1]
+            proxy = "socks5://" + proxy.split("://", 1)[1]
+        # 构造期即校验 URL 结构（python_socks 要求显式端口等），否则要到首个
+        # 请求建 session 时才抛不带代理上下文的裸 ValueError，且中断整批任务
+        from python_socks import parse_proxy_url
+
+        try:
+            parse_proxy_url(proxy)
+        except ValueError as e:
+            raise ValueError(f"无效的 SOCKS 代理 URL {proxy!r}: {e}") from e
         return proxy
     if scheme not in ("http", "https"):
         raise ValueError(
@@ -341,8 +352,10 @@ class ConcurrentRequester:
             self._connector = ProxyConnector.from_url(self._proxy, **connector_kwargs)
         else:
             self._connector = TCPConnector(**connector_kwargs)
+        # SOCKS 时关 trust_env：隧道由 connector 全权负责，环境代理不应再介入
+        # （HTTP 路径靠 make_requests 的 per-request proxy= 保证显式配置优先）
         self._session = ClientSession(
-            timeout=self._timeout, connector=self._connector, trust_env=True
+            timeout=self._timeout, connector=self._connector, trust_env=not self._proxy_is_socks
         )
         return self._session
 

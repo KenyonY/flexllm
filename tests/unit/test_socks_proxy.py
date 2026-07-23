@@ -223,6 +223,16 @@ class TestValidateSocksProxy:
         assert not is_socks_proxy("http://gw:8080")
         assert not is_socks_proxy(None)
 
+    def test_missing_port_rejected_at_construction(self):
+        """无端口的 SOCKS URL 应构造时报错并带代理上下文
+
+        回归：python_socks 要求显式端口，此前 "socks5://gateway" 能通过校验，
+        直到首个请求建 session 时才抛不含 'proxy' 字样的裸 ValueError，
+        且从 process_requests 抛出中断整批任务。
+        """
+        with pytest.raises(ValueError, match="SOCKS 代理"):
+            validate_proxy("socks5://gateway")
+
     def test_missing_dependency_reports_at_construction(self, monkeypatch):
         """未装 aiohttp-socks 时应在构造时报错并给出安装指引，而非发请求时才炸"""
         import builtins
@@ -283,6 +293,43 @@ class TestSocks5EndToEnd:
         proxy= kwarg，SOCKS 下 aiohttp 会对着 SOCKS 端口发 HTTP CONNECT，
         表现为代理侧收到一条 ASCII 被当成 IPv6 的垃圾目标地址。
         """
+        async with SseServer() as target, Socks5Server() as proxy:
+            client = LLMClient(
+                base_url=f"http://127.0.0.1:{target.port}/v1",
+                api_key="k",
+                model="m",
+                proxy=proxy.url(),
+            )
+            chunks = [
+                c
+                async for c in client.chat_completions_stream(
+                    messages=[{"role": "user", "content": "hi"}]
+                )
+            ]
+
+        assert "".join(chunks) == "Hello world"
+        assert [t[1] for t in proxy.targets] == [target.port]
+
+    async def test_env_proxy_does_not_hijack_socks(self, monkeypatch):
+        """回归：环境变量 HTTP_PROXY 曾劫持显式配置的 SOCKS 代理
+
+        SOCKS 路径不传 per-request proxy= 参数，此前 session 仍 trust_env=True，
+        aiohttp 会按 HTTP_PROXY 把连接目标改成环境代理地址，再经 SOCKS 隧道
+        去连它（在对端不存在）——显式配置反被环境变量覆盖。
+        """
+        monkeypatch.setenv("HTTP_PROXY", "http://198.51.100.1:9999")
+        monkeypatch.setenv("http_proxy", "http://198.51.100.1:9999")
+        async with EchoServer() as target, Socks5Server() as proxy:
+            result = await _request_via(proxy.url(), target.url())
+
+        assert result.status == "success", result.data
+        # SOCKS 端收到的 CONNECT 目标必须是真实目标，而非环境代理地址
+        assert [t[1] for t in proxy.targets] == [target.port]
+
+    async def test_env_proxy_does_not_hijack_socks_streaming(self, monkeypatch):
+        """流式路径（create_proxied_session）同样不受环境代理劫持"""
+        monkeypatch.setenv("HTTP_PROXY", "http://198.51.100.1:9999")
+        monkeypatch.setenv("http_proxy", "http://198.51.100.1:9999")
         async with SseServer() as target, Socks5Server() as proxy:
             client = LLMClient(
                 base_url=f"http://127.0.0.1:{target.port}/v1",

@@ -8,7 +8,7 @@ ollama /v1 端点发起真实请求，覆盖本轮修复中 mock 无法验证的
 ollama 未运行时整个模块自动跳过（不阻塞 CI）。本地运行：
     pytest tests/e2e/test_ollama_real.py -v
 
-需要本地 ollama（http://localhost:11434），并至少拉取过 qwen2.5 / qwen3 /
+需要本地 ollama（http://localhost:11434），并至少拉取过 qwen2.5（文本用例）/
 qwen2.5vl（视觉用例）。缺失的模型对应用例会各自跳过。
 """
 
@@ -44,17 +44,27 @@ pytestmark = pytest.mark.skipif(not _MODELS, reason="本地 ollama(11434) 不可
 
 
 def _pick(*candidates: str) -> str | None:
-    """从已安装模型里挑第一个匹配前缀的名字。"""
+    """从已安装模型里挑第一个匹配的名字。
+
+    按 base name（冒号前部分）精确匹配而非 startswith：候选 "qwen3" 不应
+    撞上 "qwen3-vl"。sorted 保证同一 base 多个 tag 时结果确定（set 迭代
+    顺序受哈希随机化影响）。
+    """
     for c in candidates:
-        for m in _MODELS:
-            if m == c or m.startswith(c.split(":")[0]):
+        base = c.split(":")[0]
+        for m in sorted(_MODELS):
+            if m == c or m.split(":")[0] == base:
                 return m
     return None
 
 
 TEXT_MODEL = _pick("qwen2.5:latest", "qwen2:latest", "phi4:latest", "gemma3:latest")
-THINK_MODEL = _pick("qwen3:4b", "qwq:latest", "exaone-deep:latest")
 VISION_MODEL = _pick("qwen2.5vl:latest", "qwen3-vl:8b", "minicpm-v:latest")
+
+# ollama 在线但没装任何文本候选模型时，用例应 skip 而非以 model=None 全线报错
+_requires_text = pytest.mark.skipif(
+    TEXT_MODEL is None, reason="ollama 已运行但无可用文本模型（qwen2.5/qwen2/phi4/gemma3）"
+)
 
 
 def _client(model: str) -> LLMClient:
@@ -64,6 +74,7 @@ def _client(model: str) -> LLMClient:
 # ---------- 基础传输层 ----------
 
 
+@_requires_text
 class TestRealTransport:
     def test_sync_chat(self):
         """真实同步调用返回非空 str。"""
@@ -104,6 +115,7 @@ class TestRealTransport:
 # ---------- 批量 / return_raw ----------
 
 
+@_requires_text
 class TestRealBatch:
     async def test_batch_count_and_order_no_loss(self):
         """真实批量：结果数与输入一致、无 None（回归 worker/断点续传丢结果类问题）。"""
@@ -129,6 +141,7 @@ class TestRealBatch:
 # ---------- 成本追踪（真实 usage）----------
 
 
+@_requires_text
 class TestRealCostTracking:
     async def test_unknown_model_zero_cost_no_budget_trip(self):
         """未知(自建)模型真实调用：成本为 0，配了极小预算也不熔断（回归 #3 假计费）。"""
@@ -152,6 +165,7 @@ class TestRealCostTracking:
 # ---------- 多 endpoint fallback ----------
 
 
+@_requires_text
 class TestRealFallback:
     async def test_dead_then_live_endpoint_all_complete(self):
         """死端点在前 + 活 ollama 在后：fallback 后全部完成、无丢失（真实验证 #8 路径）。"""
@@ -169,6 +183,7 @@ class TestRealFallback:
 # ---------- 并发压力（worker 竞态 #8）----------
 
 
+@_requires_text
 class TestRealConcurrencyStress:
     async def test_high_concurrency_fallback_no_lost_tasks(self):
         """高并发 + 死端点在前触发大量 fallback：验证 worker 原子 claim 不丢任务。

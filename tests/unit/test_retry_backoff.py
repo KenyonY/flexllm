@@ -58,6 +58,12 @@ class TestComputeRetryDelay:
     def test_capped_by_max_delay(self):
         assert compute_retry_delay(20, 1.0, max_delay=10.0) <= 10.0
 
+    def test_huge_attempt_no_overflow(self):
+        """回归：2**attempt 是大整数，attempt>=1024 时与 float 相乘曾抛
+        OverflowError，中断重试循环并把真实 HTTP 错误替换成 'OverflowError'"""
+        for attempt in (1024, 2000, 10**6):
+            assert compute_retry_delay(attempt, 0.3, max_delay=60.0) <= 60.0
+
     def test_retry_after_takes_precedence(self):
         """服务端说等 30 秒，就不该按本地基数 0.3 秒重试"""
         samples = [compute_retry_delay(0, 0.3, retry_after=30.0) for _ in range(200)]
