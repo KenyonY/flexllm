@@ -34,6 +34,7 @@ except ImportError:
     cv2 = None
     HAS_CV2 = False
 
+from ..async_api.core import create_proxied_session, session_proxy_kwargs
 from .audio_processor import extract_audio_kwargs, preprocess_audio
 from .image_processor import DEFAULT_CACHE_DIR, ImageCacheConfig
 
@@ -812,7 +813,7 @@ async def _get_raw_bytes(source: str, session: aiohttp.ClientSession | None = No
         if close:
             session = aiohttp.ClientSession(trust_env=True)
         try:
-            async with session.get(source) as resp:
+            async with session.get(source, **session_proxy_kwargs(session)) as resp:
                 resp.raise_for_status()
                 return await resp.read()
         finally:
@@ -1079,6 +1080,7 @@ async def unified_messages_preprocess(
     messages: list[dict[str, Any]],
     inplace: bool = False,
     processor_config: UnifiedProcessorConfig | None = None,
+    proxy: str | None = None,
     **kwargs,
 ) -> list[dict[str, Any]]:
     """
@@ -1088,6 +1090,8 @@ async def unified_messages_preprocess(
         messages: 单个消息列表
         inplace: 是否原地修改
         processor_config: 处理器配置
+        proxy: 下载 URL 媒体时经过的正向代理（http(s):// 或 socks5:// 等）。
+               代理参数挂在 session 上，贯穿传给各下载点自动生效。
         **kwargs: 其他处理参数
 
     Returns:
@@ -1104,8 +1108,9 @@ async def unified_messages_preprocess(
         if not inplace:
             messages = deepcopy(messages)
 
-        # 使用HTTP会话处理所有图像
-        async with aiohttp.ClientSession(trust_env=True) as session:
+        # 使用HTTP会话处理所有图像；proxy 挂在 session 上供下载点就地取用
+        session, _ = create_proxied_session(proxy)
+        async with session:
             # 递归处理所有消息内容
             for message in messages:
                 await process_content_recursive(message, session, processor, **kwargs)

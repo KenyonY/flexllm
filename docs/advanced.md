@@ -878,3 +878,22 @@ scheme**，给它未知 scheme 它会照样往该端口发 HTTP `CONNECT`，表�
 两种代理对流式（`chat_completions_stream`）与非流式请求同样生效。流式路径不走
 `ConcurrentRequester`（各客户端自建 session），但通过 `create_proxied_session()`
 共用同一套代理语义。
+
+**多模态图片/媒体下载也走代理**：`preprocess_msg=True` 时，消息里的图片/音频/
+视频 URL 会被预处理下载并转 base64，这条下载链同样经 client 的 `proxy`。VPN
+网关场景下目标模型与图床往往在同一内网，二者共用一个代理即可：
+
+```python
+client = LLMClient(base_url="https://vpn-only/v1", api_key="...", proxy="socks5://gateway:1080")
+# 图片 URL 的下载也经 gateway:1080
+await client.chat_completions(messages=[
+    {"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": "http://intranet/pic.png"}},
+    ]},
+], preprocess_msg=True)
+```
+
+实现上，图片下载 session 由预处理入口 `unified_messages_preprocess` 用
+`create_proxied_session()` 建立，per-request 代理参数挂在 session 上
+（`session_proxy_kwargs()`）贯穿传给各下载点，中间层无需改动。边界：直接调用底层
+预处理函数且不传 `proxy` 时，退回 `HTTP_PROXY` 等环境变量。

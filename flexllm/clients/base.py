@@ -255,7 +255,7 @@ class LLMClientBase(ABC):
     ) -> list[dict]:
         """消息预处理（图片/视频/音频转 base64 等）"""
         if preprocess_msg:
-            return await unified_messages_preprocess(messages)
+            return await unified_messages_preprocess(messages, proxy=self._proxy)
         return messages
 
     async def _preprocess_messages_batch(
@@ -263,10 +263,14 @@ class LLMClientBase(ABC):
     ) -> list[list[dict]]:
         """批量消息预处理"""
         if preprocess_msg:
+            # 不传 cache_config：unified 处理器用自己的 UnifiedProcessorConfig.
+            # disk_cache_config 管磁盘缓存，base 的 ImageCacheConfig 在这条路径无
+            # 消费者，且会随 **kwargs 泄漏到 process_single_source 触发 TypeError，
+            # 使批量图片预处理静默失败（URL 原样发给后端）。
             return await optimized_batch_preprocess(
                 messages_list,
                 max_concurrent=self._concurrency_limit,
-                cache_config=self._cache_config,
+                proxy=self._proxy,
             )
         return messages_list
 

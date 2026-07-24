@@ -110,15 +110,30 @@ def is_socks_proxy(proxy: str | None) -> bool:
     return proxy.split("://", 1)[0].lower() in SOCKS_SCHEMES
 
 
+# 建 session 时把 per-request 代理参数挂到 session 上，供贯穿多层的下载点
+# （如图片预处理链）就地读取——避免让 proxy_kwargs 穿过五六层中间函数签名。
+_PROXY_KWARGS_ATTR = "_flexllm_proxy_kwargs"
+
+
+def session_proxy_kwargs(session: ClientSession) -> dict:
+    """取 create_proxied_session 挂在 session 上的 per-request 代理参数。
+
+    SOCKS 隧道在 connector 层，返回空 dict；HTTP 代理返回 {"proxy": ...}。
+    外部传入的普通 session 没挂该属性，返回空 dict——行为与改动前一致。
+    """
+    return getattr(session, _PROXY_KWARGS_ATTR, {})
+
+
 def create_proxied_session(proxy: str | None, **session_kwargs) -> tuple[ClientSession, dict]:
-    """为独立 session（各客户端的流式路径）构造带代理的 ClientSession。
+    """构造带代理的独立 ClientSession（流式路径、图片下载链等自建 session 处）。
 
     返回 `(session, request_kwargs)`：SOCKS 的隧道由 connector 建立，此时
     request_kwargs 为空——再传 `proxy=` 会让 aiohttp 对着 SOCKS 端口发 HTTP
     CONNECT；HTTP 代理反之，走 request 级 `proxy=` 参数。
 
-    流式路径不走 ConcurrentRequester（各客户端自建 session），这里与
-    `ConcurrentRequester._create_session` / `make_requests` 保持同一套语义。
+    request_kwargs 同时挂到 session 上（见 `session_proxy_kwargs`），让贯穿多层、
+    不便解构二元组的下载点也能就地取用。与 `ConcurrentRequester._create_session`
+    / `make_requests` 保持同一套语义。
     """
     if is_socks_proxy(proxy):
         from aiohttp_socks import ProxyConnector
@@ -127,9 +142,13 @@ def create_proxied_session(proxy: str | None, **session_kwargs) -> tuple[ClientS
         # trust_env 必须关：SOCKS 不走 per-request proxy= 参数，trust_env=True
         # 时 aiohttp 会按 HTTP_PROXY/HTTPS_PROXY 改写连接目标，让 SOCKS 隧道
         # 去连环境代理地址（在对端通常不存在），显式配置反被环境变量劫持
-        return ClientSession(connector=connector, trust_env=False, **session_kwargs), {}
-    session = ClientSession(trust_env=True, **session_kwargs)
-    return session, ({"proxy": proxy} if proxy else {})
+        session = ClientSession(connector=connector, trust_env=False, **session_kwargs)
+        request_kwargs = {}
+    else:
+        session = ClientSession(trust_env=True, **session_kwargs)
+        request_kwargs = {"proxy": proxy} if proxy else {}
+    setattr(session, _PROXY_KWARGS_ATTR, request_kwargs)
+    return session, request_kwargs
 
 
 def validate_proxy(proxy: str | None) -> str | None:

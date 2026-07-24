@@ -15,7 +15,7 @@ import numpy as np
 import requests
 from PIL import Image
 
-from ..async_api.core import RetryableHTTPError, parse_retry_after
+from ..async_api.core import RetryableHTTPError, parse_retry_after, session_proxy_kwargs
 from ..utils.core import async_retry, safe_repr_source
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def encode_base64_from_local_path(file_path, return_with_mime=True):
 
 async def encode_base64_from_url(url, session: aiohttp.ClientSession, return_with_mime=True):
     """Fetch a file from a URL and encode it to a Base64 string, with optional MIME type prefix."""
-    async with session.get(url) as response:
+    async with session.get(url, **session_proxy_kwargs(session)) as response:
         response.raise_for_status()
         content = await response.read()
         mime_type = response.headers.get("Content-Type", "application/octet-stream")
@@ -213,7 +213,7 @@ async def encode_to_base64(
                 content = buffer.getvalue()
             else:
                 # 对于非图像文件，直接从URL获取内容
-                async with session.get(file_source) as response:
+                async with session.get(file_source, **session_proxy_kwargs(session)) as response:
                     response.raise_for_status()
                     content = await response.read()
                     mime_type = response.headers.get("Content-Type", "application/octet-stream")
@@ -355,7 +355,7 @@ def decode_base64_to_bytes(base64_string):
 
 @async_retry(retry_times=3, retry_delay=0.3)
 async def _get_image_from_http(session, image_source):
-    async with session.get(image_source) as response:
+    async with session.get(image_source, **session_proxy_kwargs(session)) as response:
         if response.status == 429 or response.status >= 500:
             # 与 HTTP 层同一套语义：限流/服务端错误带上 Retry-After，
             # 让 async_retry 按服务端给的时长退避而不是本地猜测
