@@ -16,9 +16,12 @@ logger = logging.getLogger(__name__)
 from ..async_api import ConcurrentRequester, create_proxied_session, validate_proxy
 from ..async_api.progress import ProgressBarConfig
 from ..cache import ResponseCache, ResponseCacheConfig
-from ..msg_processors.image_processor import ImageCacheConfig
+from ..msg_processors.unified_processor import (
+    UnifiedImageProcessor,
+    UnifiedProcessorConfig,
+    unified_messages_preprocess,
+)
 from ..msg_processors.unified_processor import batch_process_messages as optimized_batch_preprocess
-from ..msg_processors.unified_processor import unified_messages_preprocess
 from ..pricing import estimate_cost, get_model_pricing
 from ..pricing.cost_tracker import BudgetExceededError, CostTracker, CostTrackerConfig
 from .batch_helpers import (
@@ -84,7 +87,7 @@ class LLMClientBase(ABC):
         retry_times: int = 3,
         retry_delay: float = 1.0,
         cache_image: bool = False,
-        cache_dir: str = "image_cache",
+        cache_dir: str | None = None,
         cache: bool | ResponseCacheConfig | None = None,
         cost_tracker: bool | CostTrackerConfig | None = None,
         proxy: str | None = None,
@@ -100,8 +103,10 @@ class LLMClientBase(ABC):
             timeout: 请求超时时间（秒）
             retry_times: 重试次数
             retry_delay: 重试延迟（秒）
-            cache_image: 是否缓存图片
-            cache_dir: 图片缓存目录
+            cache_image: 是否把下载的图片/媒体 URL 缓存到本地磁盘（默认 False，
+                   即不缓存、每次重新下载）。开启后同一 URL 跨调用/跨进程复用缓存。
+            cache_dir: 磁盘缓存目录，None 时用默认 ~/.flexllm/cache/image_cache。
+                   仅在 cache_image=True 时生效。
             proxy: 正向代理 URL，形如 http://gateway:8080 或
                    socks5://user:pass@gateway:1080。支持 http(s):// 与
                    socks4/socks5/socks5h://（SOCKS 需 pip install 'flexllm[socks]'）。
@@ -132,12 +137,12 @@ class LLMClientBase(ABC):
             proxy=proxy,
         )
 
-        self._cache_config = ImageCacheConfig(
-            enabled=cache_image,
-            cache_dir=cache_dir,
-            force_refresh=False,
-            retry_failed=False,
-        )
+        # 图片/媒体预处理的磁盘缓存开关与路径。持有一个按此配置构建的处理器实例
+        # 并跨调用/跨批量复用（懒构建），既让 cache_image/cache_dir 真正生效，
+        # 又避免批量时每条消息新建处理器、丢内存缓存。
+        self._img_cache_enabled = cache_image
+        self._img_cache_dir = cache_dir
+        self._unified_processor: UnifiedImageProcessor | None = None
 
         # 响应缓存
         if cache is True:
@@ -250,12 +255,29 @@ class LLMClientBase(ABC):
         content = last.get("content")
         return content if isinstance(content, str) else None
 
+    def _get_unified_processor(self) -> UnifiedImageProcessor:
+        """按 client 的缓存配置懒构建并复用一个统一处理器实例。
+
+        cache_image 决定磁盘缓存开关（默认 False），cache_dir 决定路径（None 时用
+        UnifiedProcessorConfig 的默认 ~/.flexllm/cache/image_cache）。复用同一实例，
+        使批量预处理跨消息共享内存/磁盘缓存，且让这两个参数真正生效——0.14 之前的
+        unified 重构曾把它们与实际缓存断开，磁盘缓存被写死为总是开、路径固定。
+        """
+        if self._unified_processor is None:
+            config_kwargs = {"enable_disk_cache": self._img_cache_enabled}
+            if self._img_cache_dir is not None:
+                config_kwargs["disk_cache_dir"] = self._img_cache_dir
+            self._unified_processor = UnifiedImageProcessor(UnifiedProcessorConfig(**config_kwargs))
+        return self._unified_processor
+
     async def _preprocess_messages(
         self, messages: list[dict], preprocess_msg: bool = False
     ) -> list[dict]:
         """消息预处理（图片/视频/音频转 base64 等）"""
         if preprocess_msg:
-            return await unified_messages_preprocess(messages, proxy=self._proxy)
+            return await unified_messages_preprocess(
+                messages, proxy=self._proxy, processor=self._get_unified_processor()
+            )
         return messages
 
     async def _preprocess_messages_batch(
@@ -263,14 +285,11 @@ class LLMClientBase(ABC):
     ) -> list[list[dict]]:
         """批量消息预处理"""
         if preprocess_msg:
-            # 不传 cache_config：unified 处理器用自己的 UnifiedProcessorConfig.
-            # disk_cache_config 管磁盘缓存，base 的 ImageCacheConfig 在这条路径无
-            # 消费者，且会随 **kwargs 泄漏到 process_single_source 触发 TypeError，
-            # 使批量图片预处理静默失败（URL 原样发给后端）。
             return await optimized_batch_preprocess(
                 messages_list,
                 max_concurrent=self._concurrency_limit,
                 proxy=self._proxy,
+                processor=self._get_unified_processor(),
             )
         return messages_list
 

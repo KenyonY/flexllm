@@ -897,3 +897,22 @@ await client.chat_completions(messages=[
 `create_proxied_session()` 建立，per-request 代理参数挂在 session 上
 （`session_proxy_kwargs()`）贯穿传给各下载点，中间层无需改动。边界：直接调用底层
 预处理函数且不传 `proxy` 时，退回 `HTTP_PROXY` 等环境变量。
+
+### 图片/媒体磁盘缓存
+
+下载的图片/媒体 URL 可缓存到本地磁盘，同一 URL 跨调用/跨进程复用、避免重复下载：
+
+```python
+# 默认不缓存（每次重新下载）
+client = LLMClient(base_url="...", api_key="...")
+
+# 开启磁盘缓存，默认路径 ~/.flexllm/cache/image_cache
+client = LLMClient(base_url="...", api_key="...", cache_image=True)
+
+# 自定义缓存目录
+client = LLMClient(base_url="...", api_key="...", cache_image=True, cache_dir="/data/img_cache")
+```
+
+`cache_image` 默认 `False`（不缓存）；`cache_dir` 仅在开启时生效，`None` 时用默认
+路径。client 持有并复用一个按此配置构建的处理器实例，批量预处理时跨消息共享内存/
+磁盘缓存。

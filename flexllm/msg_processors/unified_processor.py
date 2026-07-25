@@ -1081,6 +1081,7 @@ async def unified_messages_preprocess(
     inplace: bool = False,
     processor_config: UnifiedProcessorConfig | None = None,
     proxy: str | None = None,
+    processor: "UnifiedImageProcessor | None" = None,
     **kwargs,
 ) -> list[dict[str, Any]]:
     """
@@ -1089,19 +1090,23 @@ async def unified_messages_preprocess(
     Args:
         messages: 单个消息列表
         inplace: 是否原地修改
-        processor_config: 处理器配置
+        processor_config: 处理器配置（未传 processor 时据此新建）
         proxy: 下载 URL 媒体时经过的正向代理（http(s):// 或 socks5:// 等）。
                代理参数挂在 session 上，贯穿传给各下载点自动生效。
+        processor: 复用的处理器实例。优先级高于 processor_config——调用方（如
+               LLMClient）持有一个按其缓存配置构建的处理器并跨调用/跨批量复用，
+               避免每条消息新建处理器、丢掉内存缓存与磁盘缓存配置。
         **kwargs: 其他处理参数
 
     Returns:
         处理后的消息列表
     """
-    # 创建或获取处理器
-    if processor_config:
-        processor = UnifiedImageProcessor(processor_config)
-    else:
-        processor = get_global_unified_processor()
+    # 处理器优先级：显式传入实例 > 据 config 新建 > 全局单例
+    if processor is None:
+        if processor_config:
+            processor = UnifiedImageProcessor(processor_config)
+        else:
+            processor = get_global_unified_processor()
 
     try:
         # 如果不是原地修改，创建副本
@@ -1127,6 +1132,7 @@ async def unified_batch_messages_preprocess(
     max_concurrent: int = 10,
     inplace: bool = False,
     processor_config: UnifiedProcessorConfig | None = None,
+    processor: "UnifiedImageProcessor | None" = None,
     as_iterator: bool = False,
     progress_callback: Callable | None = None,
     show_progress: bool = False,
@@ -1193,6 +1199,7 @@ async def unified_batch_messages_preprocess(
                     messages,
                     inplace=inplace,
                     processor_config=processor_config,
+                    processor=processor,
                     max_width=max_width,
                     max_height=max_height,
                     max_pixels=max_pixels,

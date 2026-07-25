@@ -27,8 +27,8 @@ except AttributeError:
     # 在较旧版本的PIL中，LANCZOS可能被称为ANTIALIAS
     LANCZOS = Image.ANTIALIAS
 
-# 默认的缓存目录
-DEFAULT_CACHE_DIR = os.path.expanduser("~/.cache/flexllm/image_cache")
+# 默认的缓存目录（与 ~/.flexllm/config.yaml 归拢在同一根目录下）
+DEFAULT_CACHE_DIR = os.path.expanduser("~/.flexllm/cache/image_cache")
 
 
 @dataclass

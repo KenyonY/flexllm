@@ -66,7 +66,7 @@ class OpenAIClient(LLMClientBase):
         retry_times: int = 3,
         retry_delay: float = 0.55,
         cache_image: bool = False,
-        cache_dir: str = "image_cache",
+        cache_dir: str | None = None,
         cache: ResponseCacheConfig | None = None,
         **kwargs,
     ):

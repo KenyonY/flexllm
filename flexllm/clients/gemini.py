@@ -68,7 +68,7 @@ class GeminiClient(LLMClientBase):
         retry_times: int = 3,
         retry_delay: float = 1.0,
         cache_image: bool = False,
-        cache_dir: str = "image_cache",
+        cache_dir: str | None = None,
         cache: ResponseCacheConfig | None = None,
         use_vertex_ai: bool = False,
         project_id: str = None,
