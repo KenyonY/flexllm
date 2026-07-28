@@ -9,6 +9,7 @@ docs/
 ├── index.md              # 本文档（主入口）
 ├── api.md                # API 详细参考
 ├── advanced.md           # 高级用法（多模态/成本/正向代理等）
+├── audio.md              # 语音能力（转录/合成/音频输入）
 ├── roadmap.md            # 开发路线图
 └── plans/                # 实现计划
 ```
@@ -91,3 +92,4 @@ results = await client.chat_completions_batch(
 
 - [API 详细参考](api.md) - 完整的 API 文档
 - [高级用法](advanced.md) - 负载均衡、多模态、链式推理等
+- [语音能力](audio.md) - 语音转录、语音合成、对话音频输入

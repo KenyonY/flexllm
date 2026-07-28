@@ -342,6 +342,12 @@ flexllm set-model gpt-4   # Set default model
 flexllm test              # Test connection
 flexllm init              # Initialize config file
 
+# Speech - transcription and synthesis
+flexllm transcribe a.wav -m glm-asr             # Audio to text
+flexllm transcribe a.wav -m glm-asr -f srt      # SRT subtitles
+flexllm transcribe *.wav -m glm-asr -c 10       # Batch, concurrent
+flexllm speak "你好" -m glm-tts -v tongtong      # Text to speech
+
 # Serve - wrap LLM as HTTP API (for fine-tuned model deployment)
 flexllm serve -m qwen-finetuned -s "You are an assistant"
 flexllm serve --thinking true -p 8000 -v  # With thinking mode + request logging

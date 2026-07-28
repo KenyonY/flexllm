@@ -10,10 +10,12 @@ import re
 logger = logging.getLogger(__name__)
 
 from ..cache import ResponseCacheConfig
+from ..msg_processors.audio_processor import normalize_audio_format
+from .audio import AudioMixin
 from .base import LLMClientBase
 
 
-class OpenAIClient(LLMClientBase):
+class OpenAIClient(AudioMixin, LLMClientBase):
     """
     OpenAI 兼容 API 客户端
 
@@ -123,7 +125,7 @@ class OpenAIClient(LLMClientBase):
                                     "type": "input_audio",
                                     "input_audio": {
                                         "data": match.group(2),
-                                        "format": match.group(1),
+                                        "format": normalize_audio_format(match.group(1)),
                                     },
                                 }
                             )

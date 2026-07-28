@@ -173,7 +173,10 @@ from .clients import (
     ProviderRouter,
     Step,
     ToolCall,
+    TranscriptionResult,
     create_router_from_urls,
+    segments_to_srt,
+    segments_to_vtt,
 )
 
 # 定价和成本追踪（从 pricing/ 模块导入）
@@ -206,6 +209,10 @@ __all__ = [
     # 结果类型
     "ChatCompletionResult",
     "ToolCall",
+    # 语音
+    "TranscriptionResult",
+    "segments_to_srt",
+    "segments_to_vtt",
     # Token 计数
     "count_tokens",
     "count_messages_tokens",

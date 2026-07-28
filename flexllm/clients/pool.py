@@ -1676,6 +1676,55 @@ class LLMClientPool:
             # 多 endpoint 模式：返回第一个客户端的模型列表
             return self._clients[0].model_list() if self._clients else []
 
+    def _audio_client(self):
+        """选出承担语音请求（转录/合成）的底层客户端
+
+        语音端点只有 OpenAI 兼容形态，且多 endpoint 的容量感知调度是围绕
+        chat completions 建的；这里与 model_list 保持同样的取法，用首个客户端，
+        不额外引入一套调度。
+        """
+        client = self._single_client if self._mode == "single" else (self._clients or [None])[0]
+        if client is None:
+            raise RuntimeError("没有可用的 endpoint")
+        if not hasattr(client, "transcribe"):
+            raise NotImplementedError(
+                f"{type(client).__name__} 不支持语音端点，"
+                "转录/合成仅 OpenAI 兼容端点（/audio/*）提供"
+            )
+        return client
+
+    async def transcribe(self, audio, **kwargs):
+        """转录单个音频（详见 AudioMixin.transcribe）"""
+        return await self._audio_client().transcribe(audio, **kwargs)
+
+    def transcribe_sync(self, audio, **kwargs):
+        """transcribe 的同步版本"""
+        return self._audio_client().transcribe_sync(audio, **kwargs)
+
+    async def transcribe_batch(self, audios: list, **kwargs) -> list:
+        """并发转录多个音频（详见 AudioMixin.transcribe_batch）"""
+        return await self._audio_client().transcribe_batch(audios, **kwargs)
+
+    def transcribe_batch_sync(self, audios: list, **kwargs) -> list:
+        """transcribe_batch 的同步版本"""
+        return self._audio_client().transcribe_batch_sync(audios, **kwargs)
+
+    async def speech(self, text: str, **kwargs):
+        """合成语音（详见 AudioMixin.speech）"""
+        return await self._audio_client().speech(text, **kwargs)
+
+    def speech_sync(self, text: str, **kwargs):
+        """speech 的同步版本"""
+        return self._audio_client().speech_sync(text, **kwargs)
+
+    async def speech_batch(self, texts: list, **kwargs) -> list:
+        """并发合成多段文本（详见 AudioMixin.speech_batch）"""
+        return await self._audio_client().speech_batch(texts, **kwargs)
+
+    def speech_batch_sync(self, texts: list, **kwargs) -> list:
+        """speech_batch 的同步版本"""
+        return self._audio_client().speech_batch_sync(texts, **kwargs)
+
     def parse_thoughts(self, response_data: dict) -> dict:
         """
         从响应中解析思考内容和答案

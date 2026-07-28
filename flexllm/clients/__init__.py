@@ -12,6 +12,7 @@ flexllm.clients - LLM 客户端实现
 - ChainOfThoughtClient: 链式推理
 """
 
+from .audio import TranscriptionResult, segments_to_srt, segments_to_vtt
 from .base import ChatCompletionResult, LLMClientBase, ToolCall
 from .chain_of_thought import ChainOfThoughtClient, LinearStep, Step
 from .claude import ClaudeClient
@@ -49,4 +50,8 @@ __all__ = [
     "ChainOfThoughtClient",
     "Step",
     "LinearStep",
+    # 语音
+    "TranscriptionResult",
+    "segments_to_srt",
+    "segments_to_vtt",
 ]

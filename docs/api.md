@@ -230,6 +230,41 @@ class BatchResultItem:
     latency: float                # 延迟（秒）
 ```
 
+### TranscriptionResult
+
+```python
+@dataclass
+class TranscriptionResult:
+    text: str                     # 转录文本
+    language: Optional[str]       # 识别出的语言
+    duration: Optional[float]     # 音频时长（秒）
+    segments: list[dict]          # 分段（含 start/end/text）
+    raw: Optional[dict]           # 服务端原始响应
+
+    def to_srt(self) -> str: ...  # 渲染 SRT 字幕
+    def to_vtt(self) -> str: ...  # 渲染 WebVTT 字幕
+```
+
+---
+
+## 语音端点
+
+OpenAI 兼容客户端（含 `LLMClient`）提供转录与合成，详见 [语音能力](audio.md)。
+
+```python
+# 转录 /audio/transcriptions
+text = client.transcribe_sync("a.wav", model="glm-asr")
+result = client.transcribe_sync("a.wav", model="glm-asr", return_details=True)
+texts = client.transcribe_batch_sync(["a.wav", "b.wav"], model="glm-asr")
+
+# 合成 /audio/speech
+audio: bytes = client.speech_sync("你好", model="glm-tts", voice="tongtong")
+path = client.speech_sync("你好", model="glm-tts", output="hello.wav")
+paths = client.speech_batch_sync(["一", "二"], model="glm-tts", outputs=["1.wav", "2.wav"])
+```
+
+去掉 `_sync` 后缀即为异步版本。并发与限流沿用客户端的 `concurrency_limit` / `max_qps`。
+
 ---
 
 ## 缓存配置

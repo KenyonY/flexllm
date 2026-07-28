@@ -745,6 +745,14 @@ def register_commands(app):
             server.run()
         except KeyboardInterrupt:
             print("\nServer stopped")
+        except ValueError as e:
+            # 参数非法（并发数等），与其他命令一样归入 usage 错误
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                str(e),
+                context={"host": host, "port": port, "model": model},
+                doc="flexllm serve --help",
+            )
         except Exception as e:
             cli_error(
                 ErrorType.GENERAL,
@@ -1286,7 +1294,9 @@ def register_commands(app):
                 ErrorType.INVALID_ARGS,
                 str(e),
                 context={"input_file": input, "exception_type": "ValueError"},
-                suggestion="检查输入格式。使用 --user-field 指定字段名跳过自动检测",
+                # 这个分支同时覆盖输入解析和参数校验（如并发数），suggestion 不能
+                # 写死成输入格式问题，否则参数出错时给出的是误导性指引
+                suggestion="按上面的 message 检查参数与输入格式；输入字段可用 --user-field 指定",
                 doc="flexllm batch --help",
             )
         except FileNotFoundError:
@@ -2414,6 +2424,340 @@ models:
                     "model": model,
                 },
                 doc="flexllm mock --help",
+            )
+
+    @app.command()
+    def transcribe(
+        files: Annotated[list[str], Argument(help="音频文件路径（可多个）")],
+        model: Annotated[
+            str | None, Option("-m", "--model", help="转录模型，如 whisper-1 / glm-asr")
+        ] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
+        language: Annotated[
+            str | None,
+            Option("-l", "--language", help="音频语言 (ISO-639-1，如 zh/en)，可提升准确率"),
+        ] = None,
+        prompt: Annotated[
+            str | None, Option("-p", "--prompt", help="引导提示词，如专有名词表")
+        ] = None,
+        format: Annotated[
+            str, Option("-f", "--format", help="输出格式: text(默认)/json/srt/vtt")
+        ] = "text",
+        output: Annotated[
+            str | None,
+            Option(
+                "-o",
+                "--output",
+                help="输出文件；多文件时写 JSONL。srt/vtt 多文件默认写音频同名字幕",
+            ),
+        ] = None,
+        concurrency: Annotated[int, Option("-c", "--concurrency", help="并发数")] = 5,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
+    ):
+        """语音转录（音频转文字）
+
+        \b
+        基本用法:
+          flexllm transcribe a.wav -m glm-asr              # 输出转录文本
+          flexllm transcribe a.wav -m whisper-1 -l zh      # 指定语言提升准确率
+          flexllm transcribe *.wav -m glm-asr -c 10        # 批量并发转录
+
+        \b
+        输出格式 (-f):
+          flexllm transcribe a.wav -m glm-asr -f json      # 含 segments/language/duration
+          flexllm transcribe a.wav -m glm-asr -f srt       # SRT 字幕（本地由 segments 渲染）
+          flexllm transcribe *.wav -m glm-asr -f srt       # 多文件各自写 同名.srt
+
+        \b
+        写入文件 (-o):
+          flexllm transcribe a.wav -m glm-asr -o out.txt
+          flexllm transcribe *.wav -m glm-asr -o out.jsonl # 多文件写 JSONL
+        """
+        format = format.lower()
+        if format not in ("text", "json", "srt", "vtt"):
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                f"不支持的输出格式: {format}",
+                suggestion="使用 text / json / srt / vtt 之一",
+                doc="flexllm transcribe --help",
+            )
+
+        missing = [f for f in files if not Path(f).is_file()]
+        if missing:
+            cli_error(
+                ErrorType.NOT_FOUND,
+                f"音频文件不存在: {', '.join(missing)}",
+                context={"missing": missing},
+                doc="flexllm transcribe --help",
+            )
+
+        # 多份字幕拼进一个文件不构成合法字幕：序号会从 1 重来、时间轴回退，
+        # VTT 还会出现第二个 WEBVTT 头。与其产出坏文件，不如拒绝。
+        if len(files) > 1 and format in ("srt", "vtt") and output:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                f"多个音频不能合并写入单个 {format} 文件",
+                suggestion=f"省略 -o，将为每个音频写同名 .{format}；或逐个文件分别转录",
+                context={"files": files, "format": format, "output": output},
+                doc="flexllm transcribe --help",
+            )
+
+        model_id, base_url, api_key = resolve_model_config(model, base_url, api_key, required=True)
+
+        if dry_run:
+            dry_run_output(
+                {
+                    "action": "transcribe",
+                    "model": model_id,
+                    "base_url": base_url,
+                    "files": files,
+                    "language": language,
+                    "format": format,
+                    "output": output,
+                    "concurrency": concurrency,
+                },
+            )
+            return
+
+        async def _run():
+            from flexllm import LLMClient
+
+            async with LLMClient(
+                model=model_id,
+                base_url=base_url,
+                api_key=api_key,
+                concurrency_limit=concurrency,
+            ) as client:
+                return await client.transcribe_batch(
+                    files,
+                    language=language,
+                    prompt=prompt,
+                    return_details=True,
+                    show_progress=len(files) > 1,
+                )
+
+        try:
+            results = asyncio.run(_run())
+        except typer.Exit:
+            raise
+        except ValueError as e:
+            # 参数非法（并发数、response_format 等），归入 usage 错误而非通用失败
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                str(e),
+                context={"model": model_id, "concurrency": concurrency},
+                doc="flexllm transcribe --help",
+            )
+        except Exception as e:
+            cli_error(
+                ErrorType.GENERAL,
+                str(e),
+                context={"exception_type": type(e).__name__, "model": model_id},
+                doc="flexllm transcribe --help",
+            )
+
+        # 失败项不静默：转成错误记录，最终以非零退出码收尾
+        failed = []
+        rendered = []
+        for path, result in zip(files, results):
+            if not hasattr(result, "text"):
+                detail = result.data if hasattr(result, "data") else str(result)
+                failed.append({"file": path, "error": detail})
+                rendered.append(None)
+                continue
+            if format == "srt":
+                rendered.append(result.to_srt())
+            elif format == "vtt":
+                rendered.append(result.to_vtt())
+            elif format == "json":
+                rendered.append(
+                    json.dumps(
+                        {
+                            "file": path,
+                            "text": result.text,
+                            "language": result.language,
+                            "duration": result.duration,
+                            "segments": result.segments,
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+            else:
+                rendered.append(result.text)
+
+        multi = len(files) > 1
+        try:
+            if format in ("srt", "vtt") and multi and not output:
+                # 字幕批量：写到各音频的同名字幕文件，符合字幕工具惯例
+                for path, content in zip(files, rendered):
+                    if content is None:
+                        continue
+                    sub_path = Path(path).with_suffix(f".{format}")
+                    sub_path.write_text(content, encoding="utf-8")
+                    print(f"{sub_path}", file=sys.stderr)
+            elif output:
+                out_path = Path(output)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                if multi and format in ("text", "json"):
+                    # 多文件文本：JSONL，保留文件名对应关系
+                    lines = []
+                    for path, content in zip(files, rendered):
+                        if content is None:
+                            continue
+                        lines.append(
+                            content
+                            if format == "json"
+                            else json.dumps({"file": path, "text": content}, ensure_ascii=False)
+                        )
+                    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+                else:
+                    body = "\n".join(c for c in rendered if c is not None)
+                    out_path.write_text(body + "\n", encoding="utf-8")
+                print(f"{out_path}", file=sys.stderr)
+            else:
+                for path, content in zip(files, rendered):
+                    if content is None:
+                        continue
+                    if multi and format == "text":
+                        print(json.dumps({"file": path, "text": content}, ensure_ascii=False))
+                    else:
+                        print(content)
+        except OSError as e:
+            cli_error(
+                ErrorType.IO_ERROR,
+                f"写入输出失败: {e}",
+                context={"output": output},
+                doc="flexllm transcribe --help",
+            )
+
+        if failed:
+            cli_error(
+                ErrorType.NETWORK_ERROR,
+                f"{len(failed)}/{len(files)} 个文件转录失败",
+                context={"failed": failed},
+                suggestion="检查 API Key、模型名和音频格式，或用 flexllm test 验证连接",
+                doc="flexllm transcribe --help",
+                retryable=True,
+            )
+
+    @app.command()
+    def speak(
+        text: Annotated[str | None, Argument(help="要合成的文本（省略则从 stdin 读取）")] = None,
+        model: Annotated[
+            str | None, Option("-m", "--model", help="语音合成模型，如 glm-tts / tts-1")
+        ] = None,
+        base_url: Annotated[str | None, Option("--base-url", help="API 地址")] = None,
+        api_key: Annotated[str | None, Option("--api-key", help="API 密钥")] = None,
+        voice: Annotated[
+            str | None, Option("-v", "--voice", help="音色，如 tongtong / alloy")
+        ] = None,
+        format: Annotated[
+            str, Option("-f", "--format", help="音频格式，如 wav(默认)/mp3，取值取决于服务端")
+        ] = "wav",
+        speed: Annotated[float | None, Option("--speed", help="语速")] = None,
+        output: Annotated[
+            str | None, Option("-o", "--output", help="输出音频路径，'-' 表示写 stdout")
+        ] = None,
+        dry_run: Annotated[bool, Option("--dry-run", help="预览操作内容，不实际执行")] = False,
+    ):
+        """语音合成（文字转音频）
+
+        \b
+        基本用法:
+          flexllm speak "你好，今天天气怎么样" -m glm-tts -v tongtong
+          flexllm speak "你好" -m glm-tts -o hello.wav       # 指定输出路径
+          echo "长文本" | flexllm speak -m glm-tts            # stdin 输入
+
+        \b
+        管道输出 (-o -):
+          flexllm speak "你好" -m glm-tts -o - | ffplay -    # 直接播放
+        """
+        if text is None or text == "-":
+            if sys.stdin.isatty():
+                cli_error(
+                    ErrorType.INVALID_ARGS,
+                    "缺少要合成的文本",
+                    suggestion='提供文本参数，如 flexllm speak "你好" -m glm-tts',
+                    doc="flexllm speak --help",
+                )
+            text = sys.stdin.read().strip()
+        if not text:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                "要合成的文本为空",
+                doc="flexllm speak --help",
+            )
+
+        model_id, base_url, api_key = resolve_model_config(model, base_url, api_key, required=True)
+        # 未指定输出路径时落盘到当前目录，避免把二进制音频喷到终端
+        out_target = output if output is not None else f"speech.{format}"
+
+        if dry_run:
+            dry_run_output(
+                {
+                    "action": "speak",
+                    "model": model_id,
+                    "base_url": base_url,
+                    "text": text,
+                    "voice": voice,
+                    "format": format,
+                    "output": out_target,
+                },
+            )
+            return
+
+        async def _run():
+            from flexllm import LLMClient
+
+            async with LLMClient(model=model_id, base_url=base_url, api_key=api_key) as client:
+                return await client.speech(text, voice=voice, response_format=format, speed=speed)
+
+        try:
+            result = asyncio.run(_run())
+        except typer.Exit:
+            raise
+        except ValueError as e:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                str(e),
+                context={"model": model_id},
+                doc="flexllm speak --help",
+            )
+        except Exception as e:
+            cli_error(
+                ErrorType.GENERAL,
+                str(e),
+                context={"exception_type": type(e).__name__, "model": model_id},
+                doc="flexllm speak --help",
+            )
+
+        if not isinstance(result, bytes):
+            detail = result.data if hasattr(result, "data") else str(result)
+            cli_error(
+                ErrorType.NETWORK_ERROR,
+                "语音合成失败",
+                context={"model": model_id, "base_url": base_url, "response_data": detail},
+                suggestion="检查 API Key、模型名和音色参数，或运行 flexllm test",
+                doc="flexllm speak --help",
+                retryable=True,
+            )
+
+        try:
+            if out_target == "-":
+                sys.stdout.buffer.write(result)
+                sys.stdout.buffer.flush()
+            else:
+                out_path = Path(out_target)
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                out_path.write_bytes(result)
+                print(f"{out_path} ({len(result)} bytes)", file=sys.stderr)
+        except OSError as e:
+            cli_error(
+                ErrorType.IO_ERROR,
+                f"写入音频失败: {e}",
+                context={"output": out_target},
+                doc="flexllm speak --help",
             )
 
     @app.command()

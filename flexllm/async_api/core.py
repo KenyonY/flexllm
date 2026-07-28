@@ -253,6 +253,10 @@ class ConcurrencyLimiter:
     """
 
     def __init__(self, limit: int):
+        # limit <= 0 会造出一个永远拿不到配额的信号量，请求全部静默挂死而不是报错。
+        # 在构造处拦住，让 CLI/调用方拿到可诊断的异常。
+        if not isinstance(limit, int) or limit < 1:
+            raise ValueError(f"并发数必须是 >= 1 的整数，收到: {limit!r}")
         self.limit = limit
         self._semaphore: asyncio.Semaphore | None = None
         # __aenter__ 记录本次 acquire 用的信号量，__aexit__ 释放同一个对象：
@@ -453,11 +457,17 @@ class ConcurrentRequester:
         """析构时标记 session/connector 为已关闭，避免 'Unclosed client session' 警告。
         __del__ 中无法 await 异步 close()，标记 _closed 是 aiohttp 生态的标准做法，
         底层 TCP 连接会在进程退出时由 OS 回收。
+
+        用 getattr 取属性：__init__ 中途抛异常（如并发数非法）时对象只完成了一半
+        构造，直接访问 self._connector 会在析构里再抛一个 AttributeError，盖住
+        真正的错误。
         """
-        if self._connector is not None and not self._connector.closed:
-            self._connector._closed = True
-        if self._session is not None and not self._session.closed:
-            self._session._closed = True
+        connector = getattr(self, "_connector", None)
+        if connector is not None and not connector.closed:
+            connector._closed = True
+        session = getattr(self, "_session", None)
+        if session is not None and not session.closed:
+            session._closed = True
 
     @staticmethod
     async def _async_close(session: ClientSession, connector: TCPConnector):
@@ -479,7 +489,15 @@ class ConcurrentRequester:
                 return None
 
     @staticmethod
-    async def _make_requests(session: ClientSession, method: str, url: str, **kwargs):
+    async def _make_requests(
+        session: ClientSession, method: str, url: str, response_type: str = "json", **kwargs
+    ):
+        """发送一次请求
+
+        response_type="bytes" 用于响应体本身就不是 JSON 的端点（如 /audio/speech
+        直接返回音频字节）；此时 2xx 响应不做 JSON 解析。错误响应仍按 JSON 解析，
+        因为服务端的错误体是 JSON。
+        """
         async with session.request(method, url, **kwargs) as response:
             if response.status == 429 or response.status >= 500:
                 # 限流/服务端错误：抛异常进入 async_retry 重试，携带响应体。
@@ -493,6 +511,8 @@ class ConcurrentRequester:
                 # 其他 4xx（认证/参数/404 等）重试也不会成功：不重试，
                 # 保留响应体交由调用方生成错误结果
                 return response, await ConcurrentRequester._read_body(response)
+            if response_type == "bytes":
+                return response, await response.read()
             try:
                 data = await response.json()
             except Exception as e:
@@ -505,7 +525,9 @@ class ConcurrentRequester:
                 raise JSONDecodeHTTPError(response.status, text) from e
             return response, data
 
-    async def make_requests(self, session: ClientSession, method: str, url: str, **kwargs):
+    async def make_requests(
+        self, session: ClientSession, method: str, url: str, response_type: str = "json", **kwargs
+    ):
         if self._proxy and not self._proxy_is_socks:
             # setdefault：per-request 显式传入的 proxy 优先于客户端级配置。
             # SOCKS 例外：隧道已由 connector 建立，再传 proxy= 会让 aiohttp
@@ -513,7 +535,7 @@ class ConcurrentRequester:
             kwargs.setdefault("proxy", self._proxy)
         return await async_retry(
             self.retry_times, self.retry_delay, exceptions=RETRYABLE_EXCEPTIONS
-        )(self._make_requests)(session, method, url, **kwargs)
+        )(self._make_requests)(session, method, url, response_type=response_type, **kwargs)
 
     async def _send_single_request(
         self,
@@ -522,6 +544,7 @@ class ConcurrentRequester:
         url: str,
         method: str = "POST",
         meta: dict = None,
+        response_type: str = "json",
         **kwargs,
     ) -> RequestResult:
         """发送单个请求"""
@@ -538,7 +561,9 @@ class ConcurrentRequester:
                 # 漏桶只在这里 acquire 一次（retry 循环在 make_requests 内部），
                 # 所以 queue_time 是一次性的，重试不会再次穿过漏桶。
                 queue_time = time.perf_counter() - t_enqueue
-                response, data = await self.make_requests(session, method, url, **kwargs)
+                response, data = await self.make_requests(
+                    session, method, url, response_type=response_type, **kwargs
+                )
                 latency = time.perf_counter() - t_enqueue
 
                 # 与 _make_requests 的分类一致：>= 400 才是错误（201/204 等 2xx 是成功）

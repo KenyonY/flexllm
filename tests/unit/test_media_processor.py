@@ -374,3 +374,68 @@ class TestGeminiClientMediaConversion:
         assert len(parts) == 1
         assert parts[0]["inline_data"]["mime_type"] == "image/jpeg"
         assert parts[0]["inline_data"]["data"] == "/9j/"
+
+
+class TestNormalizeAudioFormat:
+    """MIME 子类型 -> OpenAI input_audio.format 的规范化。"""
+
+    @pytest.mark.parametrize(
+        "subtype,expected",
+        [
+            ("x-wav", "wav"),
+            ("wave", "wav"),
+            ("vnd.wave", "wav"),
+            ("X-WAV", "wav"),
+            ("mpeg", "mp3"),
+            ("x-m4a", "m4a"),
+            ("wav", "wav"),
+            ("mp3", "mp3"),
+            ("flac", "flac"),
+        ],
+    )
+    def test_normalize(self, subtype, expected):
+        from flexllm.msg_processors.audio_processor import normalize_audio_format
+
+        assert normalize_audio_format(subtype) == expected
+
+    def test_unknown_subtype_passthrough(self):
+        from flexllm.msg_processors.audio_processor import normalize_audio_format
+
+        assert normalize_audio_format("weird-codec") == "weird-codec"
+
+
+class TestOpenAIClientAudioConversion:
+    """OpenAI 客户端 audio_url -> input_audio 转换。"""
+
+    @staticmethod
+    def _convert(url):
+        from flexllm.clients.openai import OpenAIClient
+
+        messages = [{"role": "user", "content": [{"type": "audio_url", "audio_url": {"url": url}}]}]
+        return OpenAIClient._convert_audio_url_to_input_audio(messages)[0]["content"][0]
+
+    def test_x_wav_mime_normalized_to_wav(self):
+        """mimetypes 在 Linux 上把 .wav 猜成 audio/x-wav，透传会被服务端以
+        非法 format 拒绝（GLM 返回 error code 1214），必须规范化为 wav。"""
+        part = self._convert("data:audio/x-wav;base64,AAAA")
+        assert part["type"] == "input_audio"
+        assert part["input_audio"] == {"data": "AAAA", "format": "wav"}
+
+    def test_mpeg_mime_normalized_to_mp3(self):
+        part = self._convert("data:audio/mpeg;base64,BBBB")
+        assert part["input_audio"] == {"data": "BBBB", "format": "mp3"}
+
+    def test_standard_wav_unchanged(self):
+        part = self._convert("data:audio/wav;base64,CCCC")
+        assert part["input_audio"] == {"data": "CCCC", "format": "wav"}
+
+    def test_non_data_uri_kept_as_is(self):
+        """非 data URI 无法拆出 base64，保持原样交给后端"""
+        part = self._convert("https://example.com/a.wav")
+        assert part["type"] == "audio_url"
+
+    def test_non_list_content_untouched(self):
+        from flexllm.clients.openai import OpenAIClient
+
+        messages = [{"role": "user", "content": "纯文本"}]
+        assert OpenAIClient._convert_audio_url_to_input_audio(messages) == messages

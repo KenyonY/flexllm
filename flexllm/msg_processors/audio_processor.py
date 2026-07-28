@@ -32,6 +32,40 @@ _FORMAT_TO_MIME = {
     "ogg": "audio/ogg",
 }
 
+# MIME 子类型 -> OpenAI input_audio.format。
+# OpenAI 规范的 format 取的是文件扩展名语义（wav/mp3/...），不是 MIME 子类型，
+# 而 mimetypes 对 .wav 在 Linux 上猜出的是 audio/x-wav，直接透传会被服务端拒绝。
+_MIME_SUBTYPE_TO_FORMAT = {
+    "x-wav": "wav",
+    "wave": "wav",
+    "vnd.wave": "wav",
+    "x-pn-wav": "wav",
+    "mpeg": "mp3",
+    "mpeg3": "mp3",
+    "x-mpeg-3": "mp3",
+    "x-mp3": "mp3",
+    "mp4": "m4a",
+    "x-m4a": "m4a",
+    "aac": "m4a",
+    "x-flac": "flac",
+    "x-ogg": "ogg",
+    "opus": "opus",
+    "webm": "webm",
+}
+
+
+def normalize_audio_format(mime_subtype: str) -> str:
+    """把 MIME 子类型规范化为 OpenAI input_audio.format 取值。
+
+    Args:
+        mime_subtype: data URI 中 `audio/` 之后的部分，如 "x-wav"、"mpeg"
+
+    Returns:
+        规范化后的 format，如 "wav"、"mp3"；未知子类型原样返回
+    """
+    sub = mime_subtype.strip().lower()
+    return _MIME_SUBTYPE_TO_FORMAT.get(sub, sub)
+
 
 def preprocess_audio(
     audio_bytes: bytes,
