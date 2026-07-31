@@ -257,6 +257,62 @@ class TestBatch:
             os.unlink(output_path)
 
     @pytest.mark.asyncio
+    async def test_batch_resume_returns_completed_results(self, mock_llm_server):
+        """续跑时已完成项必须回填到返回值，而不是 None（否则调用方会静默丢结果）"""
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            output_path = f.name
+        os.unlink(output_path)  # 首轮从空开始
+
+        try:
+            async with LLMClient(
+                base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY"
+            ) as client:
+                first = await client.chat_completions_batch(
+                    _batch_msgs(3), output_jsonl=output_path, show_progress=False
+                )
+                assert all(r is not None for r in first)
+
+                # 扩到 5 条重跑：前 3 条走断点恢复，不重新请求
+                second = await client.chat_completions_batch(
+                    _batch_msgs(5), output_jsonl=output_path, show_progress=False
+                )
+
+            assert len(second) == 5
+            assert all(r is not None for r in second), f"续跑返回值含 None: {second}"
+            assert second[:3] == first  # 恢复的内容与首轮一致
+        finally:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+
+    @pytest.mark.asyncio
+    async def test_batch_resume_return_usage(self, mock_llm_server):
+        """续跑 + return_usage：恢复项也要是 ChatCompletionResult，类型不能混"""
+        with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:
+            output_path = f.name
+        os.unlink(output_path)
+
+        try:
+            async with LLMClient(
+                base_url=mock_llm_server.url, model="mock-model", api_key="EMPTY"
+            ) as client:
+                await client.chat_completions_batch(
+                    _batch_msgs(2), output_jsonl=output_path, show_progress=False
+                )
+                results = await client.chat_completions_batch(
+                    _batch_msgs(4),
+                    output_jsonl=output_path,
+                    show_progress=False,
+                    return_usage=True,
+                )
+
+            assert len(results) == 4
+            assert all(isinstance(r, ChatCompletionResult) for r in results)
+            assert all(r.content for r in results)
+        finally:
+            if os.path.exists(output_path):
+                os.unlink(output_path)
+
+    @pytest.mark.asyncio
     async def test_batch_with_metadata(self, mock_llm_server):
         """批量请求 + metadata_list"""
         with tempfile.NamedTemporaryFile(suffix=".jsonl", delete=False) as f:

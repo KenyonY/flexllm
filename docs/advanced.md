@@ -454,6 +454,22 @@ async for batch_result in client.iter_chat_completions_batch(
     process(batch_result)
 ```
 
+#### 断点续传的三条语义
+
+1. **返回列表始终是全量**：续跑时，`output_jsonl` 中已完成的样本不会重新请求，但会回填到
+   `chat_completions_batch` 的返回列表，直接用返回值即可，不必读回文件。
+   （例外：`iter_chat_completions_batch` 是流式接口，恢复项不 yield，续跑要全量结果就读文件。）
+
+2. **按 index 对齐，顺序不能变**：checkpoint 用列表位置对齐。重跑时逐条校验文件里的
+   `input` 与当前 `messages_list`，顺序变了会直接抛 `ValueError`，不会静默错位。
+   样本集合本身会变动（增删、换序）时，用 `metadata_list` 带上业务主键，回读时按 key 匹配。
+   `save_input=False` 时无 input 可校验，此时顺序完全由调用方保证。
+
+3. **只跳过 `status == "success"` 的记录**：失败条目（status 为 error）续跑时会自动重试。
+   注意"成功"指调用成功——模型返回了内容但 JSON 格式跑歪，flexllm 视作已完成，不会重跑。
+   需要按解析结果重跑时，自行校验后把坏样本挑出来，写到另一个 `output_jsonl` 里跑修复轮。
+   另外 `retry_times` 只覆盖网络/429/5xx 等传输层错误，不会因内容不合预期而重试。
+
 ### Per-record 参数（参数扫描）
 
 `chat_completions_batch` 接受 `params_list`（与 `messages_list` 等长，元素为 dict 或 None），

@@ -46,7 +46,7 @@ def resume_from_jsonl(
 
     Args:
         output_jsonl: JSONL 文件路径
-        messages_list: 原始消息列表（用于首尾校验）
+        messages_list: 原始消息列表（用于逐条 input 校验）
         save_input: input 保存策略（与写入时一致）
 
     Returns:
@@ -69,23 +69,22 @@ def resume_from_jsonl(
             except (json.JSONDecodeError, KeyError, TypeError):
                 continue
 
-    # 首尾校验：只在记录包含 input 字段时校验
-    file_valid = True
-    if records:
-        first, last = records[0], records[-1]
-        if "input" in first:
-            expected = extract_save_input(messages_list[first["index"]], save_input)
-            if expected is not None and first["input"] != expected:
-                file_valid = False
-        if file_valid and len(records) > 1 and "input" in last:
-            expected = extract_save_input(messages_list[last["index"]], save_input)
-            if expected is not None and last["input"] != expected:
-                file_valid = False
-
-    if not file_valid:
+    # 全量校验：逐条比对文件记录的 input 与当前 messages_list 对应位置。
+    # 只校验首尾会漏掉中间乱序——那会让 checkpoint 静默错位（旧结果配到新样本上），
+    # 比不校验更危险。只在记录包含 input 字段时校验（save_input=False 时无从校验）。
+    mismatched = [
+        r["index"]
+        for r in records
+        if "input" in r
+        and (expected := extract_save_input(messages_list[r["index"]], save_input)) is not None
+        and r["input"] != expected
+    ]
+    if mismatched:
         raise ValueError(
-            f"文件校验失败: {output_jsonl} 中的 input 与当前 messages_list 不匹配。"
-            f"请删除或重命名该文件后重试。"
+            f"文件校验失败: {output_jsonl} 中 {len(mismatched)} 条记录的 input 与当前 "
+            f"messages_list 不匹配（index: {mismatched[:10]}{'...' if len(mismatched) > 10 else ''}）。"
+            f"常见原因是样本顺序变化——断点续传按 index 对齐，顺序变了会错位。"
+            f"请保持顺序不变，或删除/重命名该文件后重试。"
         )
 
     completed_indices = {r["index"] for r in records}
@@ -200,14 +199,22 @@ class JsonlWriter:
         self._buffer: list[dict] = []
         self._last_flush_time = time.time()
         self._completed_indices: set[int] = set()
+        self._restored_records: list[dict] = []
 
         if output_jsonl:
-            self._completed_indices, _ = resume_from_jsonl(output_jsonl, messages_list, save_input)
+            self._completed_indices, self._restored_records = resume_from_jsonl(
+                output_jsonl, messages_list, save_input
+            )
             self._file_writer = open(Path(output_jsonl), "a", encoding="utf-8")
 
     @property
     def completed_indices(self) -> set[int]:
         return self._completed_indices
+
+    @property
+    def restored_records(self) -> list[dict]:
+        """断点续传从文件恢复的记录（调用方据此回填返回值，避免已完成项返回 None）"""
+        return self._restored_records
 
     def write_result(
         self,

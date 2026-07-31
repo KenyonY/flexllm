@@ -129,6 +129,24 @@ class TestResumeFromJsonl:
         with pytest.raises(ValueError, match="文件校验失败"):
             _resume_from_jsonl(str(output_file), messages_list, True)
 
+    def test_middle_reorder_detected(self, tmp_path):
+        """中间样本乱序（首尾不变）也要被检出——只校验首尾会让 checkpoint 静默错位"""
+        messages_list = self._make_messages_list(4)
+        output_file = tmp_path / "output.jsonl"
+
+        # 文件按原顺序写入，本轮把中间两条互换后重跑
+        records_data = [
+            {"index": i, "status": "success", "output": f"r{i}", "input": messages_list[i]}
+            for i in range(4)
+        ]
+        output_file.write_text(
+            "\n".join(json.dumps(r, ensure_ascii=False) for r in records_data) + "\n"
+        )
+        swapped = [messages_list[0], messages_list[2], messages_list[1], messages_list[3]]
+
+        with pytest.raises(ValueError, match="文件校验失败"):
+            _resume_from_jsonl(str(output_file), swapped, True)
+
     def test_empty_file(self, tmp_path):
         """空文件返回空"""
         output_file = tmp_path / "output.jsonl"

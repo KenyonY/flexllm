@@ -1005,11 +1005,8 @@ class LLMClientPool:
         # 恢复项按当前调用的 return_usage 语义包装，保证返回列表类型一致
         # （文件里的 output 已含 prefix，usage 有则恢复，没有为 None）
         file_restored_count = len(completed_indices)
-        if output_jsonl and completed_indices:
-            from .batch_helpers import resume_from_jsonl
-
-            _, records = resume_from_jsonl(output_jsonl, messages_list, save_input)
-            for record in records:
+        if completed_indices:
+            for record in writer.restored_records:
                 if return_usage and not return_raw:
                     results[record["index"]] = ChatCompletionResult(
                         content=record["output"], usage=record.get("usage")

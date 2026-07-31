@@ -492,7 +492,8 @@ class LLMClientBase(ABC):
             metadata_list: 元数据列表，与 messages_list 等长，每个元素保存到对应输出记录
             url: 自定义请求 URL，默认使用 _get_url() 生成
             save_input: 控制输出 JSONL 中 input 字段的保存策略
-                - True（默认）: 保存完整 messages，断点续传时做首尾 input 校验
+                - True（默认）: 保存完整 messages，断点续传时逐条校验 input，
+                  样本顺序变化（会导致 index 错位）时直接报错
                 - "last": 仅保存最后一个 user message 的 content
                 - False: 不保存 input 字段，断点续传仅基于 index 恢复
             params_list: per-record 参数列表（与 messages_list 等长，元素为 dict 或 None）。
@@ -788,6 +789,18 @@ class LLMClientBase(ABC):
                 for i, r in enumerate(responses)
             ]
 
+        # 断点续传：把文件中已完成的记录回填到返回值。
+        # 不回填的话这些位置恒为 None（本轮没请求过），调用方直接用返回值会静默丢结果。
+        # 文件里的 output 已是最终形态（含 prefix / return_raw 时为原始 dict），不再二次加工。
+        for record in writer.restored_records:
+            idx = record["index"]
+            if return_usage and not return_raw:
+                final_responses[idx] = ChatCompletionResult(
+                    content=record["output"], usage=record.get("usage")
+                )
+            else:
+                final_responses[idx] = record["output"]
+
         # 构建返回值
         result = final_responses
         if return_summary:
@@ -890,7 +903,11 @@ class LLMClientBase(ABC):
                     - avg_latency: 平均延迟（秒）
 
         Note:
-            缓存由初始化时的 cache 参数控制
+            缓存由初始化时的 cache 参数控制。
+
+            断点续传：output_jsonl 中已完成的样本本轮不请求、也不 yield（流式接口只推送
+            本轮处理的结果）。续跑场景下要拿到全量结果，请读回 output_jsonl，或改用
+            chat_completions_batch —— 后者的返回列表会回填已完成项。
         """
         effective_model = self._get_effective_model(model)
         effective_url = url or self._get_url(effective_model, stream=False)
