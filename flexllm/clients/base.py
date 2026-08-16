@@ -59,6 +59,10 @@ class ChatCompletionResult:
     reasoning_content: str | None = None  # 思考内容（DeepSeek-R1、Qwen3 等）
     tool_calls: list["ToolCall"] | None = None  # 工具调用列表
     queue_time: float | None = None  # 客户端排队耗时（semaphore + QPS 桶），缓存命中时为 None
+    # 模型为何停止：OpenAI 语义 "stop" / "length" / "tool_calls" / "content_filter"…；
+    # 其他 provider 映射到同一套值（Claude stop_reason、Gemini finishReason）。
+    # 缓存命中时为 None。调用方靠 "length" 判断输出被 max_tokens 截断。
+    finish_reason: str | None = None
 
 
 class LLMClientBase(ABC):
@@ -190,6 +194,14 @@ class LLMClientBase(ABC):
 
     def _extract_tool_calls(self, response_data: dict) -> list[ToolCall] | None:
         """提取工具调用信息（子类可覆盖）"""
+        return None
+
+    def _extract_finish_reason(self, response_data: dict) -> str | None:
+        """提取模型停止原因，统一到 OpenAI 语义（"stop"/"length"/"tool_calls"/…）。
+
+        非流式响应与流式 chunk 共用：流式时子类应从 delta chunk 里取到该字段。
+        默认 None（不知道）。
+        """
         return None
 
     # ========== 可选覆盖的钩子方法 ==========
@@ -401,6 +413,7 @@ class LLMClientBase(ABC):
                     usage=usage,
                     tool_calls=tool_calls,
                     queue_time=data.queue_time,
+                    finish_reason=self._extract_finish_reason(data.data),
                 )
             return content
         logger.warning("chat_completions 请求失败: %s, 返回 RequestResult 而非 str", data.data)
@@ -1093,11 +1106,15 @@ class LLMClientBase(ABC):
             model: 模型名称
             return_usage: 是否返回 usage 信息。当为 True 时，yield 的是 dict:
                 - {"type": "content", "content": "..."} 表示内容片段
+                - {"type": "thinking", "content": "..."} 表示思考片段
+                - {"type": "tool_call_delta", "tool_calls": [...]} 表示工具调用增量
+                - {"type": "finish", "reason": "stop"|"length"|...|None} 模型停止原因
                 - {"type": "usage", "usage": {...}} 表示 token 用量（最后一条）
                 当为 False 时（默认），yield 的是 str 内容片段
             preprocess_msg: 是否预处理消息
             url: 自定义请求 URL，默认使用 _get_stream_url() 生成
-            timeout: 超时时间（秒），默认使用客户端配置
+            timeout: 空闲超时（秒）——相邻两个 chunk 之间的最长间隔，默认使用客户端配置。
+                流式不设总时长上限：长思考模型一轮可能持续数分钟，只要还在吐 token 就不算卡死。
 
         Yields:
             - return_usage=False: str 内容片段
@@ -1117,7 +1134,12 @@ class LLMClientBase(ABC):
         headers = self._get_headers()
 
         effective_timeout = timeout if timeout is not None else self._timeout
-        aio_timeout = aiohttp.ClientTimeout(total=effective_timeout)
+        # total=None：流式的超时语义是"多久没收到下一个 chunk"，不是整条流的总时长
+        aio_timeout = aiohttp.ClientTimeout(
+            total=None,
+            sock_connect=min(30, effective_timeout) if effective_timeout else None,
+            sock_read=effective_timeout,
+        )
 
         session, proxy_kwargs = create_proxied_session(self._proxy)
         async with session:
@@ -1134,6 +1156,7 @@ class LLMClientBase(ABC):
 
                 _thinking_started = False
                 _last_usage = None
+                _finish_reason = None
                 async for line in response.content:
                     line = line.decode("utf-8").strip()
                     if line.startswith("data: "):
@@ -1150,6 +1173,11 @@ class LLMClientBase(ABC):
                                 usage = self._extract_stream_usage(data)
                                 if usage:
                                     _last_usage = usage
+                                # finish_reason 只出现在最后一个有 choices 的 chunk 上，
+                                # 之后可能还有纯 usage chunk，所以记下来流末尾再发
+                                reason = self._extract_finish_reason(data)
+                                if reason:
+                                    _finish_reason = reason
 
                             # 提取思考内容
                             thinking = self._extract_stream_thinking(data)
@@ -1189,8 +1217,10 @@ class LLMClientBase(ABC):
                 if _thinking_started:
                     yield "</think>"
 
-                if return_usage and _last_usage:
-                    yield {"type": "usage", "usage": _last_usage}
+                if return_usage:
+                    yield {"type": "finish", "reason": _finish_reason}
+                    if _last_usage:
+                        yield {"type": "usage", "usage": _last_usage}
 
     def model_list(self) -> list[str]:
         raise NotImplementedError("子类需要实现 model_list 方法")
