@@ -51,6 +51,7 @@ def resume_from_jsonl(
 
     Returns:
         (completed_indices, records): 已完成的索引集合 和 有效记录列表
+        （records 只保留回填所需的 index/output/usage 字段）
     """
     output_path = Path(output_jsonl)
     if not output_path.exists():
@@ -86,6 +87,10 @@ def resume_from_jsonl(
             f"常见原因是样本顺序变化——断点续传按 index 对齐，顺序变了会错位。"
             f"请保持顺序不变，或删除/重命名该文件后重试。"
         )
+
+    # 瘦身：回填只需要 index/output/usage，input 等字段（可能含 base64 图片）
+    # 会随 JsonlWriter 驻留整个 batch 运行期，不能带回去
+    records = [{k: r[k] for k in ("index", "output", "usage") if k in r} for r in records]
 
     completed_indices = {r["index"] for r in records}
     if completed_indices:
