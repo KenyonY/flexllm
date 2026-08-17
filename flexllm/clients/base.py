@@ -170,6 +170,16 @@ class LLMClientBase(ABC):
     @abstractmethod
     def _get_headers(self) -> dict: ...
 
+    def _merge_headers(self, extra_headers: dict[str, str] | None) -> dict:
+        """本次请求的 header = 客户端固定 header + 本次调用的额外 header。
+
+        子类的 _get_headers() 常直接返回构造期缓存的 dict（见 OpenAIClient），
+        原地 update 会污染后续所有请求，所以这里必须复制。
+        """
+        if not extra_headers:
+            return self._get_headers()
+        return {**self._get_headers(), **extra_headers}
+
     @abstractmethod
     def _build_request_body(
         self, messages: list[dict], model: str, stream: bool = False, **kwargs
@@ -318,6 +328,7 @@ class LLMClientBase(ABC):
         url: str = None,
         prefix: str | None = None,
         include_prefix: bool = True,
+        extra_headers: dict[str, str] | None = None,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """
@@ -336,6 +347,12 @@ class LLMClientBase(ABC):
             include_prefix: prefill 场景下返回值是否拼接 prefix。
                 默认 True,返回 "prefix + 续写";
                 设为 False 仅返回模型续写部分(与底层 API 原始行为一致)。
+            extra_headers: 本次请求额外的 HTTP header，覆盖同名的 _get_headers() 项。
+                用于向网关/代理声明调用方身份（如 x-agent-id / x-session-id）这类
+                随每次调用变化、不能固化在客户端实例上的信息。
+                刻意做成具名参数而不是从 **kwargs 里 pop：**kwargs 同时喂给缓存键
+                和请求体，具名参数在语言层面就进不去，不会污染缓存也不会被当成
+                API 参数发给上游。
 
         Returns:
             - return_raw=True: RequestResult 原始响应
@@ -376,7 +393,7 @@ class LLMClientBase(ABC):
                 return cached_content
 
         body = self._build_request_body(messages, effective_model, stream=False, **kwargs)
-        request_params = {"json": body, "headers": self._get_headers()}
+        request_params = {"json": body, "headers": self._merge_headers(extra_headers)}
         effective_url = url or self._get_url(effective_model, stream=False)
 
         results, _ = await self._client.process_requests(
@@ -1096,6 +1113,7 @@ class LLMClientBase(ABC):
         preprocess_msg: bool = False,
         url: str = None,
         timeout: int = None,
+        extra_headers: dict[str, str] | None = None,
         **kwargs,
     ):
         """
@@ -1115,6 +1133,7 @@ class LLMClientBase(ABC):
             url: 自定义请求 URL，默认使用 _get_stream_url() 生成
             timeout: 空闲超时（秒）——相邻两个 chunk 之间的最长间隔，默认使用客户端配置。
                 流式不设总时长上限：长思考模型一轮可能持续数分钟，只要还在吐 token 就不算卡死。
+            extra_headers: 本次请求额外的 HTTP header，语义同 chat_completions()。
 
         Yields:
             - return_usage=False: str 内容片段
@@ -1131,7 +1150,7 @@ class LLMClientBase(ABC):
         body = self._prepare_stream_body(body, return_usage)
 
         effective_url = url or self._get_stream_url(effective_model)
-        headers = self._get_headers()
+        headers = self._merge_headers(extra_headers)
 
         effective_timeout = timeout if timeout is not None else self._timeout
         # total=None：流式的超时语义是"多久没收到下一个 chunk"，不是整条流的总时长
