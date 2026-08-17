@@ -50,6 +50,14 @@ class ToolCall:
     function: dict  # {"name": "...", "arguments": "..."}
 
 
+# OpenAI chat completion 响应/chunk 的标准信封字段。这个集合之外的顶层字段被视为
+# "带外信息"，原样透出给调用方（见 ChatCompletionResult.extra）。
+# 用白名单而不是"认得的才提取"：新 provider 加自有字段时应该被透出，而不是被吞掉。
+_OPENAI_ENVELOPE_KEYS = frozenset(
+    {"id", "object", "created", "model", "choices", "usage", "system_fingerprint", "service_tier"}
+)
+
+
 @dataclass
 class ChatCompletionResult:
     """聊天完成的结果，包含内容和 token 用量信息"""
@@ -63,6 +71,9 @@ class ChatCompletionResult:
     # 其他 provider 映射到同一套值（Claude stop_reason、Gemini finishReason）。
     # 缓存命中时为 None。调用方靠 "length" 判断输出被 max_tokens 截断。
     finish_reason: str | None = None
+    # 响应里标准信封之外的顶层字段。网关/代理会用它挂带外信息（如"这次工具调用被策略拦了"），
+    # 以前这些字段在解析时被无条件丢弃，调用方没有任何办法拿到。缓存命中时为 None。
+    extra: dict | None = None
 
 
 class LLMClientBase(ABC):
@@ -242,6 +253,16 @@ class LLMClientBase(ABC):
         if "usage" in data and data["usage"]:
             return data["usage"]
         return None
+
+    def _extract_extra(self, data: dict) -> dict | None:
+        """标准信封之外的顶层字段，流式 chunk 与非流式响应共用，子类可覆盖。
+
+        存在的理由：网关/代理会在响应上挂带外信息（典型是"这次工具调用被策略拦了，
+        原因是 X"），而解析器只认自己关心的几个路径，其余字段随 data 一起出作用域消失，
+        调用方连"有东西被丢了"都不知道。这里把它们原样透出，不做任何解释。
+        """
+        extra = {k: v for k, v in data.items() if k not in _OPENAI_ENVELOPE_KEYS}
+        return extra or None
 
     def _prepare_stream_body(self, body: dict, return_usage: bool) -> dict:
         """流式请求体的额外处理，子类可覆盖
@@ -431,6 +452,7 @@ class LLMClientBase(ABC):
                     tool_calls=tool_calls,
                     queue_time=data.queue_time,
                     finish_reason=self._extract_finish_reason(data.data),
+                    extra=self._extract_extra(data.data) if isinstance(data.data, dict) else None,
                 )
             return content
         logger.warning("chat_completions 请求失败: %s, 返回 RequestResult 而非 str", data.data)
@@ -1197,6 +1219,14 @@ class LLMClientBase(ABC):
                                 reason = self._extract_finish_reason(data)
                                 if reason:
                                     _finish_reason = reason
+
+                            # 带外字段必须在 thinking / tool_call 两个 continue 分支之前提取：
+                            # 网关的信号往往就挂在带 content 或 tool_call 的那条 chunk 上，
+                            # 放到后面会被 continue 短路掉
+                            if return_usage:
+                                extra = self._extract_extra(data)
+                                if extra:
+                                    yield {"type": "extra", "extra": extra}
 
                             # 提取思考内容
                             thinking = self._extract_stream_thinking(data)

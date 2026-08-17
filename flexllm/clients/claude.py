@@ -16,6 +16,26 @@ from ..async_api import create_proxied_session
 from ..cache import ResponseCacheConfig
 from .base import LLMClientBase, ToolCall
 
+# Anthropic Messages 流式事件的全集（含本客户端不处理但属于规范的 ping / *_stop / error）。
+# 这个集合之外的事件被当作带外信息透出，而不是静默丢弃。
+_KNOWN_STREAM_EVENTS = frozenset(
+    {
+        "message_start",
+        "message_delta",
+        "message_stop",
+        "content_block_start",
+        "content_block_delta",
+        "content_block_stop",
+        "ping",
+        "error",
+    }
+)
+
+# Anthropic Messages 非流式响应的标准信封字段（对应 base 的 _OPENAI_ENVELOPE_KEYS）
+_ANTHROPIC_ENVELOPE_KEYS = frozenset(
+    {"id", "type", "role", "content", "model", "stop_reason", "stop_sequence", "usage"}
+)
+
 
 class ClaudeClient(LLMClientBase):
     """
@@ -391,6 +411,11 @@ class ClaudeClient(LLMClientBase):
             logger.warning(f"Failed to extract content: {e}")
             return None
 
+    def _extract_extra(self, data: dict) -> dict | None:
+        """Anthropic 的响应信封与 OpenAI 不同，不能用基类那套字段名判定。"""
+        extra = {k: v for k, v in data.items() if k not in _ANTHROPIC_ENVELOPE_KEYS}
+        return extra or None
+
     def _extract_usage(self, response_data: dict) -> dict | None:
         """提取 Claude usage 信息并转换为统一格式"""
         if not response_data:
@@ -500,6 +525,12 @@ class ClaudeClient(LLMClientBase):
                         try:
                             data = json.loads(data_str)
                             event_type = data.get("type")
+
+                            # Anthropic 规范要求客户端忽略未知事件类型，网关正是靠这一点
+                            # 挂带外信息。这里不解释内容，原样透出给调用方。
+                            if return_usage and event_type not in _KNOWN_STREAM_EVENTS:
+                                yield {"type": "extra", "extra": data}
+                                continue
 
                             # content_block_start: 新 block 开始
                             if event_type == "content_block_start":

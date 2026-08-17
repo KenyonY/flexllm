@@ -474,6 +474,10 @@ class GeminiClient(LLMClientBase):
 
         Gemini 的 thinking 和 content 可能在同一个 chunk 中（不 continue），
         因此需要覆写基类的 stream 方法。
+
+        已知缺口：这条独立实现**不透出** `{"type": "extra"}` 带外字段（基类与
+        ClaudeClient 都透出）。Gemini 把 api_key 拼在 query string 里，本来就不该经
+        网关转发，所以带外信号在这条链路上没有来源。真需要时照基类那段补即可。
         """
         import json
 
