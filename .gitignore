@@ -38,3 +38,7 @@ flexllm_config.yaml
 config.yaml
 !flexllm_config.example.yaml
 !flexllm_config.quickstart.yaml
+!examples/*/flexllm_config.yaml
+
+# examples 运行产物（数据集与 batch 输出由脚本生成）
+examples/batch_cli/data/

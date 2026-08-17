@@ -1,0 +1,48 @@
+# flexllm 示例配置
+#
+# 配置搜索顺序：./flexllm_config.yaml -> ~/.flexllm/config.yaml
+# 因此在 examples/batch_cli/ 目录下执行 flexllm 命令时会优先使用本文件。
+#
+# 不想把密钥写进文件时，用 CLI 参数 --api-key，或设环境变量
+# FLEXLLM_API_KEY / OPENAI_API_KEY（优先级高于配置文件，对所有模型生效）。
+
+default: mock
+
+models:
+  # 本地 Mock 服务：另开一个终端执行 `flexllm mock -p 8001`，零成本跑通全流程
+  - name: mock
+    id: mock-model
+    provider: openai
+    base_url: http://localhost:8001/v1
+    api_key: EMPTY
+
+  # SiliconFlow（真实调用示例）：填入自己的 key，或运行时加 --api-key sk-xxx
+  - name: glm52
+    id: zai-org/GLM-5.2
+    provider: openai
+    base_url: https://api.siliconflow.cn/v1
+    api_key: sk-your-siliconflow-api-key
+    temperature: 0.3
+    max_tokens: 256
+
+  # 本地 vLLM / Ollama
+  - name: local
+    id: qwen2.5:latest
+    provider: openai
+    base_url: http://localhost:11434/v1
+    api_key: EMPTY
+
+# batch 节只放调度 / IO 参数；模型行为参数（temperature 等）写在 models 下
+batch:
+  concurrency: 5
+  max_qps: 10
+  timeout: 120
+  retry_times: 3
+  retry_delay: 1.0
+
+  cache: true
+  cache_ttl: 86400
+
+  return_usage: true
+  track_cost: true
+  flush_interval: 1.0
