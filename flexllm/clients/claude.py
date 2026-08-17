@@ -404,6 +404,23 @@ class ClaudeClient(LLMClientBase):
             "total_tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
         }
 
+    _STOP_REASON_MAP = {
+        "end_turn": "stop",
+        "stop_sequence": "stop",
+        "max_tokens": "length",
+        "tool_use": "tool_calls",
+        "refusal": "content_filter",
+        # 4.5+ 模型：input + 生成触到窗口上限，语义上同样是被截断
+        "model_context_window_exceeded": "length",
+    }
+
+    def _extract_finish_reason(self, response_data: dict) -> str | None:
+        """Claude stop_reason → OpenAI 语义"""
+        reason = (response_data or {}).get("stop_reason")
+        if not reason:
+            return None
+        return self._STOP_REASON_MAP.get(reason, reason)
+
     def _extract_tool_calls(self, response_data: dict) -> list[ToolCall] | None:
         """提取 Claude tool_use 信息"""
         try:
@@ -448,7 +465,12 @@ class ClaudeClient(LLMClientBase):
         headers = self._get_headers()
 
         effective_timeout = timeout if timeout is not None else self._timeout
-        aio_timeout = aiohttp.ClientTimeout(total=effective_timeout)
+        # 流式：空闲超时语义（见基类 chat_completions_stream 说明）
+        aio_timeout = aiohttp.ClientTimeout(
+            total=None,
+            sock_connect=min(30, effective_timeout) if effective_timeout else None,
+            sock_read=effective_timeout,
+        )
 
         session, proxy_kwargs = create_proxied_session(self._proxy)
         async with session:
@@ -464,6 +486,7 @@ class ClaudeClient(LLMClientBase):
                     raise Exception(f"HTTP {response.status}: {error_text}")
 
                 usage_data = None
+                finish_reason = None
                 # 跟踪流式 tool_use blocks
                 tool_use_blocks = {}  # {block_index: {"id", "name", "arguments"}}
                 current_block_index = -1
@@ -548,6 +571,9 @@ class ClaudeClient(LLMClientBase):
                             # 不含 input_tokens），必须与 message_start 的记录合并，
                             # 整体覆盖会把 prompt_tokens 归零
                             if event_type == "message_delta":
+                                delta_reason = self._extract_finish_reason(data.get("delta"))
+                                if delta_reason:
+                                    finish_reason = delta_reason
                                 usage = data.get("usage")
                                 if usage:
                                     prompt_tokens = usage.get("input_tokens") or (
@@ -574,9 +600,10 @@ class ClaudeClient(LLMClientBase):
                         except json.JSONDecodeError:
                             continue
 
-                # 最后返回 usage
-                if return_usage and usage_data:
-                    yield {"type": "usage", "usage": usage_data}
+                if return_usage:
+                    yield {"type": "finish", "reason": finish_reason}
+                    if usage_data:
+                        yield {"type": "usage", "usage": usage_data}
 
     @staticmethod
     def parse_thoughts(response_data: dict) -> dict:

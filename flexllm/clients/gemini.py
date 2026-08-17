@@ -275,6 +275,27 @@ class GeminiClient(LLMClientBase):
             logger.warning(f"Failed to extract response text: {e}")
             return None
 
+    _FINISH_REASON_MAP = {
+        "STOP": "stop",
+        "MAX_TOKENS": "length",
+        "SAFETY": "content_filter",
+        "RECITATION": "content_filter",
+        "PROHIBITED_CONTENT": "content_filter",
+        "BLOCKLIST": "content_filter",
+        "SPII": "content_filter",
+        "MALFORMED_FUNCTION_CALL": "tool_calls",
+    }
+
+    def _extract_finish_reason(self, response_data: dict) -> str | None:
+        """Gemini candidates[0].finishReason → OpenAI 语义（非流式与流式 chunk 结构相同）"""
+        candidates = (response_data or {}).get("candidates")
+        if not candidates:
+            return None
+        reason = candidates[0].get("finishReason")
+        if not reason:
+            return None
+        return self._FINISH_REASON_MAP.get(reason, reason.lower())
+
     def _extract_usage(self, response_data: dict) -> dict | None:
         """
         提取 Gemini API 的 usage 信息
@@ -467,7 +488,12 @@ class GeminiClient(LLMClientBase):
         headers = self._get_headers()
 
         effective_timeout = timeout if timeout is not None else self._timeout
-        aio_timeout = aiohttp.ClientTimeout(total=effective_timeout)
+        # 流式：空闲超时语义（见基类 chat_completions_stream 说明）
+        aio_timeout = aiohttp.ClientTimeout(
+            total=None,
+            sock_connect=min(30, effective_timeout) if effective_timeout else None,
+            sock_read=effective_timeout,
+        )
 
         session, proxy_kwargs = create_proxied_session(self._proxy)
         async with session:
@@ -483,6 +509,7 @@ class GeminiClient(LLMClientBase):
                     raise Exception(f"HTTP {response.status}: {error_text}")
 
                 _last_usage = None
+                _finish_reason = None
                 async for line in response.content:
                     line = line.decode("utf-8").strip()
                     if line.startswith("data: "):
@@ -511,12 +538,17 @@ class GeminiClient(LLMClientBase):
                                 usage = self._extract_stream_usage(data)
                                 if usage:
                                     _last_usage = usage
+                                reason = self._extract_finish_reason(data)
+                                if reason:
+                                    _finish_reason = reason
 
                         except json.JSONDecodeError:
                             continue
 
-                if return_usage and _last_usage:
-                    yield {"type": "usage", "usage": _last_usage}
+                if return_usage:
+                    yield {"type": "finish", "reason": _finish_reason}
+                    if _last_usage:
+                        yield {"type": "usage", "usage": _last_usage}
 
     # ========== Gemini 特有方法 ==========
 

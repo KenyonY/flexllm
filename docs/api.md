@@ -19,7 +19,7 @@ client = LLMClient(
     max_qps: float = None,               # QPS 限制
     retry_times: int = 3,                # 最大尝试次数（含首次调用）
     retry_delay: float = 1.0,            # 退避基数（秒），指数退避+抖动
-    timeout: int = 120,                  # 请求超时（秒）
+    timeout: int = 120,                  # 请求超时（秒）；非流式=单请求总时长，流式=相邻 chunk 最长间隔
 )
 ```
 
@@ -84,11 +84,24 @@ async def chat_completions_batch(
 ```python
 async def chat_completions_stream(
     messages: List[dict],
+    return_usage: bool = False,
+    timeout: int = None,
     **kwargs
-) -> AsyncIterator[str]
+) -> AsyncIterator[str | dict]
 ```
 
-流式响应。
+流式响应。默认逐段 yield `str`；`return_usage=True` 时 yield 事件 dict，按序为：
+
+| type | 字段 | 说明 |
+|---|---|---|
+| `thinking` | `content` | 思考片段（reasoning 模型） |
+| `content` | `content` | 正文片段 |
+| `tool_call_delta` | `tool_calls` | 工具调用增量 |
+| `finish` | `reason` | 模型停止原因，OpenAI 语义：`stop` / `length`（被 max_tokens 截断）/ `tool_calls` / `content_filter` / …；provider 不给时为 `None`。**流末尾必发一次** |
+| `usage` | `usage` | token 用量，最后一条（provider 给了才有） |
+
+流式的 `timeout` 是**空闲超时**（两个 chunk 之间的最长间隔），不限制整条流的总时长——
+长思考模型一轮可能持续数分钟，只要还在吐 token 就不算卡死。
 
 ---
 
@@ -215,7 +228,13 @@ class ChatCompletionResult:
     content: str                          # 响应内容
     usage: Optional[dict] = None          # Token 使用情况
     reasoning_content: Optional[str] = None  # 思考内容
+    tool_calls: Optional[list[ToolCall]] = None
+    queue_time: Optional[float] = None    # 客户端排队耗时
+    finish_reason: Optional[str] = None   # 停止原因（OpenAI 语义，见 chat_completions_stream 的 finish 事件）；缓存命中为 None
 ```
+
+`finish_reason == "length"` 表示输出被 `max_tokens` 截断。注意 reasoning 模型的思考
+tokens 也计入 `max_tokens`：预算过小时可能 `content` 为空而 `finish_reason == "length"`。
 
 ### BatchResultItem
 

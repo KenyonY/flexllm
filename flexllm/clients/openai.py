@@ -214,8 +214,10 @@ class OpenAIClient(AudioMixin, LLMClientBase):
             # reasoning-parser 模式：思考内容在独立的 reasoning 字段
             reasoning = message.get("reasoning") or message.get("reasoning_content")
             if reasoning:
-                if not content:
-                    # parser 误判：正式回答被放入 reasoning（如 Qwen3.5 默认不思考时）
+                if not content and self._extract_finish_reason(response_data) != "length":
+                    # parser 误判：正式回答被放入 reasoning（如 Qwen3.5 默认不思考时）。
+                    # 但 finish_reason=length 且 content 为空是另一回事——思考把
+                    # max_tokens 吃光了，此时 reasoning 是半截思维链，不能冒充回答。
                     return reasoning
                 if keep_thinking:
                     return f"<think>\n{reasoning}\n</think>\n\n{content.strip()}"
@@ -229,6 +231,13 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         except (KeyError, IndexError) as e:
             logger.warning(f"Failed to extract content: {e}")
             return None
+
+    def _extract_finish_reason(self, response_data: dict) -> str | None:
+        """非流式响应与流式 chunk 结构一致：choices[0].finish_reason"""
+        choices = (response_data or {}).get("choices")
+        if choices:
+            return choices[0].get("finish_reason") or None
+        return None
 
     def _extract_stream_content(self, data: dict) -> str | None:
         choices = data.get("choices")
