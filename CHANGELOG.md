@@ -1,5 +1,71 @@
 # Changelog
 
+## [0.15.2] - 2026-08-17
+
+### Features
+
+- **clients**: 透传 finish_reason，流式超时改为空闲语义
+
+### Performance
+
+- **batch**: 断点续传恢复记录瘦身，只保留回填所需字段
+
+### Merge
+
+- Feat/finish-reason —— finish_reason 透传与流式空闲超时
+
+## [0.15.1] - 2026-07-31
+
+### Bug Fixes
+
+- **batch**: 断点续跑回填已完成结果，input 校验改为逐条比对
+
+### Documentation
+
+- **skill**: 同步 SKILL.md 到 0.15.0 实际行为
+
+### Miscellaneous
+
+- Bump version to 0.15.1
+
+## [0.15.0] - 2026-07-28
+
+### Bug Fixes
+
+- **cache**: 重新接线 cache_image/cache_dir 并迁移默认缓存路径
+- **proxy/retry/tests**: 修复多agent审查确认的 4 项遗留问题
+- **proxy/retry**: 修复 QA 验收暴露的 5 项问题
+- **retry**: 遵守 Retry-After 响应头，退避改为指数+抖动
+- **mllm**: __aexit__ 走异步 aclose，消除事件循环关闭时的 pending task 警告
+- **processors/config**: 修复 OpenCV 吞 stdout、调色板色损，清理依赖与文档
+- **cli/serve/mock**: 修复配置优先级劫持、JSON 输出失真、退出码等 bug
+- **clients**: 修复缓存/预算崩溃、thinking 污染、worker 竞态等一批 bug
+- **async/pricing**: 修复限流静默失败、批量挂起、未知模型假计费三个严重 bug
+- 清理吞异常——流式解析去掉 except Exception: pass，裸 except 收窄类型
+- **retry**: HTTP 错误按可重试性分类，错误响应体不再丢失
+
+### Features
+
+- **audio**: 新增语音转录与合成，修复 input_audio format 规范化
+- **proxy**: 多模态图片/媒体 URL 下载也走 client 的 proxy
+- **proxy**: 支持 SOCKS4/SOCKS5 代理（issue #11 遗留项）
+
+### Miscellaneous
+
+- Bump version to 0.15.0
+- Gitignore 忽略 .openagent/
+- CI 加跑 mock e2e 门禁，清理 loguru 依赖与上游项目残留
+- **lint**: 启用 ruff F 规则（pyflakes）并修复全部 36 处违规
+
+### Refactor
+
+- 删除 ~2900 行零引用死代码（concurrent_executor/concurrent_call/image_processor_helper/messages_processor）
+
+### Testing
+
+- **socks**: Env-proxy 回归测试改用 127.0.0.2，使劫持路径真实可触发
+- 补真实端点回归套件与确定性回归测试
+
 ## [0.14.0] - 2026-07-16
 
 ### Features
