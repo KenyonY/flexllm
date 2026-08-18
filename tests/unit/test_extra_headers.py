@@ -150,3 +150,85 @@ class TestCacheKey:
             await client.aclose()
 
         assert server.count == 1
+
+
+class AnthropicRecordingServer:
+    """记录 header 与 body 的假 Anthropic 上游（/v1/messages，流式 SSE）。"""
+
+    def __init__(self):
+        self.requests: list[tuple[dict, dict]] = []
+        self._runner = None
+        self.base_url = None
+
+    async def _handler(self, request):
+        body = await request.json()
+        self.requests.append((dict(request.headers), body))
+        resp = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await resp.prepare(request)
+        events = [
+            ("message_start", {"type": "message_start", "message": {"usage": {"input_tokens": 1}}}),
+            (
+                "content_block_start",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "text", "text": ""},
+                },
+            ),
+            (
+                "content_block_delta",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "text_delta", "text": "ok"},
+                },
+            ),
+            ("content_block_stop", {"type": "content_block_stop", "index": 0}),
+            (
+                "message_delta",
+                {
+                    "type": "message_delta",
+                    "delta": {"stop_reason": "end_turn"},
+                    "usage": {"output_tokens": 1},
+                },
+            ),
+            ("message_stop", {"type": "message_stop"}),
+        ]
+        for name, data in events:
+            await resp.write(f"event: {name}\ndata: {json.dumps(data)}\n\n".encode())
+        await resp.write_eof()
+        return resp
+
+    async def __aenter__(self):
+        app = web.Application()
+        app.router.add_post("/v1/messages", self._handler)
+        self._runner = web.AppRunner(app)
+        await self._runner.setup()
+        site = web.TCPSite(self._runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        self.base_url = f"http://127.0.0.1:{port}/v1"
+        return self
+
+    async def __aexit__(self, *args):
+        await self._runner.cleanup()
+
+
+class TestClaudeStream:
+    """Claude 的流式是独立实现，不走基类：具名参数漏掉时 extra_headers 会随 **kwargs
+    进请求体，Anthropic 对未知字段直接 400（"extra_headers: Extra inputs are not
+    permitted"）——整个 provider 在带身份的调用方手里不可用。"""
+
+    async def test_headers_reach_upstream_not_body(self):
+        from flexllm.clients.claude import ClaudeClient
+
+        async with AnthropicRecordingServer() as server:
+            client = ClaudeClient(base_url=server.base_url, api_key="k", model="m")
+            async for _ in client.chat_completions_stream(MESSAGES, extra_headers=IDENTITY):
+                pass
+            await client.aclose()
+
+        headers, body = server.requests[0]
+        assert headers["x-agent-id"] == "demo/main"
+        assert headers["x-session-id"] == "sess-1"
+        assert "extra_headers" not in body

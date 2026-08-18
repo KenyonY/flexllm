@@ -468,6 +468,7 @@ class GeminiClient(LLMClientBase):
         preprocess_msg: bool = False,
         url: str = None,
         timeout: int = None,
+        extra_headers: dict[str, str] | None = None,
         **kwargs,
     ):
         """Gemini 流式聊天完成
@@ -489,7 +490,7 @@ class GeminiClient(LLMClientBase):
         body = self._build_request_body(messages, effective_model, stream=True, **kwargs)
 
         effective_url = url or self._get_stream_url(effective_model)
-        headers = self._get_headers()
+        headers = self._merge_headers(extra_headers)
 
         effective_timeout = timeout if timeout is not None else self._timeout
         # 流式：空闲超时语义（见基类 chat_completions_stream 说明）
