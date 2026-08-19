@@ -7,8 +7,11 @@ OpenAI 兼容 API 客户端
 import logging
 import re
 
+import aiohttp
+
 logger = logging.getLogger(__name__)
 
+from ..async_api import create_proxied_session
 from ..cache import ResponseCacheConfig
 from ..msg_processors.audio_processor import normalize_audio_format
 from .audio import AudioMixin
@@ -354,3 +357,21 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         )
         response.raise_for_status()
         return [m["id"] for m in response.json()["data"]]
+
+    async def list_models(
+        self, *, extra_headers: dict[str, str] | None = None, timeout: float = 5
+    ) -> list[dict]:
+        """`GET {base_url}/models` 的原始 data 条目（语义见基类）。"""
+        session, proxy_kwargs = create_proxied_session(self._proxy)
+        async with session:
+            async with session.get(
+                f"{self._base_url}/models",
+                headers=self._merge_headers(extra_headers),
+                timeout=aiohttp.ClientTimeout(total=timeout),
+                **proxy_kwargs,
+            ) as response:
+                if response.status != 200:
+                    raise Exception(f"HTTP {response.status}: {await response.text()}")
+                data = await response.json()
+        models = data.get("data", []) if isinstance(data, dict) else []
+        return [m for m in models if isinstance(m, dict)]

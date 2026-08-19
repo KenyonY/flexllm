@@ -1274,6 +1274,19 @@ class LLMClientBase(ABC):
     def model_list(self) -> list[str]:
         raise NotImplementedError("子类需要实现 model_list 方法")
 
+    async def list_models(
+        self, *, extra_headers: dict[str, str] | None = None, timeout: float = 5
+    ) -> list[dict]:
+        """列出端点上的模型，返回服务端给的**原始条目**（OpenAI 兼容端点是
+        `GET {base_url}/models` 的 `data`）。
+
+        与 model_list() 的区别：异步、走 per-call extra_headers 与代理、保留
+        `max_model_len` 这类服务端扩展字段（vLLM/sglang 用它暴露上下文窗口）。
+        只有 OpenAI 兼容端点有统一形态，其它 provider 抛 NotImplementedError ——
+        调用方据此**不发请求**，而不是对着 Anthropic/Gemini 端点发一个注定失败的 GET。
+        """
+        raise NotImplementedError(f"{type(self).__name__} 不支持 list_models")
+
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(model='{self._model}')"
 

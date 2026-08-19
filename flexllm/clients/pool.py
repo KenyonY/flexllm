@@ -1673,6 +1673,15 @@ class LLMClientPool:
             # 多 endpoint 模式：返回第一个客户端的模型列表
             return self._clients[0].model_list() if self._clients else []
 
+    async def list_models(
+        self, *, extra_headers: dict[str, str] | None = None, timeout: float = 5
+    ) -> list[dict]:
+        """端点上的模型原始条目（详见 LLMClientBase.list_models）。多 endpoint 取首个。"""
+        client = self._single_client if self._mode == "single" else (self._clients or [None])[0]
+        if client is None:
+            raise RuntimeError("没有可用的 endpoint")
+        return await client.list_models(extra_headers=extra_headers, timeout=timeout)
+
     def _audio_client(self):
         """选出承担语音请求（转录/合成）的底层客户端
 

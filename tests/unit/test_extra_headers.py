@@ -29,6 +29,10 @@ class RecordingServer:
     def count(self) -> int:
         return len(self.requests)
 
+    async def _models(self, request):
+        self.requests.append((dict(request.headers), {}))
+        return web.json_response({"data": [{"id": "m", "max_model_len": 24576}]})
+
     async def _handler(self, request):
         body = await request.json()
         self.requests.append((dict(request.headers), body))
@@ -54,6 +58,7 @@ class RecordingServer:
     async def __aenter__(self):
         app = web.Application()
         app.router.add_post("/v1/chat/completions", self._handler)
+        app.router.add_get("/v1/models", self._models)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         site = web.TCPSite(self._runner, "127.0.0.1", 0)
@@ -232,3 +237,37 @@ class TestClaudeStream:
         assert headers["x-agent-id"] == "demo/main"
         assert headers["x-session-id"] == "sess-1"
         assert "extra_headers" not in body
+
+
+class TestListModels:
+    """list_models 是给调用方探测端点能力用的（如 vLLM 的 max_model_len），
+    它和 chat 一样要带 per-call header、走代理，并且非 OpenAI 端点**不发请求**。"""
+
+    async def test_returns_raw_entries_with_headers(self):
+        async with RecordingServer() as server:
+            client = OpenAIClient(base_url=server.base_url, api_key="k", model="m")
+            models = await client.list_models(extra_headers=IDENTITY)
+            await client.aclose()
+
+        assert models == [{"id": "m", "max_model_len": 24576}]
+        headers, _ = server.requests[0]
+        assert headers["x-agent-id"] == "demo/main"
+        assert headers["Authorization"] == "Bearer k"
+
+    async def test_pool_delegates(self):
+        from flexllm import LLMClient
+
+        async with RecordingServer() as server:
+            client = LLMClient(base_url=server.base_url, api_key="k", model="m")
+            models = await client.list_models(extra_headers=IDENTITY)
+            await client.aclose()
+        assert models[0]["id"] == "m"
+
+    async def test_claude_does_not_probe(self):
+        import pytest
+
+        from flexllm import LLMClient
+
+        client = LLMClient(model="claude-x", api_key="k", provider="claude")
+        with pytest.raises(NotImplementedError):
+            await client.list_models()
