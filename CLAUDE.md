@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-flexllm 是一个高性能 LLM 客户端库，支持批量处理、响应缓存和断点续传。支持 OpenAI 兼容 API（vLLM、Ollama、DeepSeek 等）、Google Gemini API 和 Anthropic Claude API。
+flexllm 是一个高性能 LLM 客户端库，支持批量处理、响应缓存和断点续传。支持 OpenAI 兼容 API（vLLM、Ollama、DeepSeek 等）、Google Gemini API、Anthropic Claude API 和 Vertex AI（经 Gemini provider + `use_vertex_ai=True`）。所有 API 调用支持 HTTP/SOCKS4/SOCKS5 正向代理。另含语音转录（`transcribe`）与合成（`speak`）。
 
 ## 常用命令
 
@@ -30,9 +30,11 @@ flexllm ask "列出3种语言" --schema json  # 结构化 JSON 输出
 flexllm ask "写个快排" -x             # 提取代码块
 flexllm ask -f code.py "解释代码"     # 附加文件内容
 flexllm chat                          # 交互式聊天
+flexllm chat-web                      # Web 聊天界面（浏览器访问）
 flexllm batch in.jsonl -o out.jsonl   # 批量处理（支持断点续传）
 flexllm batch in.jsonl -o out.jsonl --schema @schema.json  # 批量结构化输出
 flexllm list                          # 列出配置模型
+flexllm models                        # 列出远端可用模型
 flexllm set-model gpt-4               # 设置默认模型
 flexllm test                          # 测试连接
 flexllm init                          # 初始化配置文件
@@ -40,6 +42,9 @@ flexllm mock                          # 启动 Mock LLM 服务器（测试用）
 flexllm mock --qa qa.jsonl            # Mock 服务使用 QA 数据集确定性回复
 flexllm pricing gpt-4                 # 查询模型定价
 flexllm credits                       # 查询 API Key 余额
+flexllm transcribe a.wav -m glm-asr   # 语音转录（-f srt 出字幕，支持批量并发）
+flexllm speak "你好" -m glm-tts        # 语音合成
+flexllm install-skill                 # 安装 flexllm skill 到 Claude Code
 
 # HTTP API 服务器（微调模型部署）
 flexllm serve -m model-name -s "System prompt" -p 8000
@@ -52,21 +57,22 @@ LLMClient = LLMClientPool (统一入口，单/多 endpoint 均使用此类)
     │
     ├── 单 endpoint 模式：自动创建底层客户端
     │   ├── OpenAIClient (OpenAI 兼容 API: vLLM/Ollama/DeepSeek 等)
-    │   ├── GeminiClient (Google Gemini API)
+    │   ├── GeminiClient (Google Gemini API；use_vertex_ai=True 时走 Vertex AI)
     │   └── ClaudeClient (Anthropic Claude API)
     │
     ├── 多 endpoint 模式：负载均衡
     │   └── ProviderRouter (容量感知，全饱和时退回轮询)
     │
-    └── 所有客户端继承自 LLMClientBase (抽象基类)
-            ├── ConcurrentRequester (async_api/ 异步并发引擎)
+    └── 所有客户端继承自 LLMClientBase (抽象基类, clients/base.py)
+            ├── ConcurrentRequester (async_api/ 异步并发引擎，含代理/SOCKS 支持)
             ├── ResponseCache (cache/ 响应缓存，使用 flaxkv2 LMDB)
             ├── CostTracker (pricing/ 成本追踪)
-            └── ImageProcessor (msg_processors/ 图片处理)
+            └── UnifiedProcessor (msg_processors/ 图片/音频统一预处理)
 
-高级客户端：
-    ├── MllmClient (多模态 LLM，支持图片/视频输入)
-    ├── ChainOfThoughtClient (思维链推理)
+高级客户端（clients/）：
+    ├── MllmClient (mllm.py，多模态 LLM，支持图片/视频/音频输入)
+    ├── AudioClient (audio.py，语音转录/合成)
+    ├── ChainOfThoughtClient (chain_of_thought.py，思维链推理)
     └── batch_tools/ (MllmTableProcessor, MllmFolderProcessor)
 ```
 
@@ -100,7 +106,7 @@ tests/
 - `GEMINI_API_KEY` - Gemini 测试
 - `SILICONFLOW_API_KEY` - SiliconFlow 测试
 
-pytest 配置已启用 `asyncio_mode = auto`，异步测试函数会自动运行。
+pytest 配置（`pytest.ini`）已启用 `asyncio_mode = auto`，异步测试函数会自动运行。
 
 ## CLI 配置
 
@@ -113,40 +119,24 @@ pytest 配置已启用 `asyncio_mode = auto`，异步测试函数会自动运行
 
 ## 发版流程
 
-当用户说"更新发版"时，执行以下步骤：
+当用户说"更新发版 / bump 版本"时，四步即可（直接在 main 上操作）：
 
 ```bash
-# 1. 确保 dev 分支已 push
-git push origin dev
+# 1. 更新版本号（flexllm/__init__.py 中的 __version__）
+#    根据改动类型决定：patch(x.x.+1) / minor(x.+1.0) / major(+1.0.0)
 
-# 2. 切换到 main 分支并 rebase dev
-git checkout main
-git pull origin main
-git rebase dev
-
-# 3. 更新版本号（flexllm/__init__.py 中的 __version__）
-# 根据改动类型决定版本号：patch(x.x.+1) / minor(x.+1.0) / major(+1.0.0)
-
-# 4. 提交版本更新
+# 2. 提交版本号
 git add flexllm/__init__.py
 git commit -m "chore: bump version to x.x.x"
 
-# 5. 生成 CHANGELOG 并创建 tag
-git-cliff --tag vX.X.X -o CHANGELOG.md
-git add CHANGELOG.md
-git commit -m "chore(release): vX.X.X"
-git tag vX.X.X
+# 3. 打 tag
+git tag vx.x.x
 
-# 6. 推送（会触发 pre-push 测试和 GitHub Action 创建 Release）
-git push origin main
-git push origin vX.X.X
+# 4. 推送（pre-push 会跑单测，GitHub Action 自动创建 Release）
+git push origin main && git push origin vx.x.x
 ```
 
-或使用发版脚本（需先手动更新版本号）：
-```bash
-./scripts/release.sh vX.X.X
-git push origin main && git push origin vX.X.X
-```
+**不要**本地跑 git-cliff 生成 CHANGELOG.md —— 推 tag 后 `gh-release.yml` 会自动用 git-cliff 生成 release notes。
 
 ## 代码规范
 
@@ -180,3 +170,4 @@ git push --no-verify
   其它包间接装了一堆 `[test]` 里没声明的依赖，会把缺失掩盖掉。测试新增依赖时，
   务必确认它在 `[test]` extra 里声明了。
 - **GitHub Actions 发版**（`gh-release.yml`）：推送 `v*` tag 时触发，使用 git-cliff 生成 changelog 并创建 GitHub Release
+- **GitHub Actions 发包**（`python-publish.yml`）：发布到 PyPI
