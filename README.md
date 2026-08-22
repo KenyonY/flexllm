@@ -67,7 +67,9 @@ results = await client.chat_completions_batch(messages_list, output_jsonl="resul
 | **Response Caching**       | Built-in caching with TTL and IPC multi-process sharing                         |
 | **Cost Tracking**          | Real-time cost monitoring with budget control                                   |
 | **High-Performance Async** | Fine-grained concurrency control, QPS limiting, and streaming                   |
-| **Multi-Provider**         | Supports OpenAI-compatible APIs, Gemini, Claude                                 |
+| **Multi-Provider**         | Supports OpenAI-compatible APIs, Gemini, Claude, Vertex AI                      |
+| **Speech**                 | Audio transcription (text/SRT, batch) and text-to-speech via `flexllm transcribe` / `flexllm speak` |
+| **Proxy Support**          | HTTP/HTTPS and SOCKS4/SOCKS5 forward proxies for all API calls                  |
 | **Multimodal Preprocessing** | Auto-convert local files/URLs to base64 for `image_url`, `video_url`, `audio_url`, `input_audio` |
 | **Thinking Mode**          | Unified reasoning interface for DeepSeek-R1, Qwen3, Claude, Gemini |
 
@@ -328,6 +330,7 @@ flexllm ask -f a.py -f b.py "Compare these"      # Multiple files
 # Interactive chat
 flexllm chat
 flexllm chat -f data.csv "Analyze this data"
+flexllm chat-web           # Web chat interface (browser)
 
 # Batch processing with cost tracking
 flexllm batch input.jsonl -o output.jsonl --track-cost
@@ -501,6 +504,9 @@ LLMClient(
     max_qps: float = None,         # Max requests per second
     retry_times: int = 3,          # Retry count on failure
     timeout: int = 120,            # Request timeout (seconds)
+    proxy: str = None,             # Forward proxy: http(s):// or socks4/socks5/socks5h://
+                                   # (SOCKS requires: pip install "flexllm[socks]")
+    use_vertex_ai: bool = False,   # Vertex AI mode (Gemini provider; also: project_id, location, credentials)
 )
 ```
 
