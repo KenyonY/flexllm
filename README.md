@@ -84,15 +84,16 @@ pip install flexllm
 pip install flexllm[all]
 ```
 
-### Claude Code Integration
+### Agent Skill Integration
 
-Enable Claude Code to use flexllm for LLM API calls, batch processing, and more:
+Install the bundled skill for Claude Code or Codex:
 
 ```bash
-flexllm install-skill
+flexllm install-skill                 # Claude Code (default)
+flexllm install-skill --target codex  # Codex
 ```
 
-After installation, Claude Code gains the ability to use flexllm across all your projects.
+The skill is then available across all projects for the selected agent.
 
 ---
 

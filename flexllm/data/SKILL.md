@@ -23,7 +23,7 @@ LLM 调用首选工具。**所有 CLI 用法以 `flexllm <cmd> --help` 为准**�
 | `set-model` / `init` / `test` | 设置默认模型 / 初始化配置 / 测试连接 |
 | `pricing` / `credits` | 查询定价 / API Key 余额 |
 | `version` / `--version` | 版本信息 |
-| `install-skill` | 安装本 skill 到 `~/.claude/skills/` |
+| `install-skill` | 安装本 skill；默认 Claude Code，`--target codex` 安装到 Codex |
 
 参数细节一律 `flexllm <cmd> --help`，不要凭记忆猜。
 

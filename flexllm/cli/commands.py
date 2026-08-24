@@ -22,6 +22,21 @@ from .utils import (
     resolve_model_config,
 )
 
+SKILL_TARGETS = {
+    "claude": (".claude", "Claude Code"),
+    "codex": (".agents", "Codex"),
+}
+
+
+def get_skill_target_dir(target: str) -> tuple[Path, str]:
+    """Return the user-level skill directory and display name for an agent."""
+    try:
+        config_dir, agent_name = SKILL_TARGETS[target]
+    except KeyError as exc:
+        choices = ", ".join(SKILL_TARGETS)
+        raise ValueError(f"未知 skill 安装目标: {target}（可选: {choices}）") from exc
+    return Path.home() / config_dir / "skills" / "flexllm", agent_name
+
 
 def _count_batch_output(output_path: str, total: int) -> int:
     """从输出 JSONL 统计成功条数（输出文件是断点续传的事实来源）
@@ -2787,12 +2802,18 @@ models:
             print(f"flexllm {v}")
 
     @app.command("install-skill")
-    def install_skill():
-        """安装 Claude Code skill 文件到 ~/.claude/skills/
+    def install_skill(
+        target: Annotated[
+            str,
+            Option("--target", help="安装目标 agent: claude 或 codex"),
+        ] = "claude",
+    ):
+        """安装 skill 文件到 Claude Code 或 Codex。
 
         \b
         Examples:
-          flexllm install-skill                    # 安装 skill 文件
+          flexllm install-skill                    # 安装到 Claude Code（默认）
+          flexllm install-skill --target codex     # 安装到 Codex
         """
         import shutil
 
@@ -2807,14 +2828,24 @@ models:
                 doc="flexllm install-skill --help",
             )
 
-        skill_dir = Path.home() / ".claude" / "skills" / "flexllm"
+        try:
+            skill_dir, agent_name = get_skill_target_dir(target)
+        except ValueError as e:
+            cli_error(
+                ErrorType.INVALID_ARGS,
+                str(e),
+                context={"target": target, "expected": list(SKILL_TARGETS)},
+                suggestion="使用 --target claude 或 --target codex",
+                doc="flexllm install-skill --help",
+            )
         skill_dst = skill_dir / "SKILL.md"
 
         try:
             skill_dir.mkdir(parents=True, exist_ok=True)
             shutil.copy2(skill_src, skill_dst)
             print(f"已安装 skill 文件到: {skill_dst}")
-            print("Claude Code 现在可以使用 flexllm skill 了")
+            invocation = "/flexllm" if target == "claude" else "$flexllm"
+            print(f"{agent_name} 现在可以使用 {invocation} 调用 flexllm skill")
         except Exception as e:
             cli_error(
                 ErrorType.IO_ERROR,
@@ -2823,6 +2854,6 @@ models:
                     "exception_type": type(e).__name__,
                     "dst_path": str(skill_dst),
                 },
-                suggestion="检查 ~/.claude/skills/ 的写权限",
+                suggestion=f"检查 {skill_dir.parent} 的写权限",
                 doc="flexllm install-skill --help",
             )
