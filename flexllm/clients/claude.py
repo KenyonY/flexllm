@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 from ..async_api import create_proxied_session
 from ..cache import ResponseCacheConfig
-from .base import LLMClientBase, ToolCall
+from .base import LLMClientBase, LLMRequestError, ToolCall, _decode_error_body
 
 # Anthropic Messages 流式事件的全集（含本客户端不处理但属于规范的 ping / *_stop / error）。
 # 这个集合之外的事件被当作带外信息透出，而不是静默丢弃。
@@ -509,7 +509,11 @@ class ClaudeClient(LLMClientBase):
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    raise Exception(f"HTTP {response.status}: {error_text}")
+                    raise LLMRequestError(
+                        f"HTTP {response.status}: {error_text}",
+                        status_code=response.status,
+                        response_data=_decode_error_body(error_text),
+                    )
 
                 usage_data = None
                 finish_reason = None

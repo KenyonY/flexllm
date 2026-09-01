@@ -167,6 +167,7 @@ from .clients import (
     LLMClient,
     LLMClientBase,
     LLMClientPool,
+    LLMRequestError,
     MllmClient,
     OpenAIClient,
     ProviderConfig,
@@ -199,6 +200,7 @@ from .utils import extract_code_snippets, parse_to_code, parse_to_obj
 __all__ = [
     # 客户端
     "LLMClientBase",
+    "LLMRequestError",
     "MllmClient",
     "MllmTableProcessor",
     "MllmFolderProcessor",

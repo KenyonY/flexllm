@@ -5,6 +5,7 @@ LLMClientBase - LLM 客户端抽象基类
 """
 
 import asyncio
+import json
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -39,6 +40,34 @@ if TYPE_CHECKING:
 # 向后兼容的别名（仅 tests/unit/test_resume_jsonl.py 仍在 import，库内代码直接用 batch_helpers）
 _extract_save_input = extract_save_input
 _resume_from_jsonl = resume_from_jsonl
+
+
+class LLMRequestError(RuntimeError):
+    """LLM HTTP/request failure with the upstream response preserved.
+
+    ``response_data`` is the decoded response body when available. Keeping it
+    structured lets callers consume machine-readable gateway errors without
+    parsing this exception's human-facing message.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        response_data=None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_data = response_data
+
+
+def _decode_error_body(text: str):
+    """Decode an HTTP error body, retaining non-JSON text under ``raw``."""
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return {"raw": text}
 
 
 @dataclass
@@ -471,7 +500,7 @@ class LLMClientBase(ABC):
         与 chat_completions() 行为相同，但请求失败时抛出异常而非返回 RequestResult。
 
         Raises:
-            RuntimeError: 请求失败时，包含错误信息
+            LLMRequestError: 请求失败时，包含状态码与结构化响应体（如有）
         """
         result = await self.chat_completions(
             messages=messages,
@@ -483,7 +512,14 @@ class LLMClientBase(ABC):
         from ..async_api.interface import RequestResult
 
         if isinstance(result, RequestResult):
-            raise RuntimeError(f"LLM 请求失败: status={result.status}, data={result.data}")
+            data = result.data
+            status_code = data.get("status_code") if isinstance(data, dict) else None
+            response_data = data.get("response_data") if isinstance(data, dict) else data
+            raise LLMRequestError(
+                f"LLM 请求失败: status={result.status}, data={result.data}",
+                status_code=status_code if isinstance(status_code, int) else None,
+                response_data=response_data,
+            )
         return result
 
     def chat_completions_sync(
@@ -1161,8 +1197,6 @@ class LLMClientBase(ABC):
             - return_usage=False: str 内容片段
             - return_usage=True: dict，包含 type 和对应数据
         """
-        import json
-
         import aiohttp
 
         effective_model = self._get_effective_model(model)
@@ -1193,7 +1227,11 @@ class LLMClientBase(ABC):
             ) as response:
                 if response.status != 200:
                     error_text = await response.text()
-                    raise Exception(f"HTTP {response.status}: {error_text}")
+                    raise LLMRequestError(
+                        f"HTTP {response.status}: {error_text}",
+                        status_code=response.status,
+                        response_data=_decode_error_body(error_text),
+                    )
 
                 _thinking_started = False
                 _last_usage = None

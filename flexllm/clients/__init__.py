@@ -13,7 +13,7 @@ flexllm.clients - LLM 客户端实现
 """
 
 from .audio import TranscriptionResult, segments_to_srt, segments_to_vtt
-from .base import ChatCompletionResult, LLMClientBase, ToolCall
+from .base import ChatCompletionResult, LLMClientBase, LLMRequestError, ToolCall
 from .chain_of_thought import ChainOfThoughtClient, LinearStep, Step
 from .claude import ClaudeClient
 from .gemini import GeminiClient
@@ -32,6 +32,7 @@ __all__ = [
     # 基础类
     "LLMClientBase",
     "ChatCompletionResult",
+    "LLMRequestError",
     "ToolCall",
     # 客户端
     "LLMClient",
