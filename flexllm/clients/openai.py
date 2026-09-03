@@ -6,6 +6,7 @@ OpenAI 兼容 API 客户端
 
 import logging
 import re
+from copy import deepcopy
 
 import aiohttp
 
@@ -147,7 +148,7 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         model: str,
         stream: bool = False,
         max_tokens: int = None,
-        thinking: bool | None = None,
+        thinking: bool | dict | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -157,6 +158,7 @@ class OpenAIClient(AudioMixin, LLMClientBase):
             thinking: 统一的思考控制参数
                 - False: 禁用思考（Ollama: think=False, vLLM: enable_thinking=False）
                 - True: 启用思考（Ollama: think=True, vLLM: enable_thinking=True）
+                - dict: 透传 provider 原生 thinking 配置（如 DeepSeek / GLM）
                 - None: 使用模型默认行为
 
         Note:
@@ -175,7 +177,9 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         # 提取阶段是否保留思考内容不在此处记录状态（并发/批量下实例状态会互相污染），
         # 而是由 _extract_content 按各自请求的 thinking 参数决定
         is_official_openai = bool(self._base_url) and "api.openai.com" in self._base_url
-        if thinking is not None and not is_official_openai:
+        if isinstance(thinking, dict):
+            body["thinking"] = thinking
+        elif thinking is not None and not is_official_openai:
             body["think"] = thinking  # Ollama
             body["chat_template_kwargs"] = {"enable_thinking": thinking}  # vLLM
 
@@ -217,7 +221,10 @@ class OpenAIClient(AudioMixin, LLMClientBase):
             # reasoning-parser 模式：思考内容在独立的 reasoning 字段
             reasoning = message.get("reasoning") or message.get("reasoning_content")
             if reasoning:
-                if not content and self._extract_finish_reason(response_data) != "length":
+                if not content and self._extract_finish_reason(response_data) not in {
+                    "length",
+                    "tool_calls",
+                }:
                     # parser 误判：正式回答被放入 reasoning（如 Qwen3.5 默认不思考时）。
                     # 但 finish_reason=length 且 content 为空是另一回事——思考把
                     # max_tokens 吃光了，此时 reasoning 是半截思维链，不能冒充回答。
@@ -241,6 +248,26 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         if choices:
             return choices[0].get("finish_reason") or None
         return None
+
+    def _extract_reasoning_content(self, response_data: dict) -> str | None:
+        choices = (response_data or {}).get("choices")
+        if not choices:
+            return None
+        message = choices[0].get("message", {})
+        return message.get("reasoning_content") or message.get("reasoning") or None
+
+    def _extract_assistant_message(self, response_data: dict) -> dict | None:
+        choices = (response_data or {}).get("choices")
+        if not choices or not isinstance(choices[0].get("message"), dict):
+            return None
+        message = choices[0]["message"]
+        if not (
+            message.get("tool_calls")
+            or message.get("reasoning_content")
+            or message.get("reasoning")
+        ):
+            return None
+        return deepcopy(message)
 
     def _extract_stream_content(self, data: dict) -> str | None:
         choices = data.get("choices")

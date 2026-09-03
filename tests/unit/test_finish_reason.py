@@ -56,6 +56,29 @@ class TestOpenAIExtraction:
         }
         assert client._extract_content(misparsed) == "The answer is 42"
 
+    def test_reasoning_not_promoted_during_tool_call(self):
+        client = OpenAIClient(base_url="http://x", model="deepseek-v4", api_key="k")
+        tool_round = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "reasoning_content": "I should inspect the file.",
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "inspect", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+
+        assert client._extract_content(tool_round) in (None, "")
+
 
 class TestClaudeMapping:
     @pytest.mark.parametrize(
@@ -201,6 +224,85 @@ class TestOpenAIStream:
             )
         ]
         assert events[-1] == {"type": "finish", "reason": None}
+
+    async def test_reasoning_tool_stream_emits_replayable_assistant_message(self, fake_stream):
+        fake_stream(
+            [
+                _sse(
+                    {
+                        "choices": [
+                            {
+                                "delta": {"reasoning_content": "Need weather."},
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                ),
+                _sse(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {
+                                            "index": 0,
+                                            "id": "call_weather",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "get_weather",
+                                                "arguments": '{"city":',
+                                            },
+                                        }
+                                    ]
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                ),
+                _sse(
+                    {
+                        "choices": [
+                            {
+                                "delta": {
+                                    "tool_calls": [
+                                        {"index": 0, "function": {"arguments": '"Beijing"}'}}
+                                    ]
+                                },
+                                "finish_reason": None,
+                            }
+                        ]
+                    }
+                ),
+                _sse({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+                b"data: [DONE]\n",
+            ]
+        )
+        client = OpenAIClient(base_url="http://x", model="deepseek-v4", api_key="k")
+
+        events = [
+            event
+            async for event in client.chat_completions_stream(
+                [{"role": "user", "content": "Weather?"}], return_usage=True
+            )
+        ]
+        message = next(event["message"] for event in events if event["type"] == "assistant_message")
+
+        assert message == {
+            "role": "assistant",
+            "content": None,
+            "reasoning_content": "Need weather.",
+            "tool_calls": [
+                {
+                    "id": "call_weather",
+                    "type": "function",
+                    "function": {
+                        "name": "get_weather",
+                        "arguments": '{"city":"Beijing"}',
+                    },
+                }
+            ],
+        }
 
     async def test_plain_mode_unaffected(self, fake_stream):
         """return_usage=False 仍是纯 str 流"""

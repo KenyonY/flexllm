@@ -182,6 +182,9 @@ class TestParseThinking:
         assert _parse_thinking("medium") == "medium"
         assert _parse_thinking("high") == "high"
         assert _parse_thinking("minimal") == "minimal"
+        assert _parse_thinking("xhigh") == "xhigh"
+        assert _parse_thinking("max") == "max"
+        assert _parse_thinking("ultra") == "ultra"
 
     def test_integer(self):
         from flexllm.cli.utils import parse_thinking as _parse_thinking

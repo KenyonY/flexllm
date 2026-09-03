@@ -245,7 +245,7 @@ Unified interface for DeepSeek-R1, Qwen3, Claude extended thinking, Gemini think
 ```python
 result = await client.chat_completions(
     messages,
-    thinking=True,      # Enable thinking
+    thinking=True,      # Enable where the provider supports a thinking toggle
     return_raw=True,
 )
 
@@ -254,6 +254,20 @@ parsed = client.parse_thoughts(result.data)
 print("Thinking:", parsed["thought"])
 print("Answer:", parsed["answer"])
 ```
+
+Strength controls remain provider-specific: OpenAI-compatible reasoning models
+use `reasoning_effort="low"`; Claude accepts that same convenience argument (or
+`thinking="low"`), translating it to adaptive thinking on 4.6+ and to a token
+budget on Claude 3.7/4.0-4.5. Claude 3.5 does not support extended thinking;
+4.7+ rejects manual integer budgets. Current Fable/Mythos 5 variants keep adaptive
+thinking always on, so lower `reasoning_effort` instead of disabling it. Gemini uses
+`thinking="low"`. Provider-native
+structured values such as `thinking={"type": "enabled"}` are passed through
+unchanged by the OpenAI-compatible client.
+
+With `return_usage=True`, tool-call results also carry `assistant_message`, the
+provider-native continuation payload. Replay it unchanged before the tool result;
+this preserves DeepSeek `reasoning_content` and Claude signed thinking blocks.
 
 ### Multimodal Preprocessing
 

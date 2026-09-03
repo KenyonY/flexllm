@@ -97,6 +97,7 @@ async def chat_completions_stream(
 | `thinking` | `content` | 思考片段（reasoning 模型） |
 | `content` | `content` | 正文片段 |
 | `tool_call_delta` | `tool_calls` | 工具调用增量 |
+| `assistant_message` | `message` | 工具回合结束时可原样放入下一轮的 provider 续接消息；仅在存在思考或工具状态时发送 |
 | `finish` | `reason` | 模型停止原因，OpenAI 语义：`stop` / `length`（被 max_tokens 截断）/ `tool_calls` / `content_filter` / …；provider 不给时为 `None`。**流末尾必发一次** |
 | `usage` | `usage` | token 用量，最后一条（provider 给了才有） |
 
@@ -124,6 +125,7 @@ client = OpenAIClient(
 - `thinking`: 思考模式控制
   - `False`: 禁用思考
   - `True`: 启用思考
+  - `dict`: 透传 provider 原生 `thinking` 配置
   - `None`: 使用模型默认行为
 
 **静态方法：**
@@ -153,10 +155,17 @@ client = ClaudeClient(
 ```
 
 **thinking 参数：**
-- `False`: 禁用扩展思考
-- `True`: 启用扩展思考（budget_tokens=10000）
-- `int`: 启用并指定 budget_tokens
+- `False`: 禁用扩展思考；不支持 thinking 的旧模型会省略参数
+- `True`: Claude 4.6+ 使用 adaptive thinking；Claude 3.7/4.0-4.5 使用默认 budget_tokens
+- `str`: 统一强度 `minimal/low/medium/high/xhigh/max/ultra`
+- `int`: 为 Claude 3.7/4.0-4.6 启用并指定 budget_tokens；4.7+ 会明确报错
+- `dict`: 直接传入 Anthropic 原生 thinking 配置
 - `None`: 使用模型默认行为
+
+也可传 `reasoning_effort` 作为统一强度入口。Claude 4.6+ 会生成
+`thinking={"type": "adaptive"}` 与 `output_config.effort`；Claude 3.7/4.0-4.5 自动换算为
+token 预算；Claude 3.5 及更早版本不支持该参数。
+Fable/Mythos 5 的 adaptive thinking 始终开启，传 `thinking=False` 会明确报错。
 
 **静态方法：**
 
@@ -231,10 +240,13 @@ class ChatCompletionResult:
     tool_calls: Optional[list[ToolCall]] = None
     queue_time: Optional[float] = None    # 客户端排队耗时
     finish_reason: Optional[str] = None   # 停止原因（OpenAI 语义，见 chat_completions_stream 的 finish 事件）；缓存命中为 None
+    assistant_message: Optional[dict] = None  # 下一轮应原样回传的 provider 续接消息
 ```
 
 `finish_reason == "length"` 表示输出被 `max_tokens` 截断。注意 reasoning 模型的思考
 tokens 也计入 `max_tokens`：预算过小时可能 `content` 为空而 `finish_reason == "length"`。
+当工具调用伴随独立思考状态时，下一轮应回传 `assistant_message`，不要只从正文和
+`tool_calls` 重建 assistant 消息。
 
 ### BatchResultItem
 

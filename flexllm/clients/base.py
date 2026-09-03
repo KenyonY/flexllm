@@ -9,6 +9,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Union
 
@@ -103,6 +104,11 @@ class ChatCompletionResult:
     # 响应里标准信封之外的顶层字段。网关/代理会用它挂带外信息（如"这次工具调用被策略拦了"），
     # 以前这些字段在解析时被无条件丢弃，调用方没有任何办法拿到。缓存命中时为 None。
     extra: dict | None = None
+    # 下一轮请求应原样回传的 assistant 消息。reasoning 模型可能要求携带
+    # reasoning_content（DeepSeek）或带签名的 thinking blocks（Claude），仅靠
+    # content + tool_calls 无法安全重建。没有特殊续接状态时为 None。
+    # 放在末尾以保持已有 dataclass 位置参数的兼容性。
+    assistant_message: dict | None = None
 
 
 class LLMClientBase(ABC):
@@ -244,6 +250,17 @@ class LLMClientBase(ABC):
 
     def _extract_tool_calls(self, response_data: dict) -> list[ToolCall] | None:
         """提取工具调用信息（子类可覆盖）"""
+        return None
+
+    def _extract_reasoning_content(self, response_data: dict) -> str | None:
+        """提取独立的思考文本；子类可覆盖。"""
+        return None
+
+    def _extract_assistant_message(self, response_data: dict) -> dict | None:
+        """提取可安全用于下一轮请求的 provider 原生 assistant 消息。
+
+        默认不猜响应协议。OpenAI/Claude 客户端分别保留其续接所需字段。
+        """
         return None
 
     def _extract_finish_reason(self, response_data: dict) -> str | None:
@@ -478,6 +495,8 @@ class LLMClientBase(ABC):
                 return ChatCompletionResult(
                     content=content,
                     usage=usage,
+                    reasoning_content=self._extract_reasoning_content(data.data),
+                    assistant_message=self._extract_assistant_message(data.data),
                     tool_calls=tool_calls,
                     queue_time=data.queue_time,
                     finish_reason=self._extract_finish_reason(data.data),
@@ -1234,6 +1253,9 @@ class LLMClientBase(ABC):
                     )
 
                 _thinking_started = False
+                _thinking_parts: list[str] = []
+                _content_parts: list[str] = []
+                _tool_calls: dict[int, dict] = {}
                 _last_usage = None
                 _finish_reason = None
                 async for line in response.content:
@@ -1269,6 +1291,7 @@ class LLMClientBase(ABC):
                             # 提取思考内容
                             thinking = self._extract_stream_thinking(data)
                             if thinking:
+                                _thinking_parts.append(thinking)
                                 if return_usage:
                                     yield {"type": "thinking", "content": thinking}
                                 else:
@@ -1282,6 +1305,27 @@ class LLMClientBase(ABC):
                             tool_call_deltas = self._extract_stream_tool_calls(data)
                             if tool_call_deltas:
                                 if return_usage:
+                                    for tc_delta in tool_call_deltas:
+                                        idx = tc_delta.get("index", 0)
+                                        current = _tool_calls.setdefault(
+                                            idx,
+                                            {
+                                                "id": "",
+                                                "type": "function",
+                                                "function": {"name": "", "arguments": ""},
+                                            },
+                                        )
+                                        if tc_delta.get("id"):
+                                            current["id"] = tc_delta["id"]
+                                        if tc_delta.get("type"):
+                                            current["type"] = tc_delta["type"]
+                                        function = tc_delta.get("function", {})
+                                        if function.get("name"):
+                                            current["function"]["name"] = function["name"]
+                                        if "arguments" in function:
+                                            current["function"]["arguments"] += function[
+                                                "arguments"
+                                            ]
                                     yield {
                                         "type": "tool_call_delta",
                                         "tool_calls": tool_call_deltas,
@@ -1290,6 +1334,7 @@ class LLMClientBase(ABC):
 
                             content = self._extract_stream_content(data)
                             if content:
+                                _content_parts.append(content)
                                 if _thinking_started:
                                     yield "</think>"
                                     _thinking_started = False
@@ -1305,6 +1350,21 @@ class LLMClientBase(ABC):
                     yield "</think>"
 
                 if return_usage:
+                    if _thinking_parts or _tool_calls:
+                        assistant_message = {
+                            "role": "assistant",
+                            "content": "".join(_content_parts) or None,
+                        }
+                        if _thinking_parts:
+                            assistant_message["reasoning_content"] = "".join(_thinking_parts)
+                        if _tool_calls:
+                            assistant_message["tool_calls"] = [
+                                deepcopy(tool_call) for _, tool_call in sorted(_tool_calls.items())
+                            ]
+                        yield {
+                            "type": "assistant_message",
+                            "message": assistant_message,
+                        }
                     yield {"type": "finish", "reason": _finish_reason}
                     if _last_usage:
                         yield {"type": "usage", "usage": _last_usage}

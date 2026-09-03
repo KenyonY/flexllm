@@ -398,7 +398,7 @@ def read_file_contents(paths: list[str]) -> str:
 def parse_thinking(value: str | None) -> bool | str | int | None:
     """解析 --thinking 参数值
 
-    支持: true/false/low/medium/high/minimal 或整数(budget_tokens)
+    支持: true/false/minimal/low/medium/high/xhigh/max/ultra 或整数(budget_tokens)
     """
     if value is None:
         return None
@@ -407,7 +407,7 @@ def parse_thinking(value: str | None) -> bool | str | int | None:
         return True
     if low == "false":
         return False
-    if low in ("low", "medium", "high", "minimal"):
+    if low in ("minimal", "low", "medium", "high", "xhigh", "max", "ultra"):
         return low
     try:
         return int(value)
@@ -426,6 +426,9 @@ def parse_thinking(value: str | None) -> bool | str | int | None:
                     "low",
                     "medium",
                     "high",
+                    "xhigh",
+                    "max",
+                    "ultra",
                     "minimal",
                     "<int budget_tokens>",
                 ],

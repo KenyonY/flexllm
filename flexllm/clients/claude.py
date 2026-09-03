@@ -7,6 +7,7 @@ Anthropic Claude API Client
 import json
 import logging
 import re
+from copy import deepcopy
 
 import aiohttp
 
@@ -36,6 +37,93 @@ _ANTHROPIC_ENVELOPE_KEYS = frozenset(
     {"id", "type", "role", "content", "model", "stop_reason", "stop_sequence", "usage"}
 )
 
+_CLAUDE_LEGACY_THINKING_BUDGETS = {
+    "minimal": 1024,
+    "low": 4000,
+    "medium": 8000,
+    "high": 16000,
+    "xhigh": 32000,
+    "max": 32000,
+    "ultra": 32000,
+}
+_CLAUDE_ADAPTIVE_EFFORTS = {
+    "minimal": "low",
+    "low": "low",
+    "medium": "medium",
+    "high": "high",
+    "xhigh": "max",
+    "max": "max",
+    "ultra": "max",
+}
+
+
+def _claude_version(model: str) -> tuple[int, int | None] | None:
+    """Extract the Claude generation from common direct/Bedrock-style ids."""
+    normalized = model.lower().replace("_", "-").replace(".", "-")
+    match = re.search(
+        r"claude-(?:opus-|sonnet-|haiku-|fable-|mythos-)?(\d+)(?:-(\d+))?",
+        normalized,
+    )
+    if not match:
+        return None
+    return int(match.group(1)), int(match.group(2)) if match.group(2) else None
+
+
+def _claude_thinking_mode(model: str) -> str:
+    """Return ``unsupported``, ``manual``, or ``adaptive`` for a Claude id."""
+    if "claude-mythos-preview" in model.lower().replace("_", "-"):
+        return "adaptive"
+    version = _claude_version(model)
+    if version is None:
+        return "unsupported"
+    major, minor = version
+    if major == 3:
+        return "manual" if minor == 7 else "unsupported"
+    if major == 4:
+        return "manual" if minor is None or minor <= 5 else "adaptive"
+    return "adaptive" if major >= 5 else "unsupported"
+
+
+def _allows_manual_thinking(model: str) -> bool:
+    """Claude 4.6 still accepts manual budgets; 4.7+ rejects them."""
+    mode = _claude_thinking_mode(model)
+    if mode == "manual":
+        return True
+    return _claude_version(model) == (4, 6)
+
+
+def _always_uses_adaptive_thinking(model: str) -> bool:
+    """Current Fable/Mythos 5 models cannot disable adaptive thinking."""
+    normalized = model.lower().replace("_", "-").replace(".", "-")
+    return bool(
+        "claude-mythos-preview" in normalized
+        or re.search(r"claude-(?:fable|mythos)-5(?:-|$)", normalized)
+    )
+
+
+def _is_claude_model(model: str) -> bool:
+    return "claude" in model.lower()
+
+
+def _normalize_reasoning_effort(
+    effort: str, *, adaptive: bool, model: str | None = None
+) -> str | int:
+    normalized = effort.strip().lower()
+    mapping = dict(_CLAUDE_ADAPTIVE_EFFORTS) if adaptive else _CLAUDE_LEGACY_THINKING_BUDGETS
+    version = _claude_version(model or "")
+    if adaptive and (
+        (version is not None and (version[0] >= 5 or version >= (4, 7)))
+        and "mythos-preview" not in (model or "").lower()
+    ):
+        mapping["xhigh"] = "xhigh"
+    try:
+        return mapping[normalized]
+    except KeyError as exc:
+        supported = ", ".join(mapping)
+        raise ValueError(
+            f"Unsupported Claude reasoning effort {effort!r}; choose: {supported}"
+        ) from exc
+
 
 class ClaudeClient(LLMClientBase):
     """
@@ -60,9 +148,11 @@ class ClaudeClient(LLMClientBase):
         >>> print("答案:", parsed["answer"])
 
     thinking 参数值:
-        - False: 禁用扩展思考
-        - True: 启用扩展思考（默认 budget_tokens=10000）
-        - int: 启用扩展思考并指定 budget_tokens
+        - False: 禁用扩展思考（不支持 thinking 的旧模型等价于省略参数）
+        - True: Claude 4.6+ 使用 adaptive thinking，3.7/4.0-4.5 使用默认 token 预算
+        - str: 设置思考强度（minimal/low/medium/high/xhigh/max/ultra）
+        - int: 为旧版 Claude 启用扩展思考并指定 budget_tokens
+        - dict: 直接使用 Anthropic 原生 thinking 配置
         - None: 使用模型默认行为
     """
 
@@ -138,7 +228,8 @@ class ClaudeClient(LLMClientBase):
         temperature: float = None,
         top_p: float = None,
         top_k: int = None,
-        thinking: bool | int | None = None,
+        thinking: bool | str | int | dict | None = None,
+        reasoning_effort: str | None = None,
         response_format: dict = None,
         **kwargs,
     ) -> dict:
@@ -149,8 +240,13 @@ class ClaudeClient(LLMClientBase):
             thinking: 扩展思考控制参数
                 - False: 禁用扩展思考
                 - True: 启用扩展思考（默认 budget_tokens=10000）
-                - int: 启用扩展思考并指定 budget_tokens
+                - str: 使用统一强度（minimal/low/medium/high/xhigh/max/ultra）
+                - int: 启用扩展思考并指定 budget_tokens（旧版 Claude）
+                - dict: 直接使用 Anthropic 原生 thinking 配置
                 - None: 使用模型默认行为
+
+                Claude 4.6+ 的 True/str 会转换为 adaptive thinking；旧版 Claude
+                使用 budget_tokens。reasoning_effort 是 str 强度的等价统一入口。
 
                 Claude API 要求 max_tokens > thinking.budget_tokens。启用思考且
                 max_tokens ≤ budget_tokens 时（含默认 max_tokens=4096 的情况），
@@ -188,13 +284,87 @@ class ClaudeClient(LLMClientBase):
                     else json_instruction
                 )
 
-        # Claude 扩展思考模式：API 要求 max_tokens > budget_tokens，
-        # 不满足时自动抬高 max_tokens = budget_tokens + 4096（见 docstring）
+        is_claude = _is_claude_model(model)
+        thinking_mode = _claude_thinking_mode(model) if is_claude else "unsupported"
+        adaptive = thinking_mode == "adaptive"
+        allows_manual = _allows_manual_thinking(model) if is_claude else False
+        always_adaptive = _always_uses_adaptive_thinking(model) if is_claude else False
+        effort = thinking if isinstance(thinking, str) else reasoning_effort
+        native_thinking = dict(thinking) if isinstance(thinking, dict) else None
+        if effort is not None and not is_claude:
+            # Anthropic-compatible endpoints may expose other model families.
+            # Preserve their explicit wire parameter instead of applying Claude budgets.
+            if reasoning_effort is not None:
+                kwargs["reasoning_effort"] = reasoning_effort
+            effort = None
+
+        control_requested = (
+            thinking is True
+            or isinstance(thinking, str)
+            or (isinstance(thinking, int) and not isinstance(thinking, bool) and thinking > 0)
+            or (native_thinking is not None and native_thinking.get("type") != "disabled")
+            or reasoning_effort is not None
+        )
+        if is_claude and thinking_mode == "unsupported" and control_requested:
+            raise ValueError(
+                f"Claude model {model!r} does not support extended thinking; "
+                "use Claude 3.7 or Claude 4+"
+            )
+        if (
+            is_claude
+            and thinking_mode == "unsupported"
+            and native_thinking is not None
+            and native_thinking.get("type") == "disabled"
+        ):
+            native_thinking = None
+        if (
+            is_claude
+            and always_adaptive
+            and (
+                thinking is False
+                or (native_thinking is not None and native_thinking.get("type") == "disabled")
+            )
+        ):
+            raise ValueError(f"Claude model {model!r} has always-on adaptive thinking")
+        if (
+            is_claude
+            and not allows_manual
+            and (
+                (isinstance(thinking, int) and not isinstance(thinking, bool) and thinking > 0)
+                or (native_thinking is not None and native_thinking.get("type") == "enabled")
+            )
+        ):
+            raise ValueError(
+                f"Claude model {model!r} requires adaptive thinking and does not accept "
+                "manual budget_tokens"
+            )
+
+        # Claude 扩展思考模式：旧版 API 要求 max_tokens > budget_tokens，
+        # 不满足时自动抬高 max_tokens = budget_tokens + 4096（见 docstring）。
         budget_tokens = None
-        if thinking is True:
-            budget_tokens = 10000
-        elif isinstance(thinking, int) and thinking > 0:
+        if is_claude and thinking is True:
+            if adaptive:
+                native_thinking = {"type": "adaptive"}
+            else:
+                budget_tokens = 10000
+        elif (
+            is_claude
+            and isinstance(thinking, int)
+            and not isinstance(thinking, bool)
+            and thinking > 0
+        ):
             budget_tokens = thinking
+        elif is_claude and effort is not None and (thinking is None or isinstance(thinking, str)):
+            normalized_effort = _normalize_reasoning_effort(effort, adaptive=adaptive, model=model)
+            if adaptive:
+                native_thinking = {"type": "adaptive"}
+            else:
+                budget_tokens = normalized_effort
+
+        if native_thinking and native_thinking.get("type") == "enabled":
+            native_budget = native_thinking.get("budget_tokens")
+            if isinstance(native_budget, int) and native_budget > 0:
+                budget_tokens = native_budget
         if budget_tokens is not None and max_tokens <= budget_tokens:
             max_tokens = budget_tokens + 4096
 
@@ -215,10 +385,19 @@ class ClaudeClient(LLMClientBase):
         if top_k is not None:
             body["top_k"] = top_k
 
-        if budget_tokens is not None:
+        if native_thinking is not None:
+            body["thinking"] = native_thinking
+        elif budget_tokens is not None:
             body["thinking"] = {"type": "enabled", "budget_tokens": budget_tokens}
-        elif thinking is False:
+        elif thinking is False and thinking_mode != "unsupported":
             body["thinking"] = {"type": "disabled"}
+
+        if adaptive and effort is not None and body.get("thinking", {}).get("type") == "adaptive":
+            output_config = dict(kwargs.pop("output_config", {}) or {})
+            output_config.setdefault(
+                "effort", _normalize_reasoning_effort(effort, adaptive=True, model=model)
+            )
+            body["output_config"] = output_config
 
         # 透传其他参数，但排除 response_format（已通过 prompt 注入）
         kwargs.pop("response_format", None)
@@ -289,6 +468,20 @@ class ClaudeClient(LLMClientBase):
                     }
                 ],
             }
+
+        # flexllm 的响应续接消息会保留 Claude 原生 content blocks。带签名的
+        # thinking/redacted_thinking 必须逐字节回传；若再从统一 tool_calls 重建，
+        # 会丢签名并重复 tool_use。
+        if (
+            role == "assistant"
+            and isinstance(content, list)
+            and any(
+                isinstance(item, dict)
+                and item.get("type") in {"thinking", "redacted_thinking", "tool_use"}
+                for item in content
+            )
+        ):
+            return {"role": "assistant", "content": deepcopy(content)}
 
         # assistant 消息中包含 tool_calls → Claude tool_use content block
         if role == "assistant" and msg.get("tool_calls"):
@@ -411,6 +604,31 @@ class ClaudeClient(LLMClientBase):
             logger.warning(f"Failed to extract content: {e}")
             return None
 
+    def _extract_reasoning_content(self, response_data: dict) -> str | None:
+        thoughts = [
+            block.get("thinking", "")
+            for block in (response_data or {}).get("content", [])
+            if block.get("type") == "thinking"
+        ]
+        return "".join(thoughts) or None
+
+    def _extract_assistant_message(self, response_data: dict) -> dict | None:
+        content = (response_data or {}).get("content")
+        if not isinstance(content, list) or not any(
+            isinstance(block, dict)
+            and block.get("type") in {"thinking", "redacted_thinking", "tool_use"}
+            for block in content
+        ):
+            return None
+        message = {"role": "assistant", "content": deepcopy(content)}
+        tool_calls = self._extract_tool_calls(response_data)
+        if tool_calls:
+            message["tool_calls"] = [
+                {"id": call.id, "type": call.type, "function": deepcopy(call.function)}
+                for call in tool_calls
+            ]
+        return message
+
     def _extract_extra(self, data: dict) -> dict | None:
         """Anthropic 的响应信封与 OpenAI 不同，不能用基类那套字段名判定。"""
         extra = {k: v for k, v in data.items() if k not in _ANTHROPIC_ENVELOPE_KEYS}
@@ -517,7 +735,8 @@ class ClaudeClient(LLMClientBase):
 
                 usage_data = None
                 finish_reason = None
-                # 跟踪流式 tool_use blocks
+                # 同时保留 UI 所需增量和下一轮必须原样回传的 Claude content blocks。
+                content_blocks: dict[int, dict] = {}
                 tool_use_blocks = {}  # {block_index: {"id", "name", "arguments"}}
                 current_block_index = -1
 
@@ -541,6 +760,8 @@ class ClaudeClient(LLMClientBase):
                             if event_type == "content_block_start":
                                 current_block_index = data.get("index", 0)
                                 block = data.get("content_block", {})
+                                if isinstance(block, dict):
+                                    content_blocks[current_block_index] = deepcopy(block)
                                 if block.get("type") == "tool_use":
                                     tool_use_blocks[current_block_index] = {
                                         "id": block.get("id", ""),
@@ -573,8 +794,21 @@ class ClaudeClient(LLMClientBase):
                                 # 思考内容
                                 if delta_type == "thinking_delta":
                                     thinking = delta.get("thinking")
+                                    if thinking and idx in content_blocks:
+                                        content_blocks[idx]["thinking"] = (
+                                            content_blocks[idx].get("thinking", "") + thinking
+                                        )
                                     if thinking and return_usage:
                                         yield {"type": "thinking", "content": thinking}
+                                    continue
+
+                                # thinking block 的签名是下一轮工具调用请求的必需状态。
+                                if delta_type == "signature_delta":
+                                    signature = delta.get("signature", "")
+                                    if signature and idx in content_blocks:
+                                        content_blocks[idx]["signature"] = (
+                                            content_blocks[idx].get("signature", "") + signature
+                                        )
                                     continue
 
                                 # tool_use 的 input_json_delta
@@ -597,6 +831,10 @@ class ClaudeClient(LLMClientBase):
                                 if delta_type == "text_delta":
                                     text = delta.get("text")
                                     if text:
+                                        if idx in content_blocks:
+                                            content_blocks[idx]["text"] = (
+                                                content_blocks[idx].get("text", "") + text
+                                            )
                                         if return_usage:
                                             yield {"type": "content", "content": text}
                                         else:
@@ -637,6 +875,49 @@ class ClaudeClient(LLMClientBase):
                             continue
 
                 if return_usage:
+                    continuation_blocks = [
+                        deepcopy(block) for _, block in sorted(content_blocks.items())
+                    ]
+                    if any(
+                        block.get("type") in {"thinking", "redacted_thinking", "tool_use"}
+                        for block in continuation_blocks
+                    ):
+                        for idx, block in sorted(content_blocks.items()):
+                            if block.get("type") != "tool_use" or idx not in tool_use_blocks:
+                                continue
+                            arguments = tool_use_blocks[idx]["arguments"]
+                            if arguments:
+                                try:
+                                    block["input"] = json.loads(arguments)
+                                except json.JSONDecodeError:
+                                    # 保留不完整 JSON 只能制造一个下一轮必然失败的请求；
+                                    # 流结束时工具参数应完整，因此明确暴露协议错误。
+                                    raise LLMRequestError(
+                                        f"Invalid streamed Claude tool input: {arguments!r}"
+                                    )
+                        continuation_blocks = [
+                            deepcopy(block) for _, block in sorted(content_blocks.items())
+                        ]
+                        assistant_message = {
+                            "role": "assistant",
+                            "content": continuation_blocks,
+                        }
+                        if tool_use_blocks:
+                            assistant_message["tool_calls"] = [
+                                {
+                                    "id": block["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": block["name"],
+                                        "arguments": block["arguments"],
+                                    },
+                                }
+                                for _, block in sorted(tool_use_blocks.items())
+                            ]
+                        yield {
+                            "type": "assistant_message",
+                            "message": assistant_message,
+                        }
                     yield {"type": "finish", "reason": finish_reason}
                     if usage_data:
                         yield {"type": "usage", "usage": usage_data}

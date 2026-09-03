@@ -514,7 +514,7 @@ CLI 中通过 JSONL 每行的 `params` 字段使用（嵌套，不平铺）：
 
 ## Thinking 模式
 
-### OpenAI 兼容（DeepSeek 等）
+### OpenAI 兼容（DeepSeek、GLM 等）
 
 ```python
 from flexllm import OpenAIClient
@@ -525,10 +525,11 @@ client = OpenAIClient(
     model="deepseek-reasoner",
 )
 
-# 启用思考
+# 透传 provider 原生 thinking；reasoning_effort 等其他参数也会原样传递
 result = await client.chat_completions(
     messages,
-    thinking=True,
+    thinking={"type": "enabled"},
+    reasoning_effort="low",
     return_raw=True,
 )
 
@@ -545,13 +546,13 @@ from flexllm import ClaudeClient
 
 client = ClaudeClient(
     api_key="your-key",
-    model="claude-sonnet-4-20250514",
+    model="claude-sonnet-4-6",
 )
 
-# 启用扩展思考
+# Claude 4.6+：自动转换为 adaptive thinking + output_config.effort
 result = await client.chat_completions(
     messages,
-    thinking=True,       # 或 thinking=15000 指定 budget_tokens
+    reasoning_effort="low",
     return_raw=True,
 )
 
@@ -560,6 +561,16 @@ parsed = ClaudeClient.parse_thoughts(result.data)
 print("思考过程:", parsed["thought"])
 print("最终答案:", parsed["answer"])
 ```
+
+`thinking="low"` 与 `reasoning_effort="low"` 等价。Claude 3.7/4.0-4.5 会把强度映射为
+`budget_tokens`；4.6 默认 adaptive，但仍兼容整数预算；4.7+ 只接受 adaptive，整数预算会
+明确报错。Claude 3.5 及更早版本不支持 extended thinking，省略参数即可正常调用。
+Fable/Mythos 5 的 adaptive thinking 始终开启，不能用 `thinking=False`，应通过 effort
+控制开销。
+
+工具回合请把 `return_usage=True` 返回的 `result.assistant_message` 原样放入下一轮消息，
+再追加工具结果。该字段保留 DeepSeek 的 `reasoning_content` 以及 Claude 带签名的
+thinking blocks；用 `content + tool_calls` 自行重建会丢失必要的 provider 状态。
 
 ### Gemini
 
