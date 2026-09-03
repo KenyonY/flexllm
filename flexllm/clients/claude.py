@@ -66,7 +66,12 @@ def _claude_version(model: str) -> tuple[int, int | None] | None:
     )
     if not match:
         return None
-    return int(match.group(1)), int(match.group(2)) if match.group(2) else None
+    minor_text = match.group(2)
+    # Direct and Bedrock-style ids commonly suffix an unversioned generation
+    # with YYYYMMDD or YYYY-MM-DD.  Do not mistake that date for a minor
+    # generation (for example, claude-opus-4-20250514 is Claude 4.0).
+    minor = int(minor_text) if minor_text and len(minor_text) <= 2 else None
+    return int(match.group(1)), minor
 
 
 def _claude_thinking_mode(model: str) -> str:

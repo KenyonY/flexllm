@@ -177,7 +177,15 @@ class TestClaudeClientRequestBody:
                 messages, "claude-3-5-sonnet-20241022", reasoning_effort="low"
             )
 
-    @pytest.mark.parametrize("model", ["claude-3-7-sonnet-20250219", "claude-sonnet-4-5"])
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "claude-3-7-sonnet-20250219",
+            "claude-sonnet-4-5",
+            "claude-opus-4-20250514",
+            "claude-sonnet-4-2025-05-14",
+        ],
+    )
     def test_manual_thinking_versions_use_token_budgets(self, model):
         client = ClaudeClient(api_key="test-key")
         body = client._build_request_body(
