@@ -190,6 +190,10 @@ async for chunk in client.chat_completions_stream(messages):
 - **Per-Endpoint Config**: Independent `concurrency_limit` and `max_qps` for each endpoint
 - **Full Feature Support**: Checkpoint recovery, caching, cost tracking all work with Pool
 
+Pools can also be named in `~/.flexllm/config.yaml` using `models[].endpoints`, then selected
+with `flexllm ask/chat/batch -m <name>` or `LLMClient.from_config(model="<name>")`.
+See [model-level endpoint configuration](docs/advanced.md#模型级-endpoints-配置).
+
 ### Response Caching
 
 ```python

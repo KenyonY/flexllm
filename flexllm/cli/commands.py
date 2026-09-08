@@ -19,6 +19,7 @@ from .utils import (
     query_credits,
     query_credits_by_key,
     read_file_contents,
+    resolve_client_kwargs,
     resolve_model_config,
 )
 
@@ -180,9 +181,11 @@ def register_commands(app):
         parts = [p for p in [file_content, stdin_content, prompt] if p]
         full_prompt = "\n\n".join(parts)
 
-        model_id, base_url, api_key = resolve_model_config(
+        client_options = resolve_client_kwargs(
             model, base_url=base_url, api_key=api_key, required=True
         )
+        model_id = client_options.get("model")
+        base_url = client_options.get("base_url")
 
         config = get_config()
         if not system:
@@ -217,13 +220,14 @@ def register_commands(app):
                     "messages": messages,
                     "params": model_params,
                     "prefix": prefix,
+                    "endpoint_count": len(client_options.get("endpoints", [])) or 1,
                 }
             )
 
         async def _ask():
             from flexllm import LLMClient
 
-            async with LLMClient(model=model_id, base_url=base_url, api_key=api_key) as client:
+            async with LLMClient(**client_options) as client:
                 # --format json 需要真实的 usage/thinking，走 return_usage 拿 ChatCompletionResult
                 return await client.chat_completions(
                     messages, return_usage=(format == "json"), **model_params
@@ -375,10 +379,14 @@ def register_commands(app):
                 suggestion='提供 message 切到单条模式: flexllm chat "你好" --format json',
                 doc="flexllm chat --help",
             )
-        model, base_url, api_key = resolve_model_config(model, base_url, api_key)
+        model_selector = model
+        client_options = resolve_client_kwargs(model, base_url, api_key)
+        model = client_options.get("model")
+        base_url = client_options.get("base_url")
+        api_key = client_options.get("api_key")
         config = get_config()
 
-        if not base_url:
+        if not base_url and not client_options.get("endpoints"):
             cli_error(
                 ErrorType.NOT_FOUND,
                 "未配置 base_url",
@@ -388,11 +396,11 @@ def register_commands(app):
             )
 
         if not system_prompt:
-            system_prompt = config.get_system(model)
+            system_prompt = config.get_system(model_selector)
         if not user_template:
-            user_template = config.get_user_template(model)
+            user_template = config.get_user_template(model_selector)
 
-        model_params = config.get_model_params(model)
+        model_params = config.get_model_params(model_selector)
         if temperature is not None:
             model_params["temperature"] = temperature
         if max_tokens is not None:
@@ -424,6 +432,7 @@ def register_commands(app):
             data = {
                 "action": "chat",
                 "mode": mode,
+                "endpoint_count": len(client_options.get("endpoints", [])) or 1,
                 "model": model,
                 "base_url": base_url,
                 "system": system_prompt,
@@ -446,6 +455,7 @@ def register_commands(app):
                 thinking=resolved_thinking,
                 extract=extract,
                 output_format=format,
+                client_kwargs=client_options,
             )
         elif not sys.stdin.isatty():
             cli_error(
@@ -465,6 +475,7 @@ def register_commands(app):
                 stream,
                 user_template,
                 thinking=resolved_thinking,
+                client_kwargs=client_options,
             )
 
     @app.command(name="chat-web")
@@ -959,7 +970,7 @@ def register_commands(app):
                     "batch.model": batch_config.get("model"),
                     "batch.endpoints_count": len(batch_config.get("endpoints") or []),
                 },
-                suggestion="二选一：单模型用 batch.model，多 endpoint pool 用 batch.endpoints",
+                suggestion="二选一：具名模型用 batch.model，直接配置地址列表用 batch.endpoints",
                 doc="flexllm batch --help",
             )
 
@@ -1024,6 +1035,12 @@ def register_commands(app):
                     suggestion="使用 -m 指定模型、在 batch.model 配置默认模型，或在 batch.endpoints 配置多 endpoint",
                     doc="flexllm batch --help",
                 )
+
+        named_pool_options = None
+        if model_config is not None and "endpoints" in model_config:
+            named_pool_options = resolve_client_kwargs(effective_model, base_url, api_key)
+            use_pool = "endpoints" in named_pool_options
+            endpoints_config = named_pool_options.get("endpoints")
 
         model_id = model_config.get("id", effective_model) if model_config else None
         # CLI --base-url / --api-key 覆盖 model_config 中的对应字段
@@ -1174,6 +1191,7 @@ def register_commands(app):
                         "sample_messages": messages_list[0] if messages_list else None,
                         # 第一条解析后的 per-record 参数（覆盖全局；None 表示该行无 params）
                         "sample_params": params_list[0] if params_list else None,
+                        "endpoint_count": len(endpoints_config or []) if use_pool else 1,
                     }
                 )
 
@@ -1208,6 +1226,8 @@ def register_commands(app):
                         "retry_times": batch_config["retry_times"],
                         "cache": cache_config,
                     }
+                    if named_pool_options:
+                        pool_kwargs.update(named_pool_options)
                     if effective_max_qps is not None:
                         pool_kwargs["max_qps"] = effective_max_qps
                     if batch_config.get("total_concurrency") is not None:
@@ -1218,6 +1238,7 @@ def register_commands(app):
                     async with LLMClientPool(**pool_kwargs) as pool:
                         results, summary = await pool.chat_completions_batch(
                             messages_list=messages_list,
+                            distribute=True,
                             output_jsonl=output,
                             show_progress=True,
                             return_summary=True,
@@ -1240,6 +1261,8 @@ def register_commands(app):
                         "retry_delay": batch_config["retry_delay"],
                         "cache": cache_config,
                     }
+                    if named_pool_options:
+                        client_kwargs.update(named_pool_options)
                     if effective_max_qps is not None:
                         client_kwargs["max_qps"] = effective_max_qps
 

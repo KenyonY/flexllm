@@ -228,6 +228,7 @@ class TestChatSchemaPassthrough:
             thinking=None,
             extract=False,
             output_format="text",
+            client_kwargs=None,
         ):
             received.update(model_params=model_params, thinking=thinking)
 

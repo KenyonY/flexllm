@@ -289,7 +289,7 @@ class LLMClientPool:
             # 指定配置文件 + 指定模型
             client = LLMClient.from_config("path/to/config.yaml", model="qwen-plus")
         """
-        from ..cli.config import FlexLLMConfig, get_config
+        from ..cli.config import FlexLLMConfig, get_config, model_client_kwargs
 
         cfg = FlexLLMConfig(config) if config else get_config()
         model_config = cfg.get_model_config(model)
@@ -299,30 +299,16 @@ class LLMClientPool:
                 "请检查 ~/.flexllm/config.yaml 或设置环境变量 FLEXLLM_BASE_URL"
             )
 
-        # 模型 ID 为空时，自动从 /v1/models 获取（仅 openai provider）
-        model_id = model_config.get("id")
-        if not model_id and model_config.get("provider", "openai") == "openai":
-            base_url = model_config.get("base_url")
+        init_kwargs = model_client_kwargs(model_config, **overrides)
+        # 单 endpoint 模型 ID 为空时，自动从实际目标 /v1/models 获取。
+        if not init_kwargs.get("model") and init_kwargs.get("provider", "openai") == "openai":
+            base_url = init_kwargs.get("base_url")
             if base_url:
                 from ..cli.utils import _fetch_model_id
 
-                model_id = _fetch_model_id(base_url, model_config.get("api_key", "EMPTY"))
-
-        # 构造 LLMClientPool 的参数
-        init_kwargs = {
-            "model": model_id,
-            "base_url": model_config.get("base_url"),
-            "api_key": model_config.get("api_key", "EMPTY"),
-        }
-        if "provider" in model_config:
-            init_kwargs["provider"] = model_config["provider"]
-        # 每个模型可单独配代理：CLI 走 from_config，没有这条就只能靠进程级环境变量，
-        # 而"仅此 endpoint 需经网关"正是环境变量表达不了的场景
-        if "proxy" in model_config:
-            init_kwargs["proxy"] = model_config["proxy"]
-
-        # overrides 覆盖配置值
-        init_kwargs.update(overrides)
+                init_kwargs["model"] = _fetch_model_id(
+                    base_url, init_kwargs.get("api_key", "EMPTY")
+                )
 
         instance = cls(**init_kwargs)
 

@@ -26,6 +26,21 @@ system: "You are a helpful assistant."
 # ========== 模型配置 ==========
 
 models:
+  # 多副本模型：ask/chat/batch -m qwen-pool，或 LLMClient.from_config(model="qwen-pool")
+  # 顶层 base_url 与 endpoints 二选一；endpoint 默认继承 id/api_key/provider
+  # - name: qwen-pool
+  #   id: qwen
+  #   api_key: EMPTY
+  #   provider: openai
+  #   fallback: true
+  #   endpoints:
+  #     - base_url: http://gpu1:8000/v1
+  #       concurrency_limit: 10
+  #     - base_url: http://gpu2:8000/v1
+  #       concurrency_limit: 10
+  #     - base_url: http://gpu3:8000/v1
+  #       concurrency_limit: 10
+
   # OpenAI GPT-4
   - id: gpt-4o-mini
     name: gpt-4o-mini

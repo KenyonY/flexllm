@@ -88,6 +88,12 @@ async with LLMClient(model="gpt-4", base_url="...", api_key="...") as client:
 
 ## 配置文件（重要）
 
+模型级 `models[].endpoints` 可配置多个副本，支持 `ask`、`chat`、`batch` 和
+`LLMClient.from_config(model="别名")`。模型顶层不要同时配置 `base_url`；每个
+endpoint 的 `model/api_key/provider` 默认继承模型顶层 `id/api_key/provider`，
+可逐项覆盖。`fallback: true` 启用故障切换（默认开启）。显式 `--base-url` 替换
+整个池，`--api-key` 覆盖所有副本密钥。`serve`、`chat-web` 仍只支持单地址。
+
 flexllm 用一份 YAML 集中管理多个 LLM endpoint，**不要硬编码 base_url/api_key**。
 
 **搜索顺序**（找到第一个就停）：
@@ -154,7 +160,7 @@ batch:                                   # 可选：batch 命令的调度/IO 默
   # total_max_qps: 200
 ```
 
-**字段透传规则**：模型节中除 `{id, name, provider, base_url, api_key, system, user_template, endpoints, fallback}` 这 9 个元字段外，**其余字段全部作为参数透传给 LLM API**。需要传新参数（如 `top_k`、`reasoning_effort`）直接加进去即可，无需改代码。
+**字段透传规则**：模型节中除 `{id, name, provider, base_url, api_key, system, user_template, endpoints, fallback, proxy}` 这 10 个元字段外，**其余字段全部作为参数透传给 LLM API**。需要传新参数（如 `top_k`、`reasoning_effort`）直接加进去即可，无需改代码。
 
 **batch 节只放调度/IO 参数**：模型行为参数（`temperature`/`top_p`/`top_k`/`max_tokens`/`thinking`）必须写在 `models` 节，临时覆盖用 CLI 参数。
 

@@ -266,6 +266,61 @@ pool = LLMClientPool(
 - **单条调用**（`chat_completions` / `chat_completions_stream`）：容量感知选路——在健康且未饱和的 endpoint 中选负载率（in-flight / concurrency_limit）最低者，全部饱和时退回轮询。异构 endpoint 下慢节点饱和后，流量自动流向快节点。
 - **批量调用**（`distribute=True`）：worker 模型——每个 endpoint 的 worker 数等于其并发上限，所有 worker 从共享队列抢任务，快 endpoint 周转快自然多拿任务。
 
+### 模型级 endpoints 配置
+
+在 `~/.flexllm/config.yaml`（或项目目录的 `flexllm_config.yaml`）中，
+可以给一个具名模型配置多个副本：
+
+```yaml
+default: qwen-pool
+models:
+  - name: qwen-pool
+    id: qwen
+    provider: openai
+    api_key: EMPTY
+    fallback: true
+    temperature: 0.3
+    endpoints:
+      - base_url: http://gpu1:8000/v1
+        concurrency_limit: 10
+      - base_url: http://gpu2:8000/v1
+        concurrency_limit: 10
+      - base_url: http://gpu3:8000/v1
+        concurrency_limit: 10
+```
+
+```bash
+flexllm ask -m qwen-pool "你好"
+flexllm chat -m qwen-pool "你好"             # 默认流式
+flexllm batch input.jsonl -m qwen-pool -o output.jsonl
+```
+
+```python
+from flexllm import LLMClient
+
+async with LLMClient.from_config(model="qwen-pool") as client:
+    response = await client.chat_completions("你好")
+    async for chunk in client.chat_completions_stream("你好"):
+        print(chunk, end="", flush=True)
+```
+
+- `endpoints` 必须是非空列表，每个条目必须有 `base_url`；模型顶层的 `base_url`
+  与 `endpoints` 二选一。
+- 每个 endpoint 的 `model`、`api_key`、`provider` 默认继承模型顶层的
+  `id`、`api_key`、`provider`；endpoint 内显式配置的值优先。顶层 `proxy`
+  作为代理默认值，endpoint 的 `proxy` 可单独覆盖。
+- `fallback` 默认为 `true`，设为 `false` 后失败请求不切换副本；负载分配仍生效。
+- `system`、`user_template`、生成参数仍按具名模型读取，`endpoints`、`fallback`
+  和 `proxy` 不会作为生成参数发给模型。
+- CLI 的显式 `--base-url`（或 `from_config(base_url=...)`）会替换整个地址池，
+  用于固定网关或临时单地址调用。显式 `--api-key` / `from_config(api_key=...)`
+  覆盖所有 endpoint 的密钥。
+- `batch.model: qwen-pool` 和顶层 `default: qwen-pool` 同样支持；原有
+  `batch.endpoints` 配置继续有效。`batch.model` 与 `batch.endpoints` 不能同时设置。
+- 本配置入口支持 Python `from_config()` 和 CLI `ask`、`chat`、`batch`。
+  `serve`、`chat-web` 等仍要求单个地址。其他使用 flexllm 的应用需要将
+  `endpoints` 传给客户端或使用 `from_config()`；仅依赖 flexllm 不会自动接入地址池。
+
 ### Endpoint 级别 Rate Limit
 
 每个 endpoint 可以独立配置 `concurrency_limit` 和 `max_qps`，以适应异构 endpoint 场景（不同服务性能差异大）：

@@ -35,6 +35,7 @@ def single_chat(
     thinking=None,
     extract=False,
     output_format="text",
+    client_kwargs=None,
 ):
     """单次对话
 
@@ -48,7 +49,8 @@ def single_chat(
     async def _run():
         from flexllm import LLMClient
 
-        async with LLMClient(model=model, base_url=base_url, api_key=api_key) as client:
+        options = client_kwargs or {"model": model, "base_url": base_url, "api_key": api_key}
+        async with LLMClient(**options) as client:
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
@@ -150,6 +152,7 @@ def interactive_chat(
     stream,
     user_template=None,
     thinking=None,
+    client_kwargs=None,
 ):
     """多轮交互对话
 
@@ -160,14 +163,16 @@ def interactive_chat(
     async def _run():
         from flexllm import LLMClient
 
-        async with LLMClient(model=model, base_url=base_url, api_key=api_key) as client:
+        options = client_kwargs or {"model": model, "base_url": base_url, "api_key": api_key}
+        async with LLMClient(**options) as client:
             messages = []
             if system_prompt:
                 messages.append({"role": "system", "content": system_prompt})
 
             print("\n多轮对话模式")
             print(f"模型: {model}")
-            print(f"服务器: {base_url}")
+            targets = [ep["base_url"] for ep in options.get("endpoints", [])]
+            print(f"服务器: {', '.join(targets) if targets else base_url}")
             print("输入 'quit' 或 Ctrl+C 退出")
             print("-" * 50)
 

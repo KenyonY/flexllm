@@ -55,19 +55,19 @@ def resolve_model_config(
 
     # pool 型模型（endpoints 列表）没有单一 base_url，当前命令无法使用，
     # 明确报错而不是把 endpoints 泄进请求体或发出非法请求
-    if model_config.get("endpoints") and not model_config.get("base_url"):
+    if "endpoints" in model_config and base_url is None:
         from .errors import ErrorType, cli_error
 
         cli_error(
             ErrorType.INVALID_ARGS,
-            "pool 型模型（endpoints）仅 batch 命令支持",
+            "此命令需要单个 base_url，不能使用 endpoints 模型",
             context={
                 "model": model_config.get("name", model_config.get("id")),
                 "endpoints_count": len(model_config.get("endpoints") or []),
             },
-            suggestion="此命令请改用单 endpoint 模型（flexllm list 查看），"
-            "多 endpoint 负载均衡请使用 flexllm batch 并配置 batch.endpoints",
-            doc="flexllm batch --help",
+            suggestion="改用单地址模型或显式指定 --base-url；"
+            "endpoints 模型支持 ask、chat、batch 和 LLMClient.from_config()",
+            doc="flexllm --help",
         )
 
     resolved_base_url = base_url or model_config.get("base_url")
@@ -86,6 +86,36 @@ def resolve_model_config(
     resolved_model = resolved_model or model
 
     return resolved_model, resolved_base_url, resolved_api_key
+
+
+def resolve_client_kwargs(model=None, base_url=None, api_key=None, *, required=True) -> dict:
+    """Resolve a named single or multi-endpoint client without losing the model selector."""
+    from .config import get_config, model_client_kwargs
+    from .errors import ErrorType, cli_error
+
+    entry = get_config().get_model_config(model)
+    overrides = {}
+    if base_url is not None:
+        overrides["base_url"] = base_url
+    if api_key is not None:
+        overrides["api_key"] = api_key
+    try:
+        if entry is not None and "endpoints" in entry:
+            return model_client_kwargs(entry, **overrides)
+        model_id, resolved_url, resolved_key = resolve_model_config(
+            model, base_url, api_key, required=required
+        )
+        return model_client_kwargs(
+            entry or {}, model=model_id, base_url=resolved_url, api_key=resolved_key
+        )
+    except ValueError as exc:
+        cli_error(
+            ErrorType.INVALID_ARGS,
+            str(exc),
+            context={"model": model},
+            suggestion="检查模型配置：base_url 与 endpoints 二选一，endpoints 为非空地址列表",
+            doc="flexllm --help",
+        )
 
 
 def _fetch_model_id(base_url: str, api_key: str = "EMPTY") -> str | None:

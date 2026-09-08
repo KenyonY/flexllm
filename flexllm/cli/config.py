@@ -8,6 +8,46 @@ import re
 from pathlib import Path
 
 
+def model_client_kwargs(entry: dict, **overrides) -> dict:
+    """Build client connection options; explicit endpoint overrides replace configured routing."""
+    options = {
+        "model": entry.get("id"),
+        "base_url": entry.get("base_url"),
+        "api_key": entry.get("api_key", "EMPTY"),
+    }
+    for key in ("provider", "proxy", "endpoints", "fallback"):
+        if key in entry:
+            options[key] = entry[key]
+    if overrides.get("base_url") is not None and "endpoints" not in overrides:
+        options.pop("endpoints", None)
+    if overrides.get("endpoints") is not None and "base_url" not in overrides:
+        options.pop("base_url", None)
+    options.update(overrides)
+
+    if "fallback" in options and not isinstance(options["fallback"], bool):
+        raise ValueError("fallback 必须是布尔值 true 或 false")
+    if "endpoints" in options:
+        endpoints = options["endpoints"]
+        if not isinstance(endpoints, list) or not endpoints:
+            raise ValueError("endpoints 必须是非空列表")
+        if options.get("base_url") is not None:
+            raise ValueError("不能同时配置 base_url 和 endpoints")
+        normalized = []
+        for endpoint in endpoints:
+            if not isinstance(endpoint, dict) or not endpoint.get("base_url"):
+                raise ValueError("endpoints 中的每个条目必须包含 base_url")
+            defaults = {"model": options.get("model"), "api_key": options["api_key"]}
+            if "provider" in options:
+                defaults["provider"] = options["provider"]
+            resolved = {**defaults, **endpoint}
+            if "api_key" in overrides:
+                resolved["api_key"] = overrides["api_key"]
+            normalized.append(resolved)
+        options["endpoints"] = normalized
+        options.pop("base_url", None)
+    return options
+
+
 class FlexLLMConfig:
     """配置管理"""
 
@@ -22,6 +62,7 @@ class FlexLLMConfig:
         "user_template",
         "endpoints",
         "fallback",
+        "proxy",
     }
 
     CONFIG_PATHS = [
