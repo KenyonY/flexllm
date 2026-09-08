@@ -14,8 +14,10 @@ class ErrorServer:
         self._json_body = json_body
         self._runner = None
         self.base_url = None
+        self.requests = []
 
     async def _handler(self, request):
+        self.requests.append(dict(request.headers))
         if self._json_body:
             return web.json_response(BLOCK, status=403)
         return web.Response(text="plain failure", status=400)
@@ -78,3 +80,26 @@ async def test_stream_non_json_error_retains_raw_text():
 
     assert raised.value.status_code == 400
     assert raised.value.response_data == {"raw": "plain failure"}
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+async def test_pool_or_raise_preserves_gateway_error_after_routing(fallback):
+    from flexllm import LLMClient
+
+    async with ErrorServer() as server:
+        async with LLMClient(
+            endpoints=[
+                {"base_url": server.base_url, "model": "m", "api_key": key}
+                for key in ("first", "second")
+            ],
+            fallback=fallback,
+            retry_times=0,
+        ) as client:
+            with pytest.raises(LLMRequestError) as raised:
+                await client.chat_completions_or_raise(
+                    MESSAGES, return_usage=True, extra_headers={"x-session-id": "s"}
+                )
+            assert len(server.requests) == (2 if fallback else 1)
+            assert all(headers["x-session-id"] == "s" for headers in server.requests)
+    assert raised.value.status_code == 403
+    assert raised.value.response_data == BLOCK

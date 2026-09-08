@@ -41,7 +41,7 @@ from ..async_api.progress import ProgressBarConfig, ProgressTracker
 from ..cache import ResponseCacheConfig
 from ..pricing import get_model_pricing
 from ..utils.core import retry_callback
-from .base import ChatCompletionResult, LLMClientBase
+from .base import ChatCompletionResult, LLMClientBase, LLMRequestError
 from .batch_helpers import (
     JsonlWriter,
     build_gen_params_list,
@@ -713,6 +713,28 @@ class LLMClientPool:
             logger.warning("所有 endpoint 都失败了，返回最后一次失败的 RequestResult")
             return last_error_result
         raise last_error or RuntimeError("所有 endpoint 都失败了")
+
+    async def chat_completions_or_raise(
+        self,
+        messages: str | list[dict],
+        model: str = None,
+        return_usage: bool = False,
+        **kwargs,
+    ) -> Union[str, ChatCompletionResult]:
+        """Complete through pool routing, raising a structured error after fallback is exhausted."""
+        result = await self.chat_completions(
+            messages=messages, model=model, return_usage=return_usage, **kwargs
+        )
+        if isinstance(result, RequestResult):
+            data = result.data
+            status_code = data.get("status_code") if isinstance(data, dict) else None
+            response_data = data.get("response_data") if isinstance(data, dict) else data
+            raise LLMRequestError(
+                f"LLM 请求失败: status={result.status}, data={result.data}",
+                status_code=status_code if isinstance(status_code, int) else None,
+                response_data=response_data,
+            )
+        return result
 
     def chat_completions_sync(
         self,

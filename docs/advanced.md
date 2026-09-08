@@ -310,6 +310,8 @@ async with LLMClient.from_config(model="qwen-pool") as client:
   `id`、`api_key`、`provider`；endpoint 内显式配置的值优先。顶层 `proxy`
   作为代理默认值，endpoint 的 `proxy` 可单独覆盖。
 - `fallback` 默认为 `true`，设为 `false` 后失败请求不切换副本；负载分配仍生效。
+- `await client.chat_completions_or_raise(...)` 支持单地址和 pool：选路及故障转移完成后，
+  若请求仍失败则抛出 `LLMRequestError`，保留 `status_code` 与结构化 `response_data`。
 - `system`、`user_template`、生成参数仍按具名模型读取，`endpoints`、`fallback`
   和 `proxy` 不会作为生成参数发给模型。
 - CLI 的显式 `--base-url`（或 `from_config(base_url=...)`）会替换整个地址池，
