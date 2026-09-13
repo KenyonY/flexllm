@@ -170,7 +170,9 @@ class ServeServer:
         kwargs = self._get_kwargs(data)
 
         try:
-            result = await self._client.chat_completions(messages, return_raw=True, **kwargs)
+            result = await self._client.chat_completions(
+                messages, return_raw=True, raise_on_error=False, **kwargs
+            )
             if hasattr(result, "status") and result.status == "error":
                 error_msg = result.data.get("detail", result.data.get("error", str(result.data)))
                 elapsed = time.perf_counter() - start
@@ -284,7 +286,7 @@ class ServeServer:
 
         try:
             tasks = [
-                self._client.chat_completions(msgs, return_raw=True, **kwargs)
+                self._client.chat_completions(msgs, return_raw=True, raise_on_error=False, **kwargs)
                 for msgs in messages_list
             ]
             raw_results = await asyncio.gather(*tasks, return_exceptions=True)

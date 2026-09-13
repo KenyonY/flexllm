@@ -25,6 +25,20 @@ client = LLMClient(
 
 **方法：**
 
+#### complete / complete_batch（推荐的新接口）
+
+```python
+result = await client.complete(messages)
+results = await client.complete_batch(messages_list)
+```
+
+这两个入口始终返回 `ChatCompletionResult`，包含 `content`、`usage`、`tool_calls`、
+`reasoning_content`、`finish_reason` 和 `raw_response`；失败抛出结构化异常。
+`complete_sync` 和 `complete_batch_sync` 提供同步版本。
+
+`chat_completions*` 继续保留原有字符串、`RequestResult` 和选项行为，并在使用旧式返回
+时发出 `LegacyResponseWarning`。迁移期间可继续使用；新代码应优先使用 `complete*`。
+
 #### chat_completions
 
 ```python
@@ -33,9 +47,10 @@ async def chat_completions(
     model: str = None,
     return_raw: bool = False,
     return_usage: bool = False,
+    raise_on_error: bool = True,
     skip_cache: bool = False,
     **kwargs
-) -> str | ChatCompletionResult
+ ) -> str | ChatCompletionResult
 ```
 
 单条异步请求。
@@ -45,6 +60,7 @@ async def chat_completions(
 - `model`: 覆盖默认模型
 - `return_raw`: 返回原始响应对象
 - `return_usage`: 返回 token 使用情况
+- `raise_on_error`: 默认 `True`，请求失败抛出 `LLMRequestError`；传入 `False` 才返回旧式 `RequestResult`
 - `skip_cache`: 跳过缓存
 
 #### chat_completions_sync
@@ -63,10 +79,11 @@ async def chat_completions_batch(
     output_jsonl: str = None,
     show_progress: bool = True,
     return_summary: bool = False,
+    raise_on_error: bool = True,
     flush_interval: float = 1.0,
     metadata_list: List[dict] = None,
     **kwargs
-) -> List[str] | Tuple[List[str], dict]
+ ) -> List[str] | Tuple[List[str], dict]
 ```
 
 批量异步请求，支持断点续传。
@@ -78,6 +95,7 @@ async def chat_completions_batch(
 - `return_summary`: 返回统计摘要
 - `flush_interval`: 写入磁盘间隔
 - `metadata_list`: 元数据列表，与 `messages_list` 等长，每条记录的元数据会保存到输出文件
+- `raise_on_error`: 默认 `True`，部分失败抛出 `BatchRequestError`；异常保留成功结果和逐项错误
 
 #### chat_completions_stream
 

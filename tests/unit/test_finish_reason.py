@@ -343,6 +343,24 @@ class TestOpenAIStream:
 
 
 class TestNonStreamResult:
+    async def test_complete_returns_structured_result_and_raw_response(self, monkeypatch):
+        from flexllm.async_api.interface import RequestResult
+
+        client = OpenAIClient(base_url="http://x", model="m", api_key="k")
+        payload = {
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+
+        async def fake_process_requests(**kwargs):
+            return [RequestResult(0, payload, "success", 0.0)], None
+
+        monkeypatch.setattr(client._client, "process_requests", fake_process_requests)
+        result = await client.complete([{"role": "user", "content": "hi"}])
+        assert result.content == "ok"
+        assert result.finish_reason == "stop"
+        assert result.raw_response == payload
+
     async def test_result_carries_finish_reason(self, monkeypatch):
         from flexllm.async_api.interface import RequestResult
 

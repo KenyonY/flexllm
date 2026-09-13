@@ -10,7 +10,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Union
 
 logger = logging.getLogger(__name__)
@@ -33,6 +33,7 @@ from .batch_helpers import (
     resume_from_jsonl,
     validate_batch_params,
 )
+from .completion import CompletionMixin, warn_legacy_response
 
 if TYPE_CHECKING:
     from ..async_api.interface import RequestResult
@@ -57,10 +58,99 @@ class LLMRequestError(RuntimeError):
         *,
         status_code: int | None = None,
         response_data=None,
+        request_id: str | None = None,
+        retryable: bool = False,
+        cause: BaseException | None = None,
     ):
         super().__init__(message)
         self.status_code = status_code
         self.response_data = response_data
+        self.request_id = request_id
+        self.retryable = retryable
+        if cause is not None:
+            self.__cause__ = cause
+
+
+class LLMHTTPError(LLMRequestError):
+    """A non-success HTTP response from an LLM endpoint."""
+
+
+class LLMConnectionError(LLMRequestError):
+    """The endpoint could not be reached."""
+
+
+class LLMTimeoutError(LLMConnectionError):
+    """The endpoint did not respond before the configured timeout."""
+
+
+class LLMResponseError(LLMRequestError):
+    """The endpoint returned an unusable response."""
+
+
+class BatchRequestError(LLMRequestError):
+    """One or more items in a batch failed after request processing completed."""
+
+    def __init__(self, message: str, *, results: list, errors: dict[int, LLMRequestError]):
+        super().__init__(message)
+        self.results = results
+        self.errors = errors
+
+
+def _request_error_from_result(result: "RequestResult") -> LLMRequestError:
+    """Convert the internal requester envelope into a public typed exception."""
+    data = result.data
+    if not isinstance(data, dict):
+        return LLMRequestError(
+            f"LLM 请求失败: status={result.status}, data={data}",
+            cause=data if isinstance(data, BaseException) else None,
+        )
+
+    status_code = data.get("status_code")
+    response_data = data.get("response_data")
+    error = data.get("error")
+    detail = data.get("detail")
+    request_id = data.get("request_id") or getattr(result, "request_id", None)
+    if error == "Invalid JSON in response body":
+        return LLMResponseError(
+            f"LLM 响应不是有效 JSON: {response_data}", response_data=response_data
+        )
+    if isinstance(status_code, int) and status_code >= 400:
+        return LLMHTTPError(
+            f"LLM 请求失败: HTTP {status_code}: {error or detail or response_data}",
+            status_code=status_code,
+            response_data=response_data,
+            request_id=request_id,
+            retryable=status_code == 429 or status_code >= 500,
+        )
+    if error == "Timeout error":
+        return LLMTimeoutError(
+            f"LLM 请求超时: {detail or error}", response_data=response_data, retryable=True
+        )
+    if error and (
+        error.endswith("ConnectionError")
+        or error
+        in {
+            "ClientConnectorError",
+            "ClientOSError",
+            "ServerDisconnectedError",
+            "ClientPayloadError",
+        }
+    ):
+        return LLMConnectionError(
+            f"LLM 连接失败: {detail or error}", response_data=response_data, retryable=True
+        )
+    return LLMRequestError(f"LLM 请求失败: {error or detail or data}", response_data=response_data)
+
+
+def _mark_error_result(result: "RequestResult", error: BaseException) -> "RequestResult":
+    """Turn a successful transport envelope into an explicit extraction error."""
+    result.status = "error"
+    result.data = {
+        "error": error.__class__.__name__,
+        "detail": str(error),
+        "response_data": getattr(error, "response_data", None),
+    }
+    return result
 
 
 def _decode_error_body(text: str):
@@ -92,7 +182,7 @@ _OPENAI_ENVELOPE_KEYS = frozenset(
 class ChatCompletionResult:
     """聊天完成的结果，包含内容和 token 用量信息"""
 
-    content: str
+    content: str | None
     usage: dict | None = None  # {"prompt_tokens": x, "completion_tokens": y, "total_tokens": z}
     reasoning_content: str | None = None  # 思考内容（DeepSeek-R1、Qwen3 等）
     tool_calls: list["ToolCall"] | None = None  # 工具调用列表
@@ -110,8 +200,21 @@ class ChatCompletionResult:
     # 放在末尾以保持已有 dataclass 位置参数的兼容性。
     assistant_message: dict | None = None
 
+    raw_response: dict | None = None
+    cached: bool = False
 
-class LLMClientBase(ABC):
+    @classmethod
+    def _from_payload(cls, payload: dict, *, cached: bool = False):
+        """Read current payloads and historical content/usage-only cache entries."""
+        values = {f.name: deepcopy(payload[f.name]) for f in fields(cls) if f.name in payload}
+        if values.get("tool_calls"):
+            values["tool_calls"] = [ToolCall(**call) for call in values["tool_calls"]]
+        if cached:
+            values.update(cached=True, queue_time=None)
+        return cls(**values)
+
+
+class LLMClientBase(CompletionMixin, ABC):
     """
     LLM 客户端抽象基类
 
@@ -384,6 +487,35 @@ class LLMClientBase(ABC):
 
     # ========== 通用接口实现 ==========
 
+    def _completion_result(self, result, **kwargs) -> ChatCompletionResult:
+        """Parse once for single, batch and cache paths without discarding metadata."""
+        try:
+            data = result.data
+            if not isinstance(data, dict):
+                raise ValueError("LLM response must be a JSON object")
+            content = self._extract_content(data, **kwargs)
+            tools = self._extract_tool_calls(data)
+            finish_reason = self._extract_finish_reason(data)
+            if content is None and not tools and finish_reason is None:
+                raise ValueError("LLM 响应缺少可用的文本内容或工具调用")
+            return ChatCompletionResult(
+                content=content,
+                usage=self._extract_usage(data),
+                reasoning_content=self._extract_reasoning_content(data),
+                assistant_message=self._extract_assistant_message(data),
+                tool_calls=tools,
+                queue_time=result.queue_time,
+                finish_reason=finish_reason,
+                extra=self._extract_extra(data),
+                raw_response=deepcopy(data),
+            )
+        except LLMRequestError:
+            raise
+        except Exception as error:
+            raise LLMResponseError(
+                f"Invalid LLM response: {error}", response_data=result.data, cause=error
+            ) from error
+
     async def chat_completions(
         self,
         messages: list[dict],
@@ -396,6 +528,7 @@ class LLMClientBase(ABC):
         prefix: str | None = None,
         include_prefix: bool = True,
         extra_headers: dict[str, str] | None = None,
+        raise_on_error: bool = True,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """
@@ -425,13 +558,16 @@ class LLMClientBase(ABC):
             - return_raw=True: RequestResult 原始响应
             - return_usage=True: ChatCompletionResult(content, usage, reasoning_content)
             - 默认: str 内容文本
-            - 请求失败时: 返回 RequestResult（status="error"），不会抛异常。
-              如果需要失败时抛异常，请使用 chat_completions_or_raise()。
+            - 请求失败时默认抛出结构化 LLMRequestError。
+              传入 raise_on_error=False 可暂时使用旧的 RequestResult 行为。
 
         Note:
             缓存由初始化时的 cache 参数控制，return_raw 时自动跳过缓存。
             缓存只存模型续写部分(不含 prefix),拼接由返回路径完成。
         """
+        warn_legacy_response(
+            return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
+        )
         effective_model = self._get_effective_model(model)
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
@@ -453,10 +589,9 @@ class LLMClientBase(ABC):
                 if effective_prefix and cached_content is not None:
                     cached_content = effective_prefix + cached_content
                 if return_usage:
-                    return ChatCompletionResult(
-                        content=cached_content,
-                        usage=cached.get("usage"),
-                    )
+                    result = ChatCompletionResult._from_payload(cached, cached=True)
+                    result.content = cached_content
+                    return result
                 return cached_content
 
         body = self._build_request_body(messages, effective_model, stream=False, **kwargs)
@@ -471,38 +606,28 @@ class LLMClientBase(ABC):
         )
 
         data = results[0]
+        if data.status != "success" and raise_on_error:
+            raise _request_error_from_result(data)
         if return_raw:
             return data
         if data.status == "success":
-            content = self._extract_content(data.data, **kwargs)
-            usage = self._extract_usage(data.data)
+            try:
+                result = self._completion_result(data, **kwargs)
+            except LLMResponseError as error:
+                if raise_on_error:
+                    raise
+                return _mark_error_result(data, error)
 
-            # 写入缓存（始终存储 usage; content 不含 prefix）
-            if use_cache and content is not None:
-                self._response_cache.set(
-                    messages, {"content": content, "usage": usage}, model=effective_model, **kwargs
-                )
+            if use_cache:
+                payload = asdict(result)
+                payload["queue_time"] = None
+                self._response_cache.set(messages, payload, model=effective_model, **kwargs)
 
-            if effective_prefix and content is not None:
-                content = effective_prefix + content
-
-            # 记账不依赖 return_usage：与批量路径行为一致（此前只在 return_usage=True 时记）
-            if self._cost_tracker and usage:
-                self._cost_tracker.record(usage, effective_model)
-
-            if return_usage:
-                tool_calls = self._extract_tool_calls(data.data)
-                return ChatCompletionResult(
-                    content=content,
-                    usage=usage,
-                    reasoning_content=self._extract_reasoning_content(data.data),
-                    assistant_message=self._extract_assistant_message(data.data),
-                    tool_calls=tool_calls,
-                    queue_time=data.queue_time,
-                    finish_reason=self._extract_finish_reason(data.data),
-                    extra=self._extract_extra(data.data) if isinstance(data.data, dict) else None,
-                )
-            return content
+            if effective_prefix and result.content is not None:
+                result.content = effective_prefix + result.content
+            if self._cost_tracker and result.usage:
+                self._cost_tracker.record(result.usage, effective_model)
+            return result if return_usage else result.content
         logger.warning("chat_completions 请求失败: %s, 返回 RequestResult 而非 str", data.data)
         return data
 
@@ -525,20 +650,9 @@ class LLMClientBase(ABC):
             messages=messages,
             model=model,
             return_usage=return_usage,
+            raise_on_error=True,
             **kwargs,
         )
-        # 导入放在这里避免循环引用
-        from ..async_api.interface import RequestResult
-
-        if isinstance(result, RequestResult):
-            data = result.data
-            status_code = data.get("status_code") if isinstance(data, dict) else None
-            response_data = data.get("response_data") if isinstance(data, dict) else data
-            raise LLMRequestError(
-                f"LLM 请求失败: status={result.status}, data={result.data}",
-                status_code=status_code if isinstance(status_code, int) else None,
-                response_data=response_data,
-            )
         return result
 
     def chat_completions_sync(
@@ -547,6 +661,7 @@ class LLMClientBase(ABC):
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
+        raise_on_error: bool = True,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """同步版本的聊天完成"""
@@ -556,6 +671,7 @@ class LLMClientBase(ABC):
                 model=model,
                 return_raw=return_raw,
                 return_usage=return_usage,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
         )
@@ -578,6 +694,7 @@ class LLMClientBase(ABC):
         save_input: bool | str = True,
         include_prefix: bool = True,
         params_list: list[dict | None] | None = None,
+        raise_on_error: bool = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -623,6 +740,9 @@ class LLMClientBase(ABC):
             （超预算时抛 BudgetExceededError）不同：批量场景抛异常会丢弃已完成结果。
         """
         # track_cost 需要 usage 信息
+        warn_legacy_response(
+            return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
+        )
         if track_cost:
             return_usage = True
         effective_model = self._get_effective_model(model)
@@ -660,24 +780,14 @@ class LLMClientBase(ABC):
             return content
 
         def extractor(result, idx: int):
-            """提取 content 和 usage（用于缓存存储, content 不含 prefix）
-
-            return_raw 时 content 即原始响应 dict（usage 仍提取，用于成本追踪/输出记录）。
-            """
             if return_raw:
-                content = result.data
-            else:
-                content = self._extract_content(result.data, **merged_kwargs(idx))
-            usage = self._extract_usage(result.data)
-            return {"content": content, "usage": usage}
+                return {"content": result.data, "usage": self._extract_usage(result.data)}
+            return asdict(self._completion_result(result, **merged_kwargs(idx)))
 
         def to_chat_result(extracted, idx: int):
-            """转换为 ChatCompletionResult, content 自动拼接 prefix"""
-            return ChatCompletionResult(
-                content=with_prefix(idx, extracted["content"]),
-                usage=extracted.get("usage"),
-                tool_calls=None,  # 缓存不存储 tool_calls
-            )
+            result = ChatCompletionResult._from_payload(extracted)
+            result.content = with_prefix(idx, result.content)
+            return result
 
         # 进度条配置（支持成本显示）
         progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None
@@ -700,6 +810,8 @@ class LLMClientBase(ABC):
 
         # responses/progress 在 try 外初始化：预算超限提前跳出时二者必须有定义
         responses: list = [None] * len(messages_list)
+        error_results: dict[int, RequestResult] = {}
+        batch_errors: dict[int, LLMRequestError] = {}
         progress = None
         budget_exceeded = False
 
@@ -716,6 +828,10 @@ class LLMClientBase(ABC):
                 )
                 # 提前绑定：后续对 cached_responses 的原地写入即对 responses 的写入，
                 # 预算超限提前跳出时已完成部分不丢失
+                cached_responses = [
+                    {**r, "cached": True, "queue_time": None} if r is not None else None
+                    for r in cached_responses
+                ]
                 responses = cached_responses
 
                 # 将缓存命中的写入文件（如果文件中没有）
@@ -765,6 +881,8 @@ class LLMClientBase(ABC):
                                 )
                                 logger.debug(f"请求失败: {error_msg}")
                                 cached_responses[original_idx] = None
+                                error_results[original_idx] = result
+                                batch_errors[original_idx] = _request_error_from_result(result)
                                 writer.write_result(original_idx, None, "error", error_msg)
                                 continue
                             try:
@@ -801,6 +919,12 @@ class LLMClientBase(ABC):
                             except Exception as e:
                                 logger.warning(f"提取结果失败: {e}")
                                 cached_responses[original_idx] = None
+                                error_results[original_idx] = _mark_error_result(result, e)
+                                batch_errors[original_idx] = (
+                                    e
+                                    if isinstance(e, LLMRequestError)
+                                    else LLMResponseError(str(e))
+                                )
                                 writer.write_result(original_idx, None, "error", str(e))
                         if batch.is_final:
                             progress = batch.progress
@@ -841,6 +965,8 @@ class LLMClientBase(ABC):
                                 )
                                 logger.debug(f"请求失败: {error_msg}")
                                 responses[original_idx] = None
+                                error_results[original_idx] = result
+                                batch_errors[original_idx] = _request_error_from_result(result)
                                 writer.write_result(original_idx, None, "error", error_msg)
                                 continue
                             try:
@@ -867,6 +993,12 @@ class LLMClientBase(ABC):
                             except Exception as e:
                                 logger.warning(f"Error: {e}, set content to None")
                                 responses[original_idx] = None
+                                error_results[original_idx] = _mark_error_result(result, e)
+                                batch_errors[original_idx] = (
+                                    e
+                                    if isinstance(e, LLMRequestError)
+                                    else LLMResponseError(str(e))
+                                )
                                 writer.write_result(original_idx, None, "error", str(e))
                         if batch.is_final:
                             progress = batch.progress
@@ -885,14 +1017,18 @@ class LLMClientBase(ABC):
 
         # 转换返回值格式（prefill 场景统一在此拼接 prefix；return_raw 返回原始 dict）
         if return_raw:
-            final_responses = [r["content"] if r is not None else None for r in responses]
+            final_responses = [
+                r["content"] if r is not None else error_results.get(i)
+                for i, r in enumerate(responses)
+            ]
         elif return_usage:
             final_responses = [
-                to_chat_result(r, i) if r is not None else None for i, r in enumerate(responses)
+                to_chat_result(r, i) if r is not None else error_results.get(i)
+                for i, r in enumerate(responses)
             ]
         else:
             final_responses = [
-                with_prefix(i, r["content"]) if r is not None else None
+                with_prefix(i, r["content"]) if r is not None else error_results.get(i)
                 for i, r in enumerate(responses)
             ]
 
@@ -907,6 +1043,13 @@ class LLMClientBase(ABC):
                 )
             else:
                 final_responses[idx] = record["output"]
+
+        if error_results and raise_on_error:
+            raise BatchRequestError(
+                f"批量请求失败: {len(batch_errors)}/{len(messages_list)} 条",
+                results=final_responses,
+                errors=batch_errors,
+            )
 
         # 构建返回值
         result = final_responses
@@ -934,6 +1077,7 @@ class LLMClientBase(ABC):
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
+        raise_on_error: bool = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
@@ -951,6 +1095,7 @@ class LLMClientBase(ABC):
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
                 save_input=save_input,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
         )
@@ -1169,6 +1314,12 @@ class LLMClientBase(ABC):
                             except Exception as e:
                                 logger.warning(f"提取结果失败: {e}")
                                 writer.write_result(original_idx, None, "error", str(e))
+                                result.status = "error"
+                                result.error = str(e)
+                                result.data = {
+                                    "error": e.__class__.__name__,
+                                    "detail": str(e),
+                                }
                                 result.content = None
                                 result.usage = None
                                 result.original_idx = original_idx
@@ -1236,138 +1387,148 @@ class LLMClientBase(ABC):
         )
 
         session, proxy_kwargs = create_proxied_session(self._proxy)
-        async with session:
-            async with session.post(
-                effective_url,
-                json=body,
-                headers=headers,
-                timeout=aio_timeout,
-                **proxy_kwargs,
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise LLMRequestError(
-                        f"HTTP {response.status}: {error_text}",
-                        status_code=response.status,
-                        response_data=_decode_error_body(error_text),
-                    )
+        try:
+            async with session:
+                async with session.post(
+                    effective_url,
+                    json=body,
+                    headers=headers,
+                    timeout=aio_timeout,
+                    **proxy_kwargs,
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise LLMHTTPError(
+                            f"HTTP {response.status}: {error_text}",
+                            status_code=response.status,
+                            response_data=_decode_error_body(error_text),
+                            retryable=response.status == 429 or response.status >= 500,
+                        )
 
-                _thinking_started = False
-                _thinking_parts: list[str] = []
-                _content_parts: list[str] = []
-                _tool_calls: dict[int, dict] = {}
-                _last_usage = None
-                _finish_reason = None
-                async for line in response.content:
-                    line = line.decode("utf-8").strip()
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
+                    _thinking_started = False
+                    _thinking_parts: list[str] = []
+                    _content_parts: list[str] = []
+                    _tool_calls: dict[int, dict] = {}
+                    _last_usage = None
+                    _finish_reason = None
+                    async for line in response.content:
+                        line = line.decode("utf-8").strip()
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
 
-                            # usage 与内容可能共存于同一 chunk（OpenAI 官方只在最后的空
-                            # chunk 携带；SiliconFlow 等则每个 chunk 都带并与 content 共存），
-                            # 因此只记录最新值，流结束后统一 yield，保证 usage 事件唯一且在最后
-                            if return_usage:
-                                usage = self._extract_stream_usage(data)
-                                if usage:
-                                    _last_usage = usage
-                                # finish_reason 只出现在最后一个有 choices 的 chunk 上，
-                                # 之后可能还有纯 usage chunk，所以记下来流末尾再发
-                                reason = self._extract_finish_reason(data)
-                                if reason:
-                                    _finish_reason = reason
-
-                            # 带外字段必须在 thinking / tool_call 两个 continue 分支之前提取：
-                            # 网关的信号往往就挂在带 content 或 tool_call 的那条 chunk 上，
-                            # 放到后面会被 continue 短路掉
-                            if return_usage:
-                                extra = self._extract_extra(data)
-                                if extra:
-                                    yield {"type": "extra", "extra": extra}
-
-                            # 提取思考内容
-                            thinking = self._extract_stream_thinking(data)
-                            if thinking:
-                                _thinking_parts.append(thinking)
+                                # usage 与内容可能共存于同一 chunk（OpenAI 官方只在最后的空
+                                # chunk 携带；SiliconFlow 等则每个 chunk 都带并与 content 共存），
+                                # 因此只记录最新值，流结束后统一 yield，保证 usage 事件唯一且在最后
                                 if return_usage:
-                                    yield {"type": "thinking", "content": thinking}
-                                else:
-                                    if not _thinking_started:
-                                        yield "<think>\n"
-                                        _thinking_started = True
-                                    yield thinking
+                                    usage = self._extract_stream_usage(data)
+                                    if usage:
+                                        _last_usage = usage
+                                    # finish_reason 只出现在最后一个有 choices 的 chunk 上，
+                                    # 之后可能还有纯 usage chunk，所以记下来流末尾再发
+                                    reason = self._extract_finish_reason(data)
+                                    if reason:
+                                        _finish_reason = reason
+
+                                # 带外字段必须在 thinking / tool_call 两个 continue 分支之前提取：
+                                # 网关的信号往往就挂在带 content 或 tool_call 的那条 chunk 上，
+                                # 放到后面会被 continue 短路掉
+                                if return_usage:
+                                    extra = self._extract_extra(data)
+                                    if extra:
+                                        yield {"type": "extra", "extra": extra}
+
+                                # 提取思考内容
+                                thinking = self._extract_stream_thinking(data)
+                                if thinking:
+                                    _thinking_parts.append(thinking)
+                                    if return_usage:
+                                        yield {"type": "thinking", "content": thinking}
+                                    else:
+                                        if not _thinking_started:
+                                            yield "<think>\n"
+                                            _thinking_started = True
+                                        yield thinking
+                                    continue
+
+                                # 提取 tool_call delta
+                                tool_call_deltas = self._extract_stream_tool_calls(data)
+                                if tool_call_deltas:
+                                    if return_usage:
+                                        for tc_delta in tool_call_deltas:
+                                            idx = tc_delta.get("index", 0)
+                                            current = _tool_calls.setdefault(
+                                                idx,
+                                                {
+                                                    "id": "",
+                                                    "type": "function",
+                                                    "function": {"name": "", "arguments": ""},
+                                                },
+                                            )
+                                            if tc_delta.get("id"):
+                                                current["id"] = tc_delta["id"]
+                                            if tc_delta.get("type"):
+                                                current["type"] = tc_delta["type"]
+                                            function = tc_delta.get("function", {})
+                                            if function.get("name"):
+                                                current["function"]["name"] = function["name"]
+                                            if "arguments" in function:
+                                                current["function"]["arguments"] += function[
+                                                    "arguments"
+                                                ]
+                                        yield {
+                                            "type": "tool_call_delta",
+                                            "tool_calls": tool_call_deltas,
+                                        }
+                                    continue
+
+                                content = self._extract_stream_content(data)
+                                if content:
+                                    _content_parts.append(content)
+                                    if _thinking_started:
+                                        yield "</think>"
+                                        _thinking_started = False
+                                    if return_usage:
+                                        yield {"type": "content", "content": content}
+                                    else:
+                                        yield content
+                            except json.JSONDecodeError:
                                 continue
 
-                            # 提取 tool_call delta
-                            tool_call_deltas = self._extract_stream_tool_calls(data)
-                            if tool_call_deltas:
-                                if return_usage:
-                                    for tc_delta in tool_call_deltas:
-                                        idx = tc_delta.get("index", 0)
-                                        current = _tool_calls.setdefault(
-                                            idx,
-                                            {
-                                                "id": "",
-                                                "type": "function",
-                                                "function": {"name": "", "arguments": ""},
-                                            },
-                                        )
-                                        if tc_delta.get("id"):
-                                            current["id"] = tc_delta["id"]
-                                        if tc_delta.get("type"):
-                                            current["type"] = tc_delta["type"]
-                                        function = tc_delta.get("function", {})
-                                        if function.get("name"):
-                                            current["function"]["name"] = function["name"]
-                                        if "arguments" in function:
-                                            current["function"]["arguments"] += function[
-                                                "arguments"
-                                            ]
-                                    yield {
-                                        "type": "tool_call_delta",
-                                        "tool_calls": tool_call_deltas,
-                                    }
-                                continue
+                    # 流在 thinking 阶段结束（无后续 content）时补发闭合标签
+                    if _thinking_started:
+                        yield "</think>"
 
-                            content = self._extract_stream_content(data)
-                            if content:
-                                _content_parts.append(content)
-                                if _thinking_started:
-                                    yield "</think>"
-                                    _thinking_started = False
-                                if return_usage:
-                                    yield {"type": "content", "content": content}
-                                else:
-                                    yield content
-                        except json.JSONDecodeError:
-                            continue
+                    if return_usage:
+                        if _thinking_parts or _tool_calls:
+                            assistant_message = {
+                                "role": "assistant",
+                                "content": "".join(_content_parts) or None,
+                            }
+                            if _thinking_parts:
+                                assistant_message["reasoning_content"] = "".join(_thinking_parts)
+                            if _tool_calls:
+                                assistant_message["tool_calls"] = [
+                                    deepcopy(tool_call)
+                                    for _, tool_call in sorted(_tool_calls.items())
+                                ]
+                            yield {
+                                "type": "assistant_message",
+                                "message": assistant_message,
+                            }
+                        yield {"type": "finish", "reason": _finish_reason}
+                        if _last_usage:
+                            yield {"type": "usage", "usage": _last_usage}
 
-                # 流在 thinking 阶段结束（无后续 content）时补发闭合标签
-                if _thinking_started:
-                    yield "</think>"
-
-                if return_usage:
-                    if _thinking_parts or _tool_calls:
-                        assistant_message = {
-                            "role": "assistant",
-                            "content": "".join(_content_parts) or None,
-                        }
-                        if _thinking_parts:
-                            assistant_message["reasoning_content"] = "".join(_thinking_parts)
-                        if _tool_calls:
-                            assistant_message["tool_calls"] = [
-                                deepcopy(tool_call) for _, tool_call in sorted(_tool_calls.items())
-                            ]
-                        yield {
-                            "type": "assistant_message",
-                            "message": assistant_message,
-                        }
-                    yield {"type": "finish", "reason": _finish_reason}
-                    if _last_usage:
-                        yield {"type": "usage", "usage": _last_usage}
+        except aiohttp.ClientConnectorError as e:
+            raise LLMConnectionError(f"LLM 流式连接失败: {e}", cause=e, retryable=True) from e
+        except asyncio.TimeoutError as e:
+            raise LLMTimeoutError("LLM 流式请求超时", cause=e, retryable=True) from e
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:
+            raise LLMConnectionError(f"LLM 流式连接失败: {e}", cause=e, retryable=True) from e
 
     def model_list(self) -> list[str]:
         raise NotImplementedError("子类需要实现 model_list 方法")

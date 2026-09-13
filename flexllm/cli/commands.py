@@ -288,6 +288,23 @@ def register_commands(app):
         except typer.Exit:
             raise
         except Exception as e:
+            from flexllm import LLMRequestError
+
+            if isinstance(e, LLMRequestError):
+                cli_error(
+                    ErrorType.NETWORK_ERROR,
+                    f"LLM 调用失败: {e}",
+                    context={
+                        "model": model_id,
+                        "base_url": base_url,
+                        "status_code": e.status_code,
+                        "response_data": e.response_data,
+                    },
+                    suggestion="检查 API Key 和 base_url，或运行 flexllm test",
+                    doc="flexllm ask --help",
+                    retryable=e.retryable,
+                )
+                return
             cli_error(
                 ErrorType.GENERAL,
                 str(e),

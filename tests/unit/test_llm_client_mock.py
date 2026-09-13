@@ -26,7 +26,7 @@ import pytest
 # 整个文件标记为 slow（Mock Server 启动开销大）
 pytestmark = pytest.mark.slow
 
-from flexllm import LLMClient, LLMClientPool
+from flexllm import BatchRequestError, LLMClient, LLMClientPool, LLMHTTPError
 from flexllm.clients import ClaudeClient, GeminiClient, LLMClientBase, OpenAIClient
 from flexllm.clients.base import ChatCompletionResult
 from flexllm.mock import MockLLMServer, MockLLMServerGroup, MockServerConfig
@@ -1258,15 +1258,18 @@ class TestErrorHandling:
 
     @pytest.mark.asyncio
     async def test_all_fail_batch(self):
-        """批量请求全部失败"""
+        """批量请求全部失败时抛出聚合错误并保留逐项错误"""
         cfg = MockServerConfig(port=19461, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
-                results = await client.chat_completions_batch(_batch_msgs(3), show_progress=False)
-                assert len(results) == 3
-                assert all(r is None for r in results)
+                with pytest.raises(BatchRequestError) as raised:
+                    await client.chat_completions_batch(_batch_msgs(3), show_progress=False)
+                assert len(raised.value.errors) == 3
+                assert all(
+                    isinstance(error, LLMHTTPError) for error in raised.value.errors.values()
+                )
 
     @pytest.mark.asyncio
     async def test_all_fail_batch_summary(self):
@@ -1276,13 +1279,11 @@ class TestErrorHandling:
             async with LLMClient(
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
-                results, summary = await client.chat_completions_batch(
-                    _batch_msgs(3), show_progress=True, return_summary=True
-                )
-                assert all(r is None for r in results)
-                # 单 endpoint summary 是进度条的格式化字符串
-                assert summary is not None
-                assert isinstance(summary, str)
+                with pytest.raises(BatchRequestError) as raised:
+                    await client.chat_completions_batch(
+                        _batch_msgs(3), show_progress=True, return_summary=True
+                    )
+                assert len(raised.value.errors) == 3
 
     @pytest.mark.asyncio
     async def test_partial_fail_batch(self):
@@ -1296,23 +1297,38 @@ class TestErrorHandling:
                 retry_times=5,  # 多次重试
                 retry_delay=0.01,  # 加快重试速度
             ) as client:
-                results = await client.chat_completions_batch(_batch_msgs(10), show_progress=False)
-                # 有重试的情况下大部分应该成功
-                success_count = sum(1 for r in results if r is not None)
+                try:
+                    results = await client.chat_completions_batch(
+                        _batch_msgs(10), show_progress=False
+                    )
+                    success_count = sum(r is not None for r in results)
+                except BatchRequestError as raised:
+                    success_count = sum(r is not None for r in raised.results)
+                # 有重试的情况下大部分应该成功；随机 mock 也可能恰好全成功
                 assert success_count > 0
 
     @pytest.mark.asyncio
-    async def test_single_fail_returns_request_result(self):
-        """单条请求失败返回 RequestResult（不抛异常）"""
+    async def test_single_fail_raises_structured_error(self):
+        """单条请求失败默认抛结构化异常"""
         cfg = MockServerConfig(port=19464, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
-                result = await client.chat_completions(_msgs())
-                # 失败时返回 RequestResult
-                assert hasattr(result, "status")
-                assert result.status != "success"
+                with pytest.raises(LLMHTTPError) as raised:
+                    await client.chat_completions(_msgs())
+                assert raised.value.status_code == 500
+
+    @pytest.mark.asyncio
+    async def test_single_fail_legacy_result(self):
+        """显式关闭 raise_on_error 时保留旧 RequestResult 行为"""
+        cfg = MockServerConfig(port=19465, delay_min=0.01, delay_max=0.01, error_rate=1.0)
+        with MockLLMServer(cfg) as server:
+            async with LLMClient(
+                base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
+            ) as client:
+                result = await client.chat_completions(_msgs(), raise_on_error=False)
+                assert result.status == "error"
 
 
 # ============== 14. __getattr__ 委托 ==============

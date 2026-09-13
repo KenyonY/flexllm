@@ -24,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
+from .base import BatchRequestError, _request_error_from_result
+
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
@@ -246,6 +248,7 @@ class AudioMixin:
         return_details: bool = False,
         return_raw: bool = False,
         show_progress: bool = False,
+        raise_on_error: bool = True,
         **extra,
     ) -> Union[str, TranscriptionResult, "RequestResult"]:
         """转录单个音频文件。
@@ -268,7 +271,7 @@ class AudioMixin:
             - return_raw=True: RequestResult
             - return_details=True: TranscriptionResult
             - 默认: 转录文本 str
-            - 请求失败时: 返回 RequestResult（status="error"），不抛异常
+            - 请求失败时默认抛出结构化异常；raise_on_error=False 保留旧行为
         """
         params = self._build_transcription_params(
             audio,
@@ -287,10 +290,16 @@ class AudioMixin:
             method="POST",
             show_progress=show_progress,
         )
-        return self._finalize_transcription(results[0], return_details, return_raw)
+        return self._finalize_transcription(
+            results[0], return_details, return_raw, raise_on_error=raise_on_error
+        )
 
     @staticmethod
-    def _finalize_transcription(result, return_details: bool, return_raw: bool):
+    def _finalize_transcription(
+        result, return_details: bool, return_raw: bool, *, raise_on_error: bool = False
+    ):
+        if result.status != "success" and raise_on_error:
+            raise _request_error_from_result(result)
         if return_raw:
             return result
         if result.status != "success":
@@ -316,12 +325,13 @@ class AudioMixin:
         return_details: bool = False,
         return_raw: bool = False,
         show_progress: bool = True,
+        raise_on_error: bool = True,
         **extra,
     ) -> list:
         """并发转录多个音频。
 
         并发数与 QPS 由客户端的 concurrency_limit / max_qps 控制。
-        返回值与入参一一对应，失败项为 RequestResult（与 chat_completions_batch 一致）。
+        默认失败时抛出 BatchRequestError；raise_on_error=False 时失败项为 RequestResult。
         """
         if filenames is not None and len(filenames) != len(audios):
             raise ValueError(f"filenames 数量({len(filenames)})与 audios({len(audios)})不一致")
@@ -346,7 +356,20 @@ class AudioMixin:
             method="POST",
             show_progress=show_progress,
         )
-        return [self._finalize_transcription(r, return_details, return_raw) for r in results]
+        errors = {
+            i: _request_error_from_result(r) for i, r in enumerate(results) if r.status != "success"
+        }
+        finalized = [
+            self._finalize_transcription(r, return_details, return_raw, raise_on_error=False)
+            for r in results
+        ]
+        if errors and raise_on_error:
+            raise BatchRequestError(
+                f"转录批量请求失败: {len(errors)}/{len(results)} 条",
+                results=finalized,
+                errors=errors,
+            )
+        return finalized
 
     def transcribe_batch_sync(self, audios: list, **kwargs) -> list:
         """transcribe_batch 的同步版本"""
@@ -389,7 +412,9 @@ class AudioMixin:
         }
 
     @staticmethod
-    def _finalize_speech(result, output: Union[str, Path, None]):
+    def _finalize_speech(result, output: Union[str, Path, None], *, raise_on_error: bool = False):
+        if result.status != "success" and raise_on_error:
+            raise _request_error_from_result(result)
         if result.status != "success":
             logger.warning("speech 请求失败: %s，返回 RequestResult", result.data)
             return result
@@ -410,6 +435,7 @@ class AudioMixin:
         speed: float | None = None,
         output: Union[str, Path, None] = None,
         show_progress: bool = False,
+        raise_on_error: bool = True,
         **extra,
     ) -> Union[bytes, Path, "RequestResult"]:
         """把文本合成为语音。
@@ -427,7 +453,7 @@ class AudioMixin:
         Returns:
             - output 为 None: 音频 bytes
             - output 给出: 写入后的 Path
-            - 请求失败时: RequestResult（status="error"），不抛异常
+            - 请求失败时默认抛出结构化异常；raise_on_error=False 返回 RequestResult
         """
         params = self._build_speech_params(text, model, voice, response_format, speed, extra)
         results, _ = await self._client.process_requests(
@@ -436,7 +462,7 @@ class AudioMixin:
             method="POST",
             show_progress=show_progress,
         )
-        return self._finalize_speech(results[0], output)
+        return self._finalize_speech(results[0], output, raise_on_error=raise_on_error)
 
     def speech_sync(self, text: str, **kwargs):
         """speech 的同步版本"""
@@ -451,12 +477,13 @@ class AudioMixin:
         speed: float | None = None,
         outputs: list | None = None,
         show_progress: bool = True,
+        raise_on_error: bool = True,
         **extra,
     ) -> list:
         """并发合成多段文本。
 
         并发数与 QPS 由客户端的 concurrency_limit / max_qps 控制。
-        返回值与入参一一对应，失败项为 RequestResult。
+        默认失败时抛出 BatchRequestError；raise_on_error=False 时失败项为 RequestResult。
         """
         if outputs is not None and len(outputs) != len(texts):
             raise ValueError(f"outputs 数量({len(outputs)})与 texts({len(texts)})不一致")
@@ -471,9 +498,20 @@ class AudioMixin:
             method="POST",
             show_progress=show_progress,
         )
-        return [
-            self._finalize_speech(r, outputs[i] if outputs else None) for i, r in enumerate(results)
+        errors = {
+            i: _request_error_from_result(r) for i, r in enumerate(results) if r.status != "success"
+        }
+        finalized = [
+            self._finalize_speech(r, outputs[i] if outputs else None, raise_on_error=False)
+            for i, r in enumerate(results)
         ]
+        if errors and raise_on_error:
+            raise BatchRequestError(
+                f"语音合成批量请求失败: {len(errors)}/{len(results)} 条",
+                results=finalized,
+                errors=errors,
+            )
+        return finalized
 
     def speech_batch_sync(self, texts: list[str], **kwargs) -> list:
         """speech_batch 的同步版本"""

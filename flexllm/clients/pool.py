@@ -41,13 +41,20 @@ from ..async_api.progress import ProgressBarConfig, ProgressTracker
 from ..cache import ResponseCacheConfig
 from ..pricing import get_model_pricing
 from ..utils.core import retry_callback
-from .base import ChatCompletionResult, LLMClientBase, LLMRequestError
+from .base import (
+    BatchRequestError,
+    ChatCompletionResult,
+    LLMClientBase,
+    LLMRequestError,
+    _request_error_from_result,
+)
 from .batch_helpers import (
     JsonlWriter,
     build_gen_params_list,
     validate_batch_params,
 )
 from .claude import ClaudeClient
+from .completion import CompletionMixin, warn_legacy_response
 from .gemini import GeminiClient
 from .openai import OpenAIClient
 from .router import ProviderConfig, ProviderRouter
@@ -78,7 +85,7 @@ class EndpointConfig:
             self.extra = {}
 
 
-class LLMClientPool:
+class LLMClientPool(CompletionMixin):
     """
     统一的 LLM 客户端（支持单/多 endpoint）
 
@@ -628,6 +635,7 @@ class LLMClientPool:
         return_usage: bool = False,
         show_progress: bool = False,
         preprocess_msg: bool = False,
+        raise_on_error: bool = True,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """
@@ -644,8 +652,8 @@ class LLMClientPool:
 
         Returns:
             与 LLMClient.chat_completions 返回值一致。
-            请求失败时（所有可用 endpoint 都失败）与单模式一致：
-            返回最后一次失败的 RequestResult（status="error"），不抛异常。
+            请求失败时（所有可用 endpoint 都失败）默认抛出结构化异常。
+            传入 raise_on_error=False 可保留 RequestResult 兼容行为。
             仅当失败源于本地异常（非 HTTP 请求失败）时才向上抛出。
         """
         kwargs = self._merge_config_params(kwargs)
@@ -660,6 +668,7 @@ class LLMClientPool:
                 return_usage=return_usage,
                 show_progress=show_progress,
                 preprocess_msg=preprocess_msg,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
 
@@ -683,6 +692,7 @@ class LLMClientPool:
                     return_usage=return_usage,
                     show_progress=show_progress,
                     preprocess_msg=preprocess_msg,
+                    raise_on_error=raise_on_error,
                     **kwargs,
                 )
 
@@ -708,7 +718,7 @@ class LLMClientPool:
             finally:
                 self._router.release(provider)
 
-        # 所有 endpoint 都失败：与单模式行为一致，请求失败返回 RequestResult 而非抛异常
+        # 所有 endpoint 都失败：与单模式行为一致，默认抛出最后一次异常
         if last_error_result is not None:
             logger.warning("所有 endpoint 都失败了，返回最后一次失败的 RequestResult")
             return last_error_result
@@ -726,14 +736,7 @@ class LLMClientPool:
             messages=messages, model=model, return_usage=return_usage, **kwargs
         )
         if isinstance(result, RequestResult):
-            data = result.data
-            status_code = data.get("status_code") if isinstance(data, dict) else None
-            response_data = data.get("response_data") if isinstance(data, dict) else data
-            raise LLMRequestError(
-                f"LLM 请求失败: status={result.status}, data={result.data}",
-                status_code=status_code if isinstance(status_code, int) else None,
-                response_data=response_data,
-            )
+            raise _request_error_from_result(result)
         return result
 
     def chat_completions_sync(
@@ -742,6 +745,7 @@ class LLMClientPool:
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
+        raise_on_error: bool = True,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """同步版本的聊天完成"""
@@ -755,6 +759,7 @@ class LLMClientPool:
                 model=model,
                 return_raw=return_raw,
                 return_usage=return_usage,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
 
@@ -765,6 +770,7 @@ class LLMClientPool:
                 model=model,
                 return_raw=return_raw,
                 return_usage=return_usage,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
         )
@@ -786,6 +792,7 @@ class LLMClientPool:
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
+        raise_on_error: bool = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -832,6 +839,7 @@ class LLMClientPool:
                 metadata_list=metadata_list,
                 save_input=save_input,
                 params_list=params_list,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
 
@@ -859,6 +867,7 @@ class LLMClientPool:
                 metadata_list=metadata_list,
                 save_input=save_input,
                 params_list=params_list,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
         else:
@@ -878,6 +887,7 @@ class LLMClientPool:
                 metadata_list=metadata_list,
                 save_input=save_input,
                 params_list=params_list,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
 
@@ -897,6 +907,7 @@ class LLMClientPool:
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
+        raise_on_error: bool = True,
         **kwargs,
     ):
         """使用单个 endpoint + fallback 的批量调用"""
@@ -927,6 +938,7 @@ class LLMClientPool:
                     metadata_list=metadata_list,
                     save_input=save_input,
                     params_list=params_list,
+                    raise_on_error=raise_on_error,
                     **kwargs,
                 )
                 self._router.mark_success(provider)
@@ -960,6 +972,7 @@ class LLMClientPool:
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
+        raise_on_error: bool = True,
         **kwargs,
     ):
         """
@@ -972,8 +985,12 @@ class LLMClientPool:
         - Fallback 重试：任务失败时自动尝试其他 endpoint
         - 响应缓存：复用 LLMClient 的缓存能力
         """
+        warn_legacy_response(
+            return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
+        )
         n = len(messages_list)
         results = [None] * n
+        errors: dict[int, LLMRequestError] = {}
         cached_count = 0
         start_time = time.perf_counter()
 
@@ -1052,10 +1069,10 @@ class LLMClientPool:
                         if prefix and content is not None:
                             content = prefix + content
                         if return_usage:
-                            results[idx] = ChatCompletionResult(
-                                content=content,
-                                usage=cached_result.get("usage"),
+                            results[idx] = ChatCompletionResult._from_payload(
+                                cached_result, cached=True
                             )
+                            results[idx].content = content
                         else:
                             results[idx] = content
                         completed_indices.add(idx)
@@ -1150,15 +1167,21 @@ class LLMClientPool:
                 if my_endpoint in tried_endpoints:
                     if len(tried_endpoints) >= num_endpoints:
                         # 所有 endpoint 都失败了
+                        terminal_error = LLMRequestError("所有 endpoint 均请求失败", retryable=True)
+                        errors[idx] = terminal_error
                         async with lock:
                             active_tasks -= 1
+                            req_result = RequestResult(
+                                request_id=idx,
+                                data={
+                                    "error": terminal_error.__class__.__name__,
+                                    "detail": str(terminal_error),
+                                },
+                                status="error",
+                                latency=0,
+                            )
+                            results[idx] = req_result if not raise_on_error else None
                             if tracker:
-                                req_result = RequestResult(
-                                    request_id=idx,
-                                    data={"error": "All endpoints failed"},
-                                    status="error",
-                                    latency=0,
-                                )
                                 tracker.update(req_result)
                             writer.write_result(
                                 idx,
@@ -1174,6 +1197,7 @@ class LLMClientPool:
                     continue
 
                 task_start = time.perf_counter()
+                failed_result = None
                 try:
                     if tracker:
                         retry_callback.set(tracker.increment_retry)
@@ -1185,11 +1209,13 @@ class LLMClientPool:
                         model=worker_model,
                         return_raw=return_raw,
                         return_usage=return_usage or not return_raw,
+                        raise_on_error=raise_on_error,
                         **({**kwargs, **row_extra} if row_extra else kwargs),
                     )
 
                     # 检查是否返回了 RequestResult（表示失败）
                     if hasattr(result, "status") and result.status != "success":
+                        failed_result = result
                         error_type = "unknown"
                         error_detail = ""
                         if hasattr(result, "data") and isinstance(result.data, dict):
@@ -1254,16 +1280,19 @@ class LLMClientPool:
                             if tracker:
                                 tracker.increment_retry()
                     else:
-                        results[idx] = None
+                        errors[idx] = (
+                            e if isinstance(e, LLMRequestError) else LLMRequestError(str(e))
+                        )
                         async with lock:
                             active_tasks -= 1
+                            req_result = failed_result or RequestResult(
+                                request_id=idx,
+                                data={"error": str(e)},
+                                status="error",
+                                latency=latency,
+                            )
+                            results[idx] = req_result if not raise_on_error else None
                             if tracker:
-                                req_result = RequestResult(
-                                    request_id=idx,
-                                    data={"error": str(e)},
-                                    status="error",
-                                    latency=latency,
-                                )
                                 tracker.update(req_result)
                             writer.write_result(idx, None, "error", str(e))
 
@@ -1279,6 +1308,11 @@ class LLMClientPool:
             writer.close()
             if tracker:
                 tracker.summary(print_to_console=True)
+
+        if errors and raise_on_error:
+            raise BatchRequestError(
+                f"批量请求失败: {len(errors)}/{n} 条", results=results, errors=errors
+            )
 
         if return_summary:
             total_cached = cached_count + file_restored_count
@@ -1308,6 +1342,7 @@ class LLMClientPool:
         distribute: bool = True,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
+        raise_on_error: bool = True,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
@@ -1329,6 +1364,7 @@ class LLMClientPool:
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
                 save_input=save_input,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
 
@@ -1348,6 +1384,7 @@ class LLMClientPool:
                 distribute=distribute,
                 metadata_list=metadata_list,
                 save_input=save_input,
+                raise_on_error=raise_on_error,
                 **kwargs,
             )
         )

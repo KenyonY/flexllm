@@ -4,6 +4,7 @@ Gemini API Client - Google Gemini 模型的批量调用客户端
 与 OpenAIClient 保持相同的接口，方便上层代码无缝切换。
 """
 
+import asyncio
 import logging
 import re
 from typing import Any
@@ -12,7 +13,13 @@ logger = logging.getLogger(__name__)
 
 from ..async_api import create_proxied_session
 from ..cache import ResponseCacheConfig
-from .base import LLMClientBase
+from .base import (
+    LLMClientBase,
+    LLMConnectionError,
+    LLMHTTPError,
+    LLMTimeoutError,
+    _decode_error_body,
+)
 
 
 class GeminiClient(LLMClientBase):
@@ -290,6 +297,8 @@ class GeminiClient(LLMClientBase):
         """Gemini candidates[0].finishReason → OpenAI 语义（非流式与流式 chunk 结构相同）"""
         candidates = (response_data or {}).get("candidates")
         if not candidates:
+            if (response_data or {}).get("promptFeedback", {}).get("blockReason"):
+                return "content_filter"
             return None
         reason = candidates[0].get("finishReason")
         if not reason:
@@ -501,59 +510,72 @@ class GeminiClient(LLMClientBase):
         )
 
         session, proxy_kwargs = create_proxied_session(self._proxy)
-        async with session:
-            async with session.post(
-                effective_url,
-                json=body,
-                headers=headers,
-                timeout=aio_timeout,
-                **proxy_kwargs,
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise Exception(f"HTTP {response.status}: {error_text}")
+        try:
+            async with session:
+                async with session.post(
+                    effective_url,
+                    json=body,
+                    headers=headers,
+                    timeout=aio_timeout,
+                    **proxy_kwargs,
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise LLMHTTPError(
+                            f"HTTP {response.status}: {error_text}",
+                            status_code=response.status,
+                            response_data=_decode_error_body(error_text),
+                            retryable=response.status == 429 or response.status >= 500,
+                        )
 
-                _last_usage = None
-                _finish_reason = None
-                async for line in response.content:
-                    line = line.decode("utf-8").strip()
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
+                    _last_usage = None
+                    _finish_reason = None
+                    async for line in response.content:
+                        line = line.decode("utf-8").strip()
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
 
-                            # thinking 和 content 可能在同一个 chunk 中
-                            thinking = self._extract_stream_thinking(data)
-                            if thinking:
+                                # thinking 和 content 可能在同一个 chunk 中
+                                thinking = self._extract_stream_thinking(data)
+                                if thinking:
+                                    if return_usage:
+                                        yield {"type": "thinking", "content": thinking}
+
+                                content = self._extract_stream_content(data)
+                                if content:
+                                    if return_usage:
+                                        yield {"type": "content", "content": content}
+                                    else:
+                                        yield content
+
+                                # Gemini 每个 chunk 都带 usageMetadata（累计值），
+                                # 只记录最新值，流结束后统一 yield，保证 usage 事件唯一且在最后
                                 if return_usage:
-                                    yield {"type": "thinking", "content": thinking}
+                                    usage = self._extract_stream_usage(data)
+                                    if usage:
+                                        _last_usage = usage
+                                    reason = self._extract_finish_reason(data)
+                                    if reason:
+                                        _finish_reason = reason
 
-                            content = self._extract_stream_content(data)
-                            if content:
-                                if return_usage:
-                                    yield {"type": "content", "content": content}
-                                else:
-                                    yield content
+                            except json.JSONDecodeError:
+                                continue
 
-                            # Gemini 每个 chunk 都带 usageMetadata（累计值），
-                            # 只记录最新值，流结束后统一 yield，保证 usage 事件唯一且在最后
-                            if return_usage:
-                                usage = self._extract_stream_usage(data)
-                                if usage:
-                                    _last_usage = usage
-                                reason = self._extract_finish_reason(data)
-                                if reason:
-                                    _finish_reason = reason
+                    if return_usage:
+                        yield {"type": "finish", "reason": _finish_reason}
+                        if _last_usage:
+                            yield {"type": "usage", "usage": _last_usage}
 
-                        except json.JSONDecodeError:
-                            continue
-
-                if return_usage:
-                    yield {"type": "finish", "reason": _finish_reason}
-                    if _last_usage:
-                        yield {"type": "usage", "usage": _last_usage}
+        except aiohttp.ClientConnectorError as e:
+            raise LLMConnectionError(f"LLM 流式连接失败: {e}", cause=e, retryable=True) from e
+        except asyncio.TimeoutError as e:
+            raise LLMTimeoutError("LLM 流式请求超时", cause=e, retryable=True) from e
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:
+            raise LLMConnectionError(f"LLM 流式连接失败: {e}", cause=e, retryable=True) from e
 
     # ========== Gemini 特有方法 ==========
 

@@ -11,7 +11,7 @@ from .utils import apply_user_template, extract_code_block
 
 
 def _is_error_result(result) -> bool:
-    """判断返回值是否为失败的 RequestResult（chat_completions 失败时不抛异常）"""
+    """判断显式兼容模式返回的失败 RequestResult。"""
     return hasattr(result, "status") and getattr(result, "status", None) == "error"
 
 
@@ -106,16 +106,24 @@ def single_chat(
                 else:
                     print(f"Assistant: {output}")
 
-    def _fail(error_msg: str):
+    def _fail(error_msg: str, error=None):
         from .errors import ErrorType, cli_error
 
         cli_error(
             ErrorType.NETWORK_ERROR,
             f"LLM 调用失败: {error_msg}",
-            context={"model": model, "base_url": base_url},
+            context={
+                "model": model,
+                "base_url": base_url,
+                **(
+                    {"status_code": error.status_code, "response_data": error.response_data}
+                    if error is not None
+                    else {}
+                ),
+            },
             suggestion="使用 flexllm test 验证连接，或 flexllm chat --dry-run 检查请求",
             doc="flexllm chat --help",
-            retryable=True,
+            retryable=getattr(error, "retryable", True),
         )
 
     try:
@@ -128,7 +136,13 @@ def single_chat(
         if isinstance(e, typer.Exit):
             # cli_error 已经输出并携带退出码，直接向上传递
             raise
+        from flexllm import LLMRequestError
+
         from .errors import ErrorType, cli_error
+
+        if isinstance(e, LLMRequestError):
+            _fail(str(e), e)
+            return
 
         cli_error(
             ErrorType.GENERAL,

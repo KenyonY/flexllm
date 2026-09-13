@@ -4,6 +4,7 @@ Anthropic Claude API Client
 支持 Claude 系列模型（claude-3-opus, claude-3-sonnet, claude-3-haiku 等）
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -15,7 +16,15 @@ logger = logging.getLogger(__name__)
 
 from ..async_api import create_proxied_session
 from ..cache import ResponseCacheConfig
-from .base import LLMClientBase, LLMRequestError, ToolCall, _decode_error_body
+from .base import (
+    LLMClientBase,
+    LLMConnectionError,
+    LLMHTTPError,
+    LLMResponseError,
+    LLMTimeoutError,
+    ToolCall,
+    _decode_error_body,
+)
 
 # Anthropic Messages 流式事件的全集（含本客户端不处理但属于规范的 ping / *_stop / error）。
 # 这个集合之外的事件被当作带外信息透出，而不是静默丢弃。
@@ -722,210 +731,219 @@ class ClaudeClient(LLMClientBase):
         )
 
         session, proxy_kwargs = create_proxied_session(self._proxy)
-        async with session:
-            async with session.post(
-                effective_url,
-                json=body,
-                headers=headers,
-                timeout=aio_timeout,
-                **proxy_kwargs,
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise LLMRequestError(
-                        f"HTTP {response.status}: {error_text}",
-                        status_code=response.status,
-                        response_data=_decode_error_body(error_text),
-                    )
+        try:
+            async with session:
+                async with session.post(
+                    effective_url,
+                    json=body,
+                    headers=headers,
+                    timeout=aio_timeout,
+                    **proxy_kwargs,
+                ) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        raise LLMHTTPError(
+                            f"HTTP {response.status}: {error_text}",
+                            status_code=response.status,
+                            response_data=_decode_error_body(error_text),
+                            retryable=response.status == 429 or response.status >= 500,
+                        )
 
-                usage_data = None
-                finish_reason = None
-                # 同时保留 UI 所需增量和下一轮必须原样回传的 Claude content blocks。
-                content_blocks: dict[int, dict] = {}
-                tool_use_blocks = {}  # {block_index: {"id", "name", "arguments"}}
-                current_block_index = -1
+                    usage_data = None
+                    finish_reason = None
+                    # 同时保留 UI 所需增量和下一轮必须原样回传的 Claude content blocks。
+                    content_blocks: dict[int, dict] = {}
+                    tool_use_blocks = {}  # {block_index: {"id", "name", "arguments"}}
+                    current_block_index = -1
 
-                async for line in response.content:
-                    line = line.decode("utf-8").strip()
-                    if line.startswith("data: "):
-                        data_str = line[6:]
-                        if data_str == "[DONE]":
-                            break
-                        try:
-                            data = json.loads(data_str)
-                            event_type = data.get("type")
+                    async for line in response.content:
+                        line = line.decode("utf-8").strip()
+                        if line.startswith("data: "):
+                            data_str = line[6:]
+                            if data_str == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                                event_type = data.get("type")
 
-                            # Anthropic 规范要求客户端忽略未知事件类型，网关正是靠这一点
-                            # 挂带外信息。这里不解释内容，原样透出给调用方。
-                            if return_usage and event_type not in _KNOWN_STREAM_EVENTS:
-                                yield {"type": "extra", "extra": data}
-                                continue
+                                # Anthropic 规范要求客户端忽略未知事件类型，网关正是靠这一点
+                                # 挂带外信息。这里不解释内容，原样透出给调用方。
+                                if return_usage and event_type not in _KNOWN_STREAM_EVENTS:
+                                    yield {"type": "extra", "extra": data}
+                                    continue
 
-                            # content_block_start: 新 block 开始
-                            if event_type == "content_block_start":
-                                current_block_index = data.get("index", 0)
-                                block = data.get("content_block", {})
-                                if isinstance(block, dict):
-                                    content_blocks[current_block_index] = deepcopy(block)
-                                if block.get("type") == "tool_use":
-                                    tool_use_blocks[current_block_index] = {
-                                        "id": block.get("id", ""),
-                                        "name": block.get("name", ""),
-                                        "arguments": "",
-                                    }
-                                    if return_usage:
-                                        yield {
-                                            "type": "tool_call_delta",
-                                            "tool_calls": [
-                                                {
-                                                    "index": current_block_index,
-                                                    "id": block.get("id", ""),
-                                                    "type": "function",
-                                                    "function": {
-                                                        "name": block.get("name", ""),
-                                                        "arguments": "",
-                                                    },
-                                                }
-                                            ],
+                                # content_block_start: 新 block 开始
+                                if event_type == "content_block_start":
+                                    current_block_index = data.get("index", 0)
+                                    block = data.get("content_block", {})
+                                    if isinstance(block, dict):
+                                        content_blocks[current_block_index] = deepcopy(block)
+                                    if block.get("type") == "tool_use":
+                                        tool_use_blocks[current_block_index] = {
+                                            "id": block.get("id", ""),
+                                            "name": block.get("name", ""),
+                                            "arguments": "",
                                         }
-                                continue
-
-                            # content_block_delta
-                            if event_type == "content_block_delta":
-                                idx = data.get("index", current_block_index)
-                                delta = data.get("delta", {})
-                                delta_type = delta.get("type")
-
-                                # 思考内容
-                                if delta_type == "thinking_delta":
-                                    thinking = delta.get("thinking")
-                                    if thinking and idx in content_blocks:
-                                        content_blocks[idx]["thinking"] = (
-                                            content_blocks[idx].get("thinking", "") + thinking
-                                        )
-                                    if thinking and return_usage:
-                                        yield {"type": "thinking", "content": thinking}
-                                    continue
-
-                                # thinking block 的签名是下一轮工具调用请求的必需状态。
-                                if delta_type == "signature_delta":
-                                    signature = delta.get("signature", "")
-                                    if signature and idx in content_blocks:
-                                        content_blocks[idx]["signature"] = (
-                                            content_blocks[idx].get("signature", "") + signature
-                                        )
-                                    continue
-
-                                # tool_use 的 input_json_delta
-                                if delta_type == "input_json_delta" and idx in tool_use_blocks:
-                                    partial = delta.get("partial_json", "")
-                                    tool_use_blocks[idx]["arguments"] += partial
-                                    if return_usage:
-                                        yield {
-                                            "type": "tool_call_delta",
-                                            "tool_calls": [
-                                                {
-                                                    "index": idx,
-                                                    "function": {"arguments": partial},
-                                                }
-                                            ],
-                                        }
-                                    continue
-
-                                # 文本内容
-                                if delta_type == "text_delta":
-                                    text = delta.get("text")
-                                    if text:
-                                        if idx in content_blocks:
-                                            content_blocks[idx]["text"] = (
-                                                content_blocks[idx].get("text", "") + text
-                                            )
                                         if return_usage:
-                                            yield {"type": "content", "content": text}
-                                        else:
-                                            yield text
+                                            yield {
+                                                "type": "tool_call_delta",
+                                                "tool_calls": [
+                                                    {
+                                                        "index": current_block_index,
+                                                        "id": block.get("id", ""),
+                                                        "type": "function",
+                                                        "function": {
+                                                            "name": block.get("name", ""),
+                                                            "arguments": "",
+                                                        },
+                                                    }
+                                                ],
+                                            }
+                                    continue
+
+                                # content_block_delta
+                                if event_type == "content_block_delta":
+                                    idx = data.get("index", current_block_index)
+                                    delta = data.get("delta", {})
+                                    delta_type = delta.get("type")
+
+                                    # 思考内容
+                                    if delta_type == "thinking_delta":
+                                        thinking = delta.get("thinking")
+                                        if thinking and idx in content_blocks:
+                                            content_blocks[idx]["thinking"] = (
+                                                content_blocks[idx].get("thinking", "") + thinking
+                                            )
+                                        if thinking and return_usage:
+                                            yield {"type": "thinking", "content": thinking}
+                                        continue
+
+                                    # thinking block 的签名是下一轮工具调用请求的必需状态。
+                                    if delta_type == "signature_delta":
+                                        signature = delta.get("signature", "")
+                                        if signature and idx in content_blocks:
+                                            content_blocks[idx]["signature"] = (
+                                                content_blocks[idx].get("signature", "") + signature
+                                            )
+                                        continue
+
+                                    # tool_use 的 input_json_delta
+                                    if delta_type == "input_json_delta" and idx in tool_use_blocks:
+                                        partial = delta.get("partial_json", "")
+                                        tool_use_blocks[idx]["arguments"] += partial
+                                        if return_usage:
+                                            yield {
+                                                "type": "tool_call_delta",
+                                                "tool_calls": [
+                                                    {
+                                                        "index": idx,
+                                                        "function": {"arguments": partial},
+                                                    }
+                                                ],
+                                            }
+                                        continue
+
+                                    # 文本内容
+                                    if delta_type == "text_delta":
+                                        text = delta.get("text")
+                                        if text:
+                                            if idx in content_blocks:
+                                                content_blocks[idx]["text"] = (
+                                                    content_blocks[idx].get("text", "") + text
+                                                )
+                                            if return_usage:
+                                                yield {"type": "content", "content": text}
+                                            else:
+                                                yield text
+                                    continue
+
+                                # message_delta 中的 usage：只带 output_tokens（增量事件
+                                # 不含 input_tokens），必须与 message_start 的记录合并，
+                                # 整体覆盖会把 prompt_tokens 归零
+                                if event_type == "message_delta":
+                                    delta_reason = self._extract_finish_reason(data.get("delta"))
+                                    if delta_reason:
+                                        finish_reason = delta_reason
+                                    usage = data.get("usage")
+                                    if usage:
+                                        prompt_tokens = usage.get("input_tokens") or (
+                                            usage_data.get("prompt_tokens", 0) if usage_data else 0
+                                        )
+                                        completion_tokens = usage.get("output_tokens", 0)
+                                        usage_data = {
+                                            "prompt_tokens": prompt_tokens,
+                                            "completion_tokens": completion_tokens,
+                                            "total_tokens": prompt_tokens + completion_tokens,
+                                        }
+
+                                # message_start 中的 usage（输入 tokens）
+                                if event_type == "message_start":
+                                    msg_usage = data.get("message", {}).get("usage", {})
+                                    if msg_usage:
+                                        usage_data = {
+                                            "prompt_tokens": msg_usage.get("input_tokens", 0),
+                                            "completion_tokens": msg_usage.get("output_tokens", 0),
+                                            "total_tokens": msg_usage.get("input_tokens", 0)
+                                            + msg_usage.get("output_tokens", 0),
+                                        }
+
+                            except json.JSONDecodeError:
                                 continue
 
-                            # message_delta 中的 usage：只带 output_tokens（增量事件
-                            # 不含 input_tokens），必须与 message_start 的记录合并，
-                            # 整体覆盖会把 prompt_tokens 归零
-                            if event_type == "message_delta":
-                                delta_reason = self._extract_finish_reason(data.get("delta"))
-                                if delta_reason:
-                                    finish_reason = delta_reason
-                                usage = data.get("usage")
-                                if usage:
-                                    prompt_tokens = usage.get("input_tokens") or (
-                                        usage_data.get("prompt_tokens", 0) if usage_data else 0
-                                    )
-                                    completion_tokens = usage.get("output_tokens", 0)
-                                    usage_data = {
-                                        "prompt_tokens": prompt_tokens,
-                                        "completion_tokens": completion_tokens,
-                                        "total_tokens": prompt_tokens + completion_tokens,
-                                    }
-
-                            # message_start 中的 usage（输入 tokens）
-                            if event_type == "message_start":
-                                msg_usage = data.get("message", {}).get("usage", {})
-                                if msg_usage:
-                                    usage_data = {
-                                        "prompt_tokens": msg_usage.get("input_tokens", 0),
-                                        "completion_tokens": msg_usage.get("output_tokens", 0),
-                                        "total_tokens": msg_usage.get("input_tokens", 0)
-                                        + msg_usage.get("output_tokens", 0),
-                                    }
-
-                        except json.JSONDecodeError:
-                            continue
-
-                if return_usage:
-                    continuation_blocks = [
-                        deepcopy(block) for _, block in sorted(content_blocks.items())
-                    ]
-                    if any(
-                        block.get("type") in {"thinking", "redacted_thinking", "tool_use"}
-                        for block in continuation_blocks
-                    ):
-                        for idx, block in sorted(content_blocks.items()):
-                            if block.get("type") != "tool_use" or idx not in tool_use_blocks:
-                                continue
-                            arguments = tool_use_blocks[idx]["arguments"]
-                            if arguments:
-                                try:
-                                    block["input"] = json.loads(arguments)
-                                except json.JSONDecodeError:
-                                    # 保留不完整 JSON 只能制造一个下一轮必然失败的请求；
-                                    # 流结束时工具参数应完整，因此明确暴露协议错误。
-                                    raise LLMRequestError(
-                                        f"Invalid streamed Claude tool input: {arguments!r}"
-                                    )
+                    if return_usage:
                         continuation_blocks = [
                             deepcopy(block) for _, block in sorted(content_blocks.items())
                         ]
-                        assistant_message = {
-                            "role": "assistant",
-                            "content": continuation_blocks,
-                        }
-                        if tool_use_blocks:
-                            assistant_message["tool_calls"] = [
-                                {
-                                    "id": block["id"],
-                                    "type": "function",
-                                    "function": {
-                                        "name": block["name"],
-                                        "arguments": block["arguments"],
-                                    },
-                                }
-                                for _, block in sorted(tool_use_blocks.items())
+                        if any(
+                            block.get("type") in {"thinking", "redacted_thinking", "tool_use"}
+                            for block in continuation_blocks
+                        ):
+                            for idx, block in sorted(content_blocks.items()):
+                                if block.get("type") != "tool_use" or idx not in tool_use_blocks:
+                                    continue
+                                arguments = tool_use_blocks[idx]["arguments"]
+                                if arguments:
+                                    try:
+                                        block["input"] = json.loads(arguments)
+                                    except json.JSONDecodeError:
+                                        # 保留不完整 JSON 只能制造一个下一轮必然失败的请求；
+                                        # 流结束时工具参数应完整，因此明确暴露协议错误。
+                                        raise LLMResponseError(
+                                            f"Invalid streamed Claude tool input: {arguments!r}"
+                                        )
+                            continuation_blocks = [
+                                deepcopy(block) for _, block in sorted(content_blocks.items())
                             ]
-                        yield {
-                            "type": "assistant_message",
-                            "message": assistant_message,
-                        }
-                    yield {"type": "finish", "reason": finish_reason}
-                    if usage_data:
-                        yield {"type": "usage", "usage": usage_data}
+                            assistant_message = {
+                                "role": "assistant",
+                                "content": continuation_blocks,
+                            }
+                            if tool_use_blocks:
+                                assistant_message["tool_calls"] = [
+                                    {
+                                        "id": block["id"],
+                                        "type": "function",
+                                        "function": {
+                                            "name": block["name"],
+                                            "arguments": block["arguments"],
+                                        },
+                                    }
+                                    for _, block in sorted(tool_use_blocks.items())
+                                ]
+                            yield {
+                                "type": "assistant_message",
+                                "message": assistant_message,
+                            }
+                        yield {"type": "finish", "reason": finish_reason}
+                        if usage_data:
+                            yield {"type": "usage", "usage": usage_data}
+
+        except aiohttp.ClientConnectorError as e:
+            raise LLMConnectionError(f"LLM 流式连接失败: {e}", cause=e, retryable=True) from e
+        except asyncio.TimeoutError as e:
+            raise LLMTimeoutError("LLM 流式请求超时", cause=e, retryable=True) from e
+        except (aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:
+            raise LLMConnectionError(f"LLM 流式连接失败: {e}", cause=e, retryable=True) from e
 
     @staticmethod
     def parse_thoughts(response_data: dict) -> dict:
