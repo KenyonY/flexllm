@@ -837,7 +837,10 @@ class LLMClientBase(CompletionMixin, ABC):
                 for i, resp in enumerate(cached_responses):
                     if resp is not None and i not in completed_indices:
                         writer.write_result(
-                            i, with_prefix(i, resp["content"]), usage=resp.get("usage")
+                            i,
+                            with_prefix(i, resp["content"]),
+                            usage=resp.get("usage"),
+                            result=resp if return_usage and not return_raw else None,
                         )
 
                 # 过滤掉文件中已完成的
@@ -1039,7 +1042,7 @@ class LLMClientBase(CompletionMixin, ABC):
             if return_usage and not return_raw:
                 restored = (
                     ChatCompletionResult._from_payload(record["result"], cached=True)
-                    if record.get("result")
+                    if isinstance(record.get("result"), dict)
                     else ChatCompletionResult(content=record["output"], usage=record.get("usage"))
                 )
                 restored.content = record["output"]

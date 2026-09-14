@@ -1,10 +1,16 @@
 """Unit tests for LLMClientPool"""
 
+import warnings
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from flexllm import LLMClientPool
+from flexllm import (
+    BatchRequestError,
+    LegacyResponseWarning,
+    LLMClientPool,
+    LLMHTTPError,
+)
 from flexllm.clients.base import ChatCompletionResult
 
 
@@ -148,6 +154,104 @@ class TestClientPoolTrackCost:
             # Verify return_usage or track_cost was passed as True
             call_kwargs = mock_batch.call_args[1]
             assert call_kwargs.get("return_usage") is True or call_kwargs.get("track_cost") is True
+
+
+class TestBatchFallbackContract:
+    @staticmethod
+    def _pool(*, fallback=True, failure_threshold=float("inf")):
+        return LLMClientPool(
+            endpoints=[
+                {"base_url": "http://api1.com/v1", "model": "m"},
+                {"base_url": "http://api2.com/v1", "model": "m"},
+            ],
+            fallback=fallback,
+            failure_threshold=failure_threshold,
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_retries_only_failed_item_without_legacy_warning(self):
+        pool = self._pool()
+        messages = [
+            [{"role": "user", "content": "first"}],
+            [{"role": "user", "content": "second"}],
+        ]
+        upstream_error = LLMHTTPError("HTTP 500", status_code=500, response_data={"x": 1})
+        first = BatchRequestError(
+            "partial",
+            results=[ChatCompletionResult(content="ok-1"), None],
+            errors={1: upstream_error},
+        )
+        pool._clients[0].chat_completions_batch = AsyncMock(side_effect=first)
+        pool._clients[1].chat_completions_batch = AsyncMock(
+            return_value=[ChatCompletionResult(content="ok-2")]
+        )
+
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            results = await pool.complete_batch(messages, distribute=False)
+
+        assert not [w for w in captured if issubclass(w.category, LegacyResponseWarning)]
+        assert [result.content for result in results] == ["ok-1", "ok-2"]
+        second_call = pool._clients[1].chat_completions_batch.call_args.kwargs
+        assert second_call["messages_list"] == [messages[1]]
+        assert second_call["raise_on_error"] is True
+
+    @pytest.mark.asyncio
+    async def test_cost_report_shape_does_not_hide_failed_items(self):
+        pool = self._pool()
+        error = BatchRequestError(
+            "failed",
+            results=[None],
+            errors={0: LLMHTTPError("HTTP 500", status_code=500)},
+        )
+        pool._clients[0].chat_completions_batch = AsyncMock(side_effect=error)
+        pool._clients[1].chat_completions_batch = AsyncMock(return_value=["ok"])
+
+        results, report = await pool.chat_completions_batch(
+            [[{"role": "user", "content": "test"}]],
+            distribute=False,
+            return_cost_report=True,
+        )
+
+        assert results == ["ok"]
+        assert report.request_count == 0
+        pool._clients[1].chat_completions_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_all_failures_keep_last_typed_error(self):
+        pool = self._pool()
+        for client, status in zip(pool._clients, (500, 503)):
+            client.chat_completions_batch = AsyncMock(
+                side_effect=BatchRequestError(
+                    "failed",
+                    results=[None],
+                    errors={0: LLMHTTPError(f"HTTP {status}", status_code=status)},
+                )
+            )
+
+        with pytest.raises(BatchRequestError) as raised:
+            await pool.complete_batch([[{"role": "user", "content": "test"}]], distribute=False)
+
+        assert isinstance(raised.value.errors[0], LLMHTTPError)
+        assert raised.value.errors[0].status_code == 503
+
+    @pytest.mark.asyncio
+    async def test_failure_without_fallback_marks_endpoint_failed(self):
+        pool = LLMClientPool(
+            endpoints=[{"base_url": "http://api1.com/v1", "model": "m"}],
+            fallback=False,
+            failure_threshold=1,
+        )
+        pool._clients[0].chat_completions_batch = AsyncMock(return_value=[None])
+
+        results = await pool.chat_completions_batch(
+            [[{"role": "user", "content": "test"}]], distribute=False
+        )
+
+        assert results == [None]
+        status = pool._router.stats["providers"][0]
+        assert status["healthy"] is False
+        assert status["failures"] == 1
 
 
 class TestClientPoolOutputJsonl:

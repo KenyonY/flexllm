@@ -3,6 +3,8 @@
 import asyncio
 import sys
 import warnings
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -13,8 +15,21 @@ class LegacyResponseWarning(FutureWarning):
     """A legacy return shape is being used during the migration period."""
 
 
+_SUPPRESS_LEGACY_WARNING = ContextVar("flexllm_suppress_legacy_warning", default=False)
+
+
+@contextmanager
+def suppress_legacy_response_warning():
+    """Avoid duplicate warnings when a public pool API calls a provider internally."""
+    token = _SUPPRESS_LEGACY_WARNING.set(True)
+    try:
+        yield
+    finally:
+        _SUPPRESS_LEGACY_WARNING.reset(token)
+
+
 def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error: bool):
-    if return_usage and not return_raw and raise_on_error:
+    if _SUPPRESS_LEGACY_WARNING.get() or (return_usage and not return_raw and raise_on_error):
         return
     # Attribute warnings to the consumer even through pool and sync wrappers.
     level = 2

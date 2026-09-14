@@ -26,7 +26,7 @@ import pytest
 # 整个文件标记为 slow（Mock Server 启动开销大）
 pytestmark = pytest.mark.slow
 
-from flexllm import BatchRequestError, LLMClient, LLMClientPool, LLMHTTPError
+from flexllm import BatchRequestError, LegacyResponseWarning, LLMClient, LLMClientPool, LLMHTTPError
 from flexllm.clients import ClaudeClient, GeminiClient, LLMClientBase, OpenAIClient
 from flexllm.clients.base import ChatCompletionResult
 from flexllm.mock import MockLLMServer, MockLLMServerGroup, MockServerConfig
@@ -1323,13 +1323,14 @@ class TestErrorHandling:
 
     @pytest.mark.asyncio
     async def test_single_fail_legacy_result(self):
-        """显式关闭 raise_on_error 时保留旧 RequestResult 行为"""
+        """旧接口默认保留 RequestResult 行为并发出弃用警告"""
         cfg = MockServerConfig(port=19465, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
-                result = await client.chat_completions(_msgs(), raise_on_error=False)
+                with pytest.warns(LegacyResponseWarning):
+                    result = await client.chat_completions(_msgs())
                 assert result.status == "error"
 
 

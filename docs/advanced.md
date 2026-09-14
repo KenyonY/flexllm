@@ -312,8 +312,9 @@ async with LLMClient.from_config(model="qwen-pool") as client:
 - `fallback` 默认为 `true`，设为 `false` 后失败请求不切换副本；负载分配仍生效。
 - `await client.chat_completions_or_raise(...)` 支持单地址和 pool：选路及故障转移完成后，
   若请求仍失败则抛出 `LLMRequestError`，保留 `status_code` 与结构化 `response_data`。
-- `chat_completions()` 现在默认也使用同一套结构化异常；成功返回类型保持兼容。
-  依赖旧版失败 `RequestResult` 的代码必须显式传入 `raise_on_error=False`。
+- 新代码使用 `complete()` / `complete_batch()` 获得统一结果和结构化异常。
+  旧 `chat_completions*` 默认保留原返回行为并发出 `LegacyResponseWarning`；
+  可显式传入 `raise_on_error=True` 提前采用结构化异常。
 - `system`、`user_template`、生成参数仍按具名模型读取，`endpoints`、`fallback`
   和 `proxy` 不会作为生成参数发给模型。
 - CLI 的显式 `--base-url`（或 `from_config(base_url=...)`）会替换整个地址池，

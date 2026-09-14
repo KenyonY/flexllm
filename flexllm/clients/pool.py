@@ -40,6 +40,7 @@ from ..async_api.interface import RequestResult
 from ..async_api.progress import ProgressBarConfig, ProgressTracker
 from ..cache import ResponseCacheConfig
 from ..pricing import get_model_pricing
+from ..pricing.cost_tracker import CostReport
 from ..utils.core import retry_callback
 from .base import (
     BatchRequestError,
@@ -54,7 +55,11 @@ from .batch_helpers import (
     validate_batch_params,
 )
 from .claude import ClaudeClient
-from .completion import CompletionMixin, warn_legacy_response
+from .completion import (
+    CompletionMixin,
+    suppress_legacy_response_warning,
+    warn_legacy_response,
+)
 from .gemini import GeminiClient
 from .openai import OpenAIClient
 from .router import ProviderConfig, ProviderRouter
@@ -652,25 +657,29 @@ class LLMClientPool(CompletionMixin):
 
         Returns:
             与 LLMClient.chat_completions 返回值一致。
-            请求失败时（所有可用 endpoint 都失败）默认抛出结构化异常。
-            传入 raise_on_error=False 可保留 RequestResult 兼容行为。
+            默认保留旧返回行为并发出 LegacyResponseWarning。
+            传入 raise_on_error=True 时在所有 endpoint 失败后抛出结构化异常。
             仅当失败源于本地异常（非 HTTP 请求失败）时才向上抛出。
         """
+        warn_legacy_response(
+            return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
+        )
         kwargs = self._merge_config_params(kwargs)
         messages = self._prepare_messages(messages)
 
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
-            return await self._single_client.chat_completions(
-                messages=messages,
-                model=model,
-                return_raw=return_raw,
-                return_usage=return_usage,
-                show_progress=show_progress,
-                preprocess_msg=preprocess_msg,
-                raise_on_error=raise_on_error,
-                **kwargs,
-            )
+            with suppress_legacy_response_warning():
+                return await self._single_client.chat_completions(
+                    messages=messages,
+                    model=model,
+                    return_raw=return_raw,
+                    return_usage=return_usage,
+                    show_progress=show_progress,
+                    preprocess_msg=preprocess_msg,
+                    raise_on_error=raise_on_error,
+                    **kwargs,
+                )
 
         # 多 endpoint 模式：容量感知选路 + fallback
         last_error = None
@@ -685,16 +694,17 @@ class LLMClientPool(CompletionMixin):
             tried_providers.append(provider)
 
             try:
-                result = await client.chat_completions(
-                    messages=messages,
-                    model=model or provider.model,
-                    return_raw=return_raw,
-                    return_usage=return_usage,
-                    show_progress=show_progress,
-                    preprocess_msg=preprocess_msg,
-                    raise_on_error=raise_on_error,
-                    **kwargs,
-                )
+                with suppress_legacy_response_warning():
+                    result = await client.chat_completions(
+                        messages=messages,
+                        model=model or provider.model,
+                        return_raw=return_raw,
+                        return_usage=return_usage,
+                        show_progress=show_progress,
+                        preprocess_msg=preprocess_msg,
+                        raise_on_error=raise_on_error,
+                        **kwargs,
+                    )
 
                 # 检查是否返回了 RequestResult（表示请求失败）
                 if hasattr(result, "status") and result.status != "success":
@@ -718,7 +728,7 @@ class LLMClientPool(CompletionMixin):
             finally:
                 self._router.release(provider)
 
-        # 所有 endpoint 都失败：与单模式行为一致，默认抛出最后一次异常
+        # 所有 endpoint 都失败：raise_on_error=True 时抛出；兼容模式返回最后一次结果
         if last_error_result is not None:
             logger.warning("所有 endpoint 都失败了，返回最后一次失败的 RequestResult")
             return last_error_result
@@ -819,29 +829,33 @@ class LLMClientPool(CompletionMixin):
         Returns:
             与 LLMClient.chat_completions_batch 返回值一致
         """
+        warn_legacy_response(
+            return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
+        )
         kwargs = self._merge_config_params(kwargs)
         messages_list = self._prepare_messages_batch(messages_list)
 
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
-            return await self._single_client.chat_completions_batch(
-                messages_list=messages_list,
-                model=model,
-                return_raw=return_raw,
-                return_usage=return_usage,
-                show_progress=show_progress,
-                return_summary=return_summary,
-                return_cost_report=return_cost_report,
-                track_cost=track_cost,
-                preprocess_msg=preprocess_msg,
-                output_jsonl=output_jsonl,
-                flush_interval=flush_interval,
-                metadata_list=metadata_list,
-                save_input=save_input,
-                params_list=params_list,
-                raise_on_error=raise_on_error,
-                **kwargs,
-            )
+            with suppress_legacy_response_warning():
+                return await self._single_client.chat_completions_batch(
+                    messages_list=messages_list,
+                    model=model,
+                    return_raw=return_raw,
+                    return_usage=return_usage,
+                    show_progress=show_progress,
+                    return_summary=return_summary,
+                    return_cost_report=return_cost_report,
+                    track_cost=track_cost,
+                    preprocess_msg=preprocess_msg,
+                    output_jsonl=output_jsonl,
+                    flush_interval=flush_interval,
+                    metadata_list=metadata_list,
+                    save_input=save_input,
+                    params_list=params_list,
+                    raise_on_error=raise_on_error,
+                    **kwargs,
+                )
 
         # 多 endpoint 模式：参数校验
         # track_cost 需要 usage 信息
@@ -910,86 +924,136 @@ class LLMClientPool(CompletionMixin):
         raise_on_error: bool = False,
         **kwargs,
     ):
-        """使用单个 endpoint + fallback 的批量调用"""
-        last_error = None
+        """Use one endpoint at a time and retry only items that failed."""
+        started = time.perf_counter()
+        total = len(messages_list)
+        final_results = [None] * total
+        final_errors: dict[int, LLMRequestError] = {}
+        pending = list(range(total))
         tried_providers: list[ProviderConfig] = []
 
-        for _ in range(self._max_fallback_attempts):
-            # 整批算 1 个 in-flight：计数不精确，但能让单条调用避开正在跑批的 endpoint
+        for attempt in range(self._max_fallback_attempts):
+            if not pending:
+                break
             client, provider = self._acquire_client(tried_providers)
             if provider is None:
-                break  # 健康的 endpoint 都已尝试过
-
+                break
             tried_providers.append(provider)
-
+            local_messages = [messages_list[i] for i in pending]
+            local_metadata = [metadata_list[i] for i in pending] if metadata_list else None
+            local_params = [params_list[i] for i in pending] if params_list else None
             try:
-                result = await client.chat_completions_batch(
-                    messages_list=messages_list,
-                    model=model or provider.model,
-                    return_raw=return_raw,
-                    return_usage=return_usage,
-                    show_progress=show_progress,
-                    return_summary=return_summary,
-                    return_cost_report=return_cost_report,
-                    track_cost=track_cost,
-                    preprocess_msg=preprocess_msg,
-                    output_jsonl=output_jsonl,
-                    flush_interval=flush_interval,
-                    metadata_list=metadata_list,
-                    save_input=save_input,
-                    params_list=params_list,
-                    # Obtain per-item legacy results first.  Raising inside the
-                    # endpoint would make fallback repeat already-successful items.
-                    raise_on_error=False,
-                    **kwargs,
-                )
-                result_values = result[0] if return_summary else result
-                missing = [i for i, value in enumerate(result_values) if value is None]
-                if missing and self._fallback and len(missing) < len(messages_list):
-                    if raise_on_error:
-                        raise BatchRequestError(
-                            f"批量请求失败: {len(missing)}/{len(messages_list)} 条",
-                            results=result_values,
-                            errors={i: LLMRequestError("Batch item failed") for i in missing},
-                        )
-                    return result
-                if missing and self._fallback and len(missing) == len(messages_list):
-                    raise LLMRequestError("当前 endpoint 批量请求全部失败", retryable=True)
-                self._router.mark_success(provider)
-                if raise_on_error and missing:
-                    raise BatchRequestError(
-                        f"批量请求失败: {len(missing)}/{len(messages_list)} 条",
-                        results=result_values,
-                        errors={i: LLMRequestError("Batch item failed") for i in missing},
+                # Force typed errors internally so the pool can retain the exact
+                # status/body while still deciding fallback per item.
+                with suppress_legacy_response_warning():
+                    result = await client.chat_completions_batch(
+                        messages_list=local_messages,
+                        model=model or provider.model,
+                        return_raw=return_raw,
+                        return_usage=return_usage,
+                        show_progress=show_progress,
+                        return_summary=return_summary if attempt == 0 else False,
+                        return_cost_report=return_cost_report if attempt == 0 else False,
+                        track_cost=track_cost,
+                        preprocess_msg=preprocess_msg,
+                        output_jsonl=output_jsonl if attempt == 0 else None,
+                        flush_interval=flush_interval,
+                        metadata_list=local_metadata,
+                        save_input=save_input,
+                        params_list=local_params,
+                        raise_on_error=True,
+                        **kwargs,
                     )
-                return result
-
-            except BatchRequestError:
-                raise
-            except Exception as e:
-                last_error = e
-                self._router.mark_failed(provider)
-                logger.warning(f"Endpoint {provider.base_url} 批量调用失败: {e}")
-
-                if not self._fallback:
-                    raise
+                values = result[0] if isinstance(result, tuple) else result
+                local_errors = {}
+            except BatchRequestError as error:
+                values = error.results
+                local_errors = error.errors
+            except Exception as error:
+                values = [None] * len(pending)
+                typed = error if isinstance(error, LLMRequestError) else LLMRequestError(str(error))
+                local_errors = {i: typed for i in range(len(pending))}
             finally:
                 self._router.release(provider)
 
-        if raise_on_error:
-            raise BatchRequestError(
-                f"批量请求失败: {len(messages_list)}/{len(messages_list)} 条",
-                results=[None] * len(messages_list),
-                errors={
-                    i: last_error
-                    if isinstance(last_error, LLMRequestError)
-                    else LLMRequestError(
-                        str(last_error or "所有 endpoint 都失败了"), retryable=True
+            missing = []
+            for local_idx, original_idx in enumerate(pending):
+                value = values[local_idx] if local_idx < len(values) else None
+                if value is None:
+                    missing.append(original_idx)
+                    final_errors[original_idx] = local_errors.get(
+                        local_idx, LLMRequestError("Batch item failed")
                     )
-                    for i in range(len(messages_list))
-                },
+                else:
+                    final_results[original_idx] = value
+                    final_errors.pop(original_idx, None)
+
+            if not missing:
+                self._router.mark_success(provider)
+                pending = []
+                if attempt == 0:
+                    return result
+                break
+            # A provider that returned failed items is unhealthy for fallback
+            # routing, even if the client did not raise an aggregate exception.
+            self._router.mark_failed(provider)
+            pending = missing if self._fallback else []
+            if not self._fallback:
+                break
+
+        # Results recovered from a later endpoint must be checkpointed with their
+        # original indices; the provider batch above intentionally used no output file.
+        if output_jsonl and any(value is not None for value in final_results):
+            writer = JsonlWriter(
+                output_jsonl, messages_list, save_input, metadata_list, flush_interval, params_list
             )
-        return [None] * len(messages_list)
+            try:
+                for index, value in enumerate(final_results):
+                    if value is None:
+                        continue
+                    if isinstance(value, ChatCompletionResult):
+                        writer.write_result(
+                            index,
+                            value.content,
+                            usage=value.usage,
+                            result=asdict(value) if return_usage else None,
+                        )
+                    else:
+                        writer.write_result(index, value)
+            finally:
+                writer.close()
+
+        if final_errors and raise_on_error:
+            raise BatchRequestError(
+                f"批量请求失败: {len(final_errors)}/{total} 条",
+                results=final_results,
+                errors=final_errors,
+            )
+
+        result = final_results
+        summary = None
+        if return_summary:
+            summary = {
+                "total": total,
+                "success": total - len(final_errors),
+                "failed": len(final_errors),
+                "cached": 0,
+                "elapsed": time.perf_counter() - started,
+            }
+            result = (final_results, summary)
+        if return_cost_report:
+            report = CostReport()
+            for client in self._clients:
+                tracker = getattr(client, "_cost_tracker", None)
+                if tracker:
+                    current = tracker.get_report()
+                    report.total_cost += current.total_cost
+                    report.total_input_tokens += current.total_input_tokens
+                    report.total_output_tokens += current.total_output_tokens
+                    report.request_count += current.request_count
+                    report.model = report.model or current.model
+            result = (final_results, summary, report) if return_summary else (final_results, report)
+        return result
 
     async def _batch_distributed(
         self,
@@ -1020,9 +1084,6 @@ class LLMClientPool(CompletionMixin):
         - Fallback 重试：任务失败时自动尝试其他 endpoint
         - 响应缓存：复用 LLMClient 的缓存能力
         """
-        warn_legacy_response(
-            return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
-        )
         n = len(messages_list)
         results = [None] * n
         errors: dict[int, LLMRequestError] = {}
@@ -1070,7 +1131,7 @@ class LLMClientPool(CompletionMixin):
                 if return_usage and not return_raw:
                     restored = (
                         ChatCompletionResult._from_payload(record["result"], cached=True)
-                        if record.get("result")
+                        if isinstance(record.get("result"), dict)
                         else ChatCompletionResult(
                             content=record["output"], usage=record.get("usage")
                         )
@@ -1123,6 +1184,7 @@ class LLMClientPool(CompletionMixin):
                             idx,
                             content,
                             usage=cached_result.get("usage"),
+                            result=cached_result if return_usage else None,
                         )
             if cached_count > 0:
                 logger.info(f"缓存命中: {cached_count}/{n}")
@@ -1245,14 +1307,15 @@ class LLMClientPool(CompletionMixin):
                     row_extra = gen_params_list[idx] if gen_params_list else None
                     # 内部强制 return_usage=True 以拿到 queue_time（return_raw 时
                     # RequestResult 本身就带），返回前按用户要求解包
-                    result = await client.chat_completions(
-                        messages=msg,
-                        model=worker_model,
-                        return_raw=return_raw,
-                        return_usage=return_usage or not return_raw,
-                        raise_on_error=raise_on_error,
-                        **({**kwargs, **row_extra} if row_extra else kwargs),
-                    )
+                    with suppress_legacy_response_warning():
+                        result = await client.chat_completions(
+                            messages=msg,
+                            model=worker_model,
+                            return_raw=return_raw,
+                            return_usage=return_usage or not return_raw,
+                            raise_on_error=raise_on_error,
+                            **({**kwargs, **row_extra} if row_extra else kwargs),
+                        )
 
                     # 检查是否返回了 RequestResult（表示失败）
                     if hasattr(result, "status") and result.status != "success":

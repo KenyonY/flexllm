@@ -271,7 +271,7 @@ class AudioMixin:
             - return_raw=True: RequestResult
             - return_details=True: TranscriptionResult
             - 默认: 转录文本 str
-            - 旧接口默认保留旧行为并发出弃用警告；raise_on_error=True 时抛出结构化异常
+            - 默认保留旧错误返回；raise_on_error=True 时抛出结构化异常
         """
         params = self._build_transcription_params(
             audio,
@@ -331,7 +331,7 @@ class AudioMixin:
         """并发转录多个音频。
 
         并发数与 QPS 由客户端的 concurrency_limit / max_qps 控制。
-        默认失败时保留旧返回行为并发出弃用警告；raise_on_error=True 时抛出 BatchRequestError。
+        默认失败时保留旧返回行为；raise_on_error=True 时抛出 BatchRequestError。
         """
         if filenames is not None and len(filenames) != len(audios):
             raise ValueError(f"filenames 数量({len(filenames)})与 audios({len(audios)})不一致")
@@ -453,7 +453,7 @@ class AudioMixin:
         Returns:
             - output 为 None: 音频 bytes
             - output 给出: 写入后的 Path
-            - 旧接口默认保留旧行为并发出弃用警告；raise_on_error=True 时抛出结构化异常
+            - 默认保留旧错误返回；raise_on_error=True 时抛出结构化异常
         """
         params = self._build_speech_params(text, model, voice, response_format, speed, extra)
         results, _ = await self._client.process_requests(
@@ -483,7 +483,7 @@ class AudioMixin:
         """并发合成多段文本。
 
         并发数与 QPS 由客户端的 concurrency_limit / max_qps 控制。
-        默认失败时保留旧返回行为并发出弃用警告；raise_on_error=True 时抛出 BatchRequestError。
+        默认失败时保留旧返回行为；raise_on_error=True 时抛出 BatchRequestError。
         """
         if outputs is not None and len(outputs) != len(texts):
             raise ValueError(f"outputs 数量({len(outputs)})与 texts({len(texts)})不一致")

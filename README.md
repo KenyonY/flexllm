@@ -129,10 +129,11 @@ result = await client.chat_completions(
 print(f"Tokens: {result.usage}")  # {'prompt_tokens': 10, 'completion_tokens': 5, ...}
 ```
 
-请求失败时，单条接口新 `complete*` 接口默认抛出结构化 `LLMRequestError`；旧接口默认保留原返回行为并发出弃用警告（包含 `status_code`、
-`response_data` 和 `retryable`）。需要兼容旧版 `RequestResult(status="error")`
-行为时，显式传入 `raise_on_error=False`。批量请求失败时抛出 `BatchRequestError`，
-异常中的 `results` 和 `errors` 分别保留已完成结果与失败索引。
+新 `complete*` 接口失败时抛出结构化 `LLMRequestError`（包含 `status_code`、
+`response_data` 和 `retryable`）；`complete_batch()` 部分失败时抛出
+`BatchRequestError`，其中 `results` 和 `errors` 分别保留已完成结果与失败索引。
+旧 `chat_completions*` 接口默认继续返回原有类型并发出 `LegacyResponseWarning`；
+也可显式传入 `raise_on_error=True` 提前采用结构化异常。
 
 ### Batch Processing with Checkpoint Recovery
 
