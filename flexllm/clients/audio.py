@@ -248,7 +248,7 @@ class AudioMixin:
         return_details: bool = False,
         return_raw: bool = False,
         show_progress: bool = False,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **extra,
     ) -> Union[str, TranscriptionResult, "RequestResult"]:
         """转录单个音频文件。
@@ -271,7 +271,7 @@ class AudioMixin:
             - return_raw=True: RequestResult
             - return_details=True: TranscriptionResult
             - 默认: 转录文本 str
-            - 请求失败时默认抛出结构化异常；raise_on_error=False 保留旧行为
+            - 旧接口默认保留旧行为并发出弃用警告；raise_on_error=True 时抛出结构化异常
         """
         params = self._build_transcription_params(
             audio,
@@ -325,13 +325,13 @@ class AudioMixin:
         return_details: bool = False,
         return_raw: bool = False,
         show_progress: bool = True,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **extra,
     ) -> list:
         """并发转录多个音频。
 
         并发数与 QPS 由客户端的 concurrency_limit / max_qps 控制。
-        默认失败时抛出 BatchRequestError；raise_on_error=False 时失败项为 RequestResult。
+        默认失败时保留旧返回行为并发出弃用警告；raise_on_error=True 时抛出 BatchRequestError。
         """
         if filenames is not None and len(filenames) != len(audios):
             raise ValueError(f"filenames 数量({len(filenames)})与 audios({len(audios)})不一致")
@@ -435,7 +435,7 @@ class AudioMixin:
         speed: float | None = None,
         output: Union[str, Path, None] = None,
         show_progress: bool = False,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **extra,
     ) -> Union[bytes, Path, "RequestResult"]:
         """把文本合成为语音。
@@ -453,7 +453,7 @@ class AudioMixin:
         Returns:
             - output 为 None: 音频 bytes
             - output 给出: 写入后的 Path
-            - 请求失败时默认抛出结构化异常；raise_on_error=False 返回 RequestResult
+            - 旧接口默认保留旧行为并发出弃用警告；raise_on_error=True 时抛出结构化异常
         """
         params = self._build_speech_params(text, model, voice, response_format, speed, extra)
         results, _ = await self._client.process_requests(
@@ -477,13 +477,13 @@ class AudioMixin:
         speed: float | None = None,
         outputs: list | None = None,
         show_progress: bool = True,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **extra,
     ) -> list:
         """并发合成多段文本。
 
         并发数与 QPS 由客户端的 concurrency_limit / max_qps 控制。
-        默认失败时抛出 BatchRequestError；raise_on_error=False 时失败项为 RequestResult。
+        默认失败时保留旧返回行为并发出弃用警告；raise_on_error=True 时抛出 BatchRequestError。
         """
         if outputs is not None and len(outputs) != len(texts):
             raise ValueError(f"outputs 数量({len(outputs)})与 texts({len(texts)})不一致")

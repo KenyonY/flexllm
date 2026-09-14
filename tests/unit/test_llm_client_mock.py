@@ -1265,7 +1265,9 @@ class TestErrorHandling:
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
                 with pytest.raises(BatchRequestError) as raised:
-                    await client.chat_completions_batch(_batch_msgs(3), show_progress=False)
+                    await client.chat_completions_batch(
+                        _batch_msgs(3), show_progress=False, raise_on_error=True
+                    )
                 assert len(raised.value.errors) == 3
                 assert all(
                     isinstance(error, LLMHTTPError) for error in raised.value.errors.values()
@@ -1281,7 +1283,7 @@ class TestErrorHandling:
             ) as client:
                 with pytest.raises(BatchRequestError) as raised:
                     await client.chat_completions_batch(
-                        _batch_msgs(3), show_progress=True, return_summary=True
+                        _batch_msgs(3), show_progress=True, return_summary=True, raise_on_error=True
                     )
                 assert len(raised.value.errors) == 3
 
@@ -1316,7 +1318,7 @@ class TestErrorHandling:
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
                 with pytest.raises(LLMHTTPError) as raised:
-                    await client.chat_completions(_msgs())
+                    await client.chat_completions(_msgs(), raise_on_error=True)
                 assert raised.value.status_code == 500
 
     @pytest.mark.asyncio

@@ -528,7 +528,7 @@ class LLMClientBase(CompletionMixin, ABC):
         prefix: str | None = None,
         include_prefix: bool = True,
         extra_headers: dict[str, str] | None = None,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """
@@ -558,8 +558,7 @@ class LLMClientBase(CompletionMixin, ABC):
             - return_raw=True: RequestResult 原始响应
             - return_usage=True: ChatCompletionResult(content, usage, reasoning_content)
             - 默认: str 内容文本
-            - 请求失败时默认抛出结构化 LLMRequestError。
-              传入 raise_on_error=False 可暂时使用旧的 RequestResult 行为。
+            - 旧接口默认保留旧返回行为并发出 LegacyResponseWarning；传入 raise_on_error=True 可启用结构化异常。
 
         Note:
             缓存由初始化时的 cache 参数控制，return_raw 时自动跳过缓存。
@@ -661,7 +660,7 @@ class LLMClientBase(CompletionMixin, ABC):
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """同步版本的聊天完成"""
@@ -694,7 +693,7 @@ class LLMClientBase(CompletionMixin, ABC):
         save_input: bool | str = True,
         include_prefix: bool = True,
         params_list: list[dict | None] | None = None,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -900,6 +899,7 @@ class LLMClientBase(CompletionMixin, ABC):
                                     original_idx,
                                     with_prefix(original_idx, extracted["content"]),
                                     usage=extracted.get("usage"),
+                                    result=extracted if return_usage and not return_raw else None,
                                 )
                                 # 记录成本
                                 if self._cost_tracker and extracted.get("usage"):
@@ -976,6 +976,7 @@ class LLMClientBase(CompletionMixin, ABC):
                                     original_idx,
                                     with_prefix(original_idx, extracted["content"]),
                                     usage=extracted.get("usage"),
+                                    result=extracted if return_usage and not return_raw else None,
                                 )
                                 if self._cost_tracker and extracted.get("usage"):
                                     self._cost_tracker.record(extracted["usage"], effective_model)
@@ -1018,17 +1019,15 @@ class LLMClientBase(CompletionMixin, ABC):
         # 转换返回值格式（prefill 场景统一在此拼接 prefix；return_raw 返回原始 dict）
         if return_raw:
             final_responses = [
-                r["content"] if r is not None else error_results.get(i)
-                for i, r in enumerate(responses)
+                r["content"] if r is not None else None for i, r in enumerate(responses)
             ]
         elif return_usage:
             final_responses = [
-                to_chat_result(r, i) if r is not None else error_results.get(i)
-                for i, r in enumerate(responses)
+                to_chat_result(r, i) if r is not None else None for i, r in enumerate(responses)
             ]
         else:
             final_responses = [
-                with_prefix(i, r["content"]) if r is not None else error_results.get(i)
+                with_prefix(i, r["content"]) if r is not None else None
                 for i, r in enumerate(responses)
             ]
 
@@ -1038,9 +1037,13 @@ class LLMClientBase(CompletionMixin, ABC):
         for record in writer.restored_records:
             idx = record["index"]
             if return_usage and not return_raw:
-                final_responses[idx] = ChatCompletionResult(
-                    content=record["output"], usage=record.get("usage")
+                restored = (
+                    ChatCompletionResult._from_payload(record["result"], cached=True)
+                    if record.get("result")
+                    else ChatCompletionResult(content=record["output"], usage=record.get("usage"))
                 )
+                restored.content = record["output"]
+                final_responses[idx] = restored
             else:
                 final_responses[idx] = record["output"]
 
@@ -1077,7 +1080,7 @@ class LLMClientBase(CompletionMixin, ABC):
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""

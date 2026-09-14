@@ -90,7 +90,7 @@ def resume_from_jsonl(
 
     # 瘦身：回填只需要 index/output/usage，input 等字段（可能含 base64 图片）
     # 会随 JsonlWriter 驻留整个 batch 运行期，不能带回去
-    records = [{k: r[k] for k in ("index", "output", "usage") if k in r} for r in records]
+    records = [{k: r[k] for k in ("index", "output", "usage", "result") if k in r} for r in records]
 
     completed_indices = {r["index"] for r in records}
     if completed_indices:
@@ -228,6 +228,7 @@ class JsonlWriter:
         status: str = "success",
         error: str = None,
         usage: dict = None,
+        result: dict = None,
     ):
         """写入一条结果记录（带缓冲）"""
         if self._file_writer is None:
@@ -247,6 +248,8 @@ class JsonlWriter:
             record["params"] = self._params_list[index]
         if usage is not None:
             record["usage"] = usage
+        if result is not None:
+            record["result"] = result
         if error:
             record["error"] = error
 

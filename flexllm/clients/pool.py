@@ -30,7 +30,7 @@ Example:
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union
 
 logger = logging.getLogger(__name__)
@@ -635,7 +635,7 @@ class LLMClientPool(CompletionMixin):
         return_usage: bool = False,
         show_progress: bool = False,
         preprocess_msg: bool = False,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """
@@ -745,7 +745,7 @@ class LLMClientPool(CompletionMixin):
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> Union[str, ChatCompletionResult, "RequestResult"]:
         """同步版本的聊天完成"""
@@ -792,7 +792,7 @@ class LLMClientPool(CompletionMixin):
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """
@@ -907,7 +907,7 @@ class LLMClientPool(CompletionMixin):
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ):
         """使用单个 endpoint + fallback 的批量调用"""
@@ -938,12 +938,34 @@ class LLMClientPool(CompletionMixin):
                     metadata_list=metadata_list,
                     save_input=save_input,
                     params_list=params_list,
-                    raise_on_error=raise_on_error,
+                    # Obtain per-item legacy results first.  Raising inside the
+                    # endpoint would make fallback repeat already-successful items.
+                    raise_on_error=False,
                     **kwargs,
                 )
+                result_values = result[0] if return_summary else result
+                missing = [i for i, value in enumerate(result_values) if value is None]
+                if missing and self._fallback and len(missing) < len(messages_list):
+                    if raise_on_error:
+                        raise BatchRequestError(
+                            f"批量请求失败: {len(missing)}/{len(messages_list)} 条",
+                            results=result_values,
+                            errors={i: LLMRequestError("Batch item failed") for i in missing},
+                        )
+                    return result
+                if missing and self._fallback and len(missing) == len(messages_list):
+                    raise LLMRequestError("当前 endpoint 批量请求全部失败", retryable=True)
                 self._router.mark_success(provider)
+                if raise_on_error and missing:
+                    raise BatchRequestError(
+                        f"批量请求失败: {len(missing)}/{len(messages_list)} 条",
+                        results=result_values,
+                        errors={i: LLMRequestError("Batch item failed") for i in missing},
+                    )
                 return result
 
+            except BatchRequestError:
+                raise
             except Exception as e:
                 last_error = e
                 self._router.mark_failed(provider)
@@ -954,7 +976,20 @@ class LLMClientPool(CompletionMixin):
             finally:
                 self._router.release(provider)
 
-        raise last_error or RuntimeError("所有 endpoint 都失败了")
+        if raise_on_error:
+            raise BatchRequestError(
+                f"批量请求失败: {len(messages_list)}/{len(messages_list)} 条",
+                results=[None] * len(messages_list),
+                errors={
+                    i: last_error
+                    if isinstance(last_error, LLMRequestError)
+                    else LLMRequestError(
+                        str(last_error or "所有 endpoint 都失败了"), retryable=True
+                    )
+                    for i in range(len(messages_list))
+                },
+            )
+        return [None] * len(messages_list)
 
     async def _batch_distributed(
         self,
@@ -972,7 +1007,7 @@ class LLMClientPool(CompletionMixin):
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ):
         """
@@ -1033,9 +1068,15 @@ class LLMClientPool(CompletionMixin):
         if completed_indices:
             for record in writer.restored_records:
                 if return_usage and not return_raw:
-                    results[record["index"]] = ChatCompletionResult(
-                        content=record["output"], usage=record.get("usage")
+                    restored = (
+                        ChatCompletionResult._from_payload(record["result"], cached=True)
+                        if record.get("result")
+                        else ChatCompletionResult(
+                            content=record["output"], usage=record.get("usage")
+                        )
                     )
+                    restored.content = record["output"]
+                    results[record["index"]] = restored
                 else:
                     results[record["index"]] = record["output"]
 
@@ -1180,7 +1221,7 @@ class LLMClientPool(CompletionMixin):
                                 status="error",
                                 latency=0,
                             )
-                            results[idx] = req_result if not raise_on_error else None
+                            results[idx] = None
                             if tracker:
                                 tracker.update(req_result)
                             writer.write_result(
@@ -1265,7 +1306,14 @@ class LLMClientPool(CompletionMixin):
                         else:
                             output_content = result
                             output_usage = None
-                        writer.write_result(idx, output_content, usage=output_usage)
+                        writer.write_result(
+                            idx,
+                            output_content,
+                            usage=output_usage,
+                            result=asdict(result)
+                            if return_usage and isinstance(result, ChatCompletionResult)
+                            else None,
+                        )
 
                 except Exception as e:
                     latency = time.perf_counter() - task_start
@@ -1291,7 +1339,7 @@ class LLMClientPool(CompletionMixin):
                                 status="error",
                                 latency=latency,
                             )
-                            results[idx] = req_result if not raise_on_error else None
+                            results[idx] = None
                             if tracker:
                                 tracker.update(req_result)
                             writer.write_result(idx, None, "error", str(e))
@@ -1342,7 +1390,7 @@ class LLMClientPool(CompletionMixin):
         distribute: bool = True,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
-        raise_on_error: bool = True,
+        raise_on_error: bool = False,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""

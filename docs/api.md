@@ -47,7 +47,7 @@ async def chat_completions(
     model: str = None,
     return_raw: bool = False,
     return_usage: bool = False,
-    raise_on_error: bool = True,
+    raise_on_error: bool = False,
     skip_cache: bool = False,
     **kwargs
  ) -> str | ChatCompletionResult
@@ -60,7 +60,7 @@ async def chat_completions(
 - `model`: 覆盖默认模型
 - `return_raw`: 返回原始响应对象
 - `return_usage`: 返回 token 使用情况
-- `raise_on_error`: 默认 `True`，请求失败抛出 `LLMRequestError`；传入 `False` 才返回旧式 `RequestResult`
+- `raise_on_error`: 默认 `False`，保留旧返回行为并发出弃用警告；传入 `True` 才抛出结构化 `LLMRequestError`
 - `skip_cache`: 跳过缓存
 
 #### chat_completions_sync
@@ -79,7 +79,7 @@ async def chat_completions_batch(
     output_jsonl: str = None,
     show_progress: bool = True,
     return_summary: bool = False,
-    raise_on_error: bool = True,
+    raise_on_error: bool = False,
     flush_interval: float = 1.0,
     metadata_list: List[dict] = None,
     **kwargs
@@ -95,7 +95,7 @@ async def chat_completions_batch(
 - `return_summary`: 返回统计摘要
 - `flush_interval`: 写入磁盘间隔
 - `metadata_list`: 元数据列表，与 `messages_list` 等长，每条记录的元数据会保存到输出文件
-- `raise_on_error`: 默认 `True`，部分失败抛出 `BatchRequestError`；异常保留成功结果和逐项错误
+- `raise_on_error`: 默认 `False`，保留旧批量返回行为并发出弃用警告；传入 `True` 才抛出 `BatchRequestError`
 
 #### chat_completions_stream
 

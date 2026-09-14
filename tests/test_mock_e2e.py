@@ -611,6 +611,7 @@ class TestPoolEndToEnd:
                         messages_list,
                         show_progress=True,
                         return_summary=True,
+                        raise_on_error=True,
                     )
                 assert len(raised.value.errors) == 10
 
