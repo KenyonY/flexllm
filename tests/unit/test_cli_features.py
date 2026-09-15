@@ -167,11 +167,13 @@ def _stub_config(monkeypatch, models=None, default=None, **extra):
     return cfg
 
 
-class _FakeRequestResultError:
-    """模拟 chat_completions 失败时返回的 RequestResult(status='error')"""
+def _fake_upstream_error():
+    """模拟请求失败：结构化接口失败时抛 typed error"""
+    from flexllm import LLMHTTPError
 
-    status = "error"
-    data = {"error": "simulated failure"}
+    return LLMHTTPError(
+        "simulated failure", status_code=500, response_data={"error": "simulated failure"}
+    )
 
 
 class _FakeLLMClient:
@@ -189,12 +191,10 @@ class _FakeLLMClient:
     async def __aexit__(self, *args):
         return False
 
-    async def chat_completions(self, messages, return_usage=False, **kwargs):
-        _FakeLLMClient.last_call = {
-            "messages": messages,
-            "return_usage": return_usage,
-            "kwargs": kwargs,
-        }
+    async def complete(self, messages, **kwargs):
+        _FakeLLMClient.last_call = {"messages": messages, "kwargs": kwargs}
+        if isinstance(_FakeLLMClient.result, BaseException):
+            raise _FakeLLMClient.result
         return _FakeLLMClient.result
 
 
@@ -242,7 +242,7 @@ class TestChatSchemaPassthrough:
 
 
 class TestAskJsonUsage:
-    """回归 bug#3：ask --format json 必须传 return_usage=True 并输出真实 usage/thinking"""
+    """回归 bug#3：ask --format json 必须输出真实 usage/thinking"""
 
     def test_ask_format_json_returns_usage_and_thinking(self, monkeypatch):
         _stub_config(
@@ -263,7 +263,6 @@ class TestAskJsonUsage:
         assert payload["content"] == "回答"
         assert payload["thinking"] == "思考过程"
         assert payload["usage"]["total_tokens"] == 8
-        assert _FakeLLMClient.last_call["return_usage"] is True
 
 
 class TestBatchJsonCountFromFile:
@@ -320,7 +319,7 @@ class TestChatErrorHandling:
     def test_single_chat_error_result_exits_nonzero(self, monkeypatch, capsys):
         from flexllm.cli.chat_helpers import single_chat
 
-        _FakeLLMClient.result = _FakeRequestResultError()
+        _FakeLLMClient.result = _fake_upstream_error()
         monkeypatch.setattr("flexllm.LLMClient", _FakeLLMClient)
 
         with pytest.raises(typer.Exit) as exc_info:
@@ -337,11 +336,12 @@ class TestChatErrorHandling:
         assert exc_info.value.exit_code != 0
         captured = capsys.readouterr()
         assert "RequestResult" not in captured.out  # 不把 repr 当回复打印
+        assert "simulated failure" in captured.out + captured.err
 
     def test_single_chat_json_error_exits_nonzero(self, monkeypatch):
         from flexllm.cli.chat_helpers import single_chat
 
-        _FakeLLMClient.result = _FakeRequestResultError()
+        _FakeLLMClient.result = _fake_upstream_error()
         monkeypatch.setattr("flexllm.LLMClient", _FakeLLMClient)
 
         with pytest.raises(typer.Exit) as exc_info:

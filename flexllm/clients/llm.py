@@ -11,7 +11,7 @@ Example (单 endpoint):
     ...     api_key="your-key",
     ...     model="gpt-4",
     ... )
-    >>> result = await client.chat_completions(messages)
+    >>> result = await client.complete(messages)
 
 Example (多 endpoint):
     >>> client = LLMClient(
@@ -21,7 +21,7 @@ Example (多 endpoint):
     ...     ],
     ...     fallback=True,
     ... )
-    >>> result = await client.chat_completions(messages)
+    >>> result = await client.complete(messages)
 """
 
 from .pool import LLMClientPool

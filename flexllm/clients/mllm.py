@@ -180,17 +180,16 @@ class MllmClient(MllmClientBase):
         )
         if safety is not None:
             kwargs["safety"] = safety
-        response_list, _ = await self.client.chat_completions_batch(
+        run = await self.client._run_batch(
             messages_list=messages_list,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             top_p=top_p,
-            return_summary=True,
             show_progress=show_progress,
             **kwargs,
         )
-        return response_list
+        return run.responses
 
     async def call_llm_stream(
         self,
@@ -350,16 +349,17 @@ class MllmClient(MllmClientBase):
         )
         if safety is not None:
             kwargs["safety"] = safety
-        all_responses, _ = await self.client.chat_completions_batch(
-            messages_list=messages_list,
-            model=model,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            return_summary=True,
-            show_progress=show_progress,
-            **kwargs,
-        )
+        all_responses = (
+            await self.client._run_batch(
+                messages_list=messages_list,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                top_p=top_p,
+                show_progress=show_progress,
+                **kwargs,
+            )
+        ).responses
 
         # 重组响应并应用选择函数
         selected_responses = []

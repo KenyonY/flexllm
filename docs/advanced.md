@@ -23,7 +23,7 @@ messages = [
 
 # 预处理：本地路径/URL → base64
 processed = await messages_preprocess(messages)
-result = await client.chat_completions(processed)
+result = await client.complete(processed)
 ```
 
 **支持的内容类型和处理方式：**
@@ -299,7 +299,7 @@ flexllm batch input.jsonl -m qwen-pool -o output.jsonl
 from flexllm import LLMClient
 
 async with LLMClient.from_config(model="qwen-pool") as client:
-    response = await client.chat_completions("你好")
+    response = await client.complete("你好")
     async for chunk in client.chat_completions_stream("你好"):
         print(chunk, end="", flush=True)
 ```
@@ -310,11 +310,12 @@ async with LLMClient.from_config(model="qwen-pool") as client:
   `id`、`api_key`、`provider`；endpoint 内显式配置的值优先。顶层 `proxy`
   作为代理默认值，endpoint 的 `proxy` 可单独覆盖。
 - `fallback` 默认为 `true`，设为 `false` 后失败请求不切换副本；负载分配仍生效。
-- `await client.chat_completions_or_raise(...)` 支持单地址和 pool：选路及故障转移完成后，
-  若请求仍失败则抛出 `LLMRequestError`，保留 `status_code` 与结构化 `response_data`。
-- 新代码使用 `complete()` / `complete_batch()` 获得统一结果和结构化异常。
-  旧 `chat_completions*` 默认保留原返回行为并发出 `LegacyResponseWarning`；
-  可显式传入 `raise_on_error=True` 提前采用结构化异常。
+- `await client.complete(...)` 支持单地址和 pool：选路及故障转移完成后，若请求仍失败
+  则抛出 `LLMRequestError`，保留 `status_code`、`response_data` 与 `retryable`。
+- `await client.complete_batch(...)` 在 pool 上同样不抛异常：某条在所有 endpoint 上都
+  失败时，它在返回的 `BatchResult` 里是带 `.error` 的失败项，其余结果照常返回，
+  checkpoint 也照常写入（失败项下次重跑）。
+- 旧 `chat_completions*` 返回形状不变但已弃用，发出 `LegacyResponseWarning`，0.18.0 移除。
 - `system`、`user_template`、生成参数仍按具名模型读取，`endpoints`、`fallback`
   和 `proxy` 不会作为生成参数发给模型。
 - CLI 的显式 `--base-url`（或 `from_config(base_url=...)`）会替换整个地址池，
@@ -444,7 +445,7 @@ pool = LLMClientPool(endpoints=[...], fallback=True)
 
 ```python
 # 将请求分散到多个 endpoint 并行处理
-results = await pool.chat_completions_batch(
+results = await pool.complete_batch(
     messages_list,
     distribute=True,  # 启用分布式
 )
@@ -483,7 +484,7 @@ cache = ResponseCacheConfig.persistent()  # 永不过期
 
 ```python
 # 1. 使用输出文件（断点续传）
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     output_jsonl="results.jsonl",
 )
@@ -494,7 +495,7 @@ metadata_list = [
     {"id": "001", "source": "data.jsonl", "line": 1},
     {"id": "002", "source": "data.jsonl", "line": 2},
 ]
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     metadata_list=metadata_list,  # 元数据会保存到输出文件
     output_jsonl="results.jsonl",
@@ -517,7 +518,7 @@ async for batch_result in client.iter_chat_completions_batch(
 #### 断点续传的三条语义
 
 1. **返回列表始终是全量**：续跑时，`output_jsonl` 中已完成的样本不会重新请求，但会回填到
-   `chat_completions_batch` 的返回列表，直接用返回值即可，不必读回文件。
+   `complete_batch` 的返回列表，直接用返回值即可，不必读回文件。
    （例外：`iter_chat_completions_batch` 是流式接口，恢复项不 yield，续跑要全量结果就读文件。）
 
 2. **按 index 对齐，顺序不能变**：checkpoint 用列表位置对齐。重跑时逐条校验文件里的
@@ -532,11 +533,11 @@ async for batch_result in client.iter_chat_completions_batch(
 
 ### Per-record 参数（参数扫描）
 
-`chat_completions_batch` 接受 `params_list`（与 `messages_list` 等长，元素为 dict 或 None），
+`complete_batch` 接受 `params_list`（与 `messages_list` 等长，元素为 dict 或 None），
 让每条记录单独覆盖全局生成参数，用于参数扫描（同一 prompt 跑不同 `temperature` / `stop` 对比）。
 
 ```python
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list=[msgs, msgs],          # 相同 messages
     params_list=[
         {"temperature": 0.2, "stop": ["\n\n"]},
@@ -586,15 +587,14 @@ client = OpenAIClient(
 )
 
 # 透传 provider 原生 thinking；reasoning_effort 等其他参数也会原样传递
-result = await client.chat_completions(
+result = await client.complete(
     messages,
     thinking={"type": "enabled"},
     reasoning_effort="low",
-    return_raw=True,
 )
 
 # 解析思考内容
-parsed = OpenAIClient.parse_thoughts(result.data)
+parsed = OpenAIClient.parse_thoughts(result.raw_response)
 print("思考过程:", parsed["thought"])
 print("最终答案:", parsed["answer"])
 ```
@@ -610,14 +610,13 @@ client = ClaudeClient(
 )
 
 # Claude 4.6+：自动转换为 adaptive thinking + output_config.effort
-result = await client.chat_completions(
+result = await client.complete(
     messages,
     reasoning_effort="low",
-    return_raw=True,
 )
 
 # 解析思考内容
-parsed = ClaudeClient.parse_thoughts(result.data)
+parsed = ClaudeClient.parse_thoughts(result.raw_response)
 print("思考过程:", parsed["thought"])
 print("最终答案:", parsed["answer"])
 ```
@@ -643,7 +642,7 @@ client = GeminiClient(
 )
 
 # 思考级别控制
-result = await client.chat_completions(
+result = await client.complete(
     messages,
     thinking="high",  # "minimal", "low", "medium", "high"
 )
@@ -704,35 +703,26 @@ client = LLMClient(
 
 ### 批量处理错误
 
-```python
-results, summary = await client.chat_completions_batch(
-    messages_list,
-    return_summary=True,
-)
-
-print(f"成功: {summary['success']}")
-print(f"失败: {summary['failed']}")
-print(f"缓存命中: {summary['cached']}")
-```
-
-### 手动错误处理
+批量里单条失败是数据不是控制流：`complete_batch()` 不抛异常，返回等长同构的
+`BatchResult`，失败项是 `content=None` 且带 `.error` 的同一种结果对象。
 
 ```python
-from flexllm import BatchResultItem
+results = await client.complete_batch(messages_list)
 
-results = await client.chat_completions_batch(
-    messages_list,
-    return_raw=True,
-)
+print(f"成功: {results.success_count}")
+print(f"失败: {results.failed_count}")
+print(f"缓存命中: {results.cached_count}")
 
-for item in results:
-    if item.status == "success":
-        print(item.content)
-    elif item.status == "error":
-        print(f"错误: {item.error}")
-    elif item.status == "cached":
-        print(f"缓存: {item.content}")
+for index, error in results.errors.items():
+    print(f"第 {index} 条失败: {error}（HTTP {error.status_code}，可重试={error.retryable}）")
+
+# 只重试可重试的那些
+retry_indices = [i for i, e in results.errors.items() if e.retryable]
+retried = await client.complete_batch([messages_list[i] for i in retry_indices])
 ```
+
+失败项照常写进 checkpoint（`status="error"`），下次带同一个 `output_jsonl` 重跑时
+只会重发这些条。需要 fail-fast 就显式调用 `results.raise_for_errors()`。
 
 ---
 
@@ -741,23 +731,23 @@ for item in results:
 ```python
 # 推荐：使用 async with 自动清理资源
 async with LLMClient(...) as client:
-    result = await client.chat_completions(messages)
+    result = await client.complete(messages)
 
 # 同步版本使用 with
 with LLMClient(...) as client:
-    result = client.chat_completions_sync(messages)
+    result = client.complete_sync(messages)
 
 # 手动清理（异步）
 client = LLMClient(...)
 try:
-    result = await client.chat_completions(messages)
+    result = await client.complete(messages)
 finally:
     await client.aclose()
 
 # 手动清理（同步）
 client = LLMClient(...)
 try:
-    result = client.chat_completions_sync(messages)
+    result = client.complete_sync(messages)
 finally:
     client.close()
 ```
@@ -775,17 +765,15 @@ from flexllm import LLMClient
 
 client = LLMClient(...)
 
-# 方式1：获取成本报告
-results, cost_report = await client.chat_completions_batch(
-    messages_list,
-    return_cost_report=True,
-)
+# 方式1：成本报告随批量结果返回，不需要额外的返回形状开关
+results = await client.complete_batch(messages_list)
+cost_report = results.cost
 print(f"总成本: ${cost_report.total_cost:.4f}")
 print(f"总 tokens: {cost_report.total_tokens:,}")
 print(f"平均成本/请求: ${cost_report.avg_cost_per_request:.6f}")
 
 # 方式2：进度条实时显示成本
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     track_cost=True,  # 进度条显示 💰 $0.0012
 )
@@ -822,7 +810,7 @@ client = LLMClient(
 )
 
 try:
-    results = await client.chat_completions_batch(messages_list)
+    results = await client.complete_batch(messages_list)
 except BudgetExceededError as e:
     print(f"预算超限: {e}")
 ```
@@ -973,7 +961,7 @@ scheme**，给它未知 scheme 它会照样往该端口发 HTTP `CONNECT`，表�
 ```python
 client = LLMClient(base_url="https://vpn-only/v1", api_key="...", proxy="socks5://gateway:1080")
 # 图片 URL 的下载也经 gateway:1080
-await client.chat_completions(messages=[
+await client.complete(messages=[
     {"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": "http://intranet/pic.png"}},
     ]},

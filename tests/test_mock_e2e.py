@@ -19,7 +19,7 @@ import tempfile
 
 import pytest
 
-from flexllm import BatchRequestError, LLMClient, LLMClientPool
+from flexllm import LLMClient, LLMClientPool
 from flexllm.cache.response_cache import ResponseCacheConfig
 from flexllm.mock import MockLLMServer, MockLLMServerGroup, MockServerConfig
 
@@ -606,14 +606,10 @@ class TestPoolEndToEnd:
                 fallback=True,
             ) as pool:
                 messages_list = create_messages(10)
-                with pytest.raises(BatchRequestError) as raised:
-                    await pool.chat_completions_batch(
-                        messages_list,
-                        show_progress=True,
-                        return_summary=True,
-                        raise_on_error=True,
-                    )
-                assert len(raised.value.errors) == 10
+                results = await pool.complete_batch(messages_list, show_progress=True)
+                assert results.failed_count == 10
+                assert all(not r.ok for r in results)
+                assert len(results.errors) == 10
 
     @pytest.mark.asyncio
     async def test_pool_round_robin_routing(self):

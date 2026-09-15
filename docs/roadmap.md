@@ -115,7 +115,7 @@ client = LLMClient(
     min_qps=10,
 )
 
-results = await client.chat_completions_batch(messages_list)
+results = await client.complete_batch(messages_list)
 ```
 
 CLI 配置：

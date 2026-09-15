@@ -14,7 +14,7 @@ flexllm.clients - LLM 客户端实现
 
 from .audio import TranscriptionResult, segments_to_srt, segments_to_vtt
 from .base import (
-    BatchRequestError,
+    BatchResult,
     ChatCompletionResult,
     LLMClientBase,
     LLMConnectionError,
@@ -48,7 +48,7 @@ __all__ = [
     "LLMConnectionError",
     "LLMTimeoutError",
     "LLMResponseError",
-    "BatchRequestError",
+    "BatchResult",
     "LegacyResponseWarning",
     "ToolCall",
     # 客户端

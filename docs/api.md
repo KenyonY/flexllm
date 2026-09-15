@@ -25,21 +25,64 @@ client = LLMClient(
 
 **方法：**
 
-#### complete / complete_batch（推荐的新接口）
+#### complete / complete_batch（推荐接口）
 
 ```python
-result = await client.complete(messages)
-results = await client.complete_batch(messages_list)
+result = await client.complete(messages, model=None, **gen_kwargs)
+results = await client.complete_batch(messages_list, model=None, **kwargs)
 ```
 
-这两个入口始终返回 `ChatCompletionResult`，包含 `content`、`usage`、`tool_calls`、
-`reasoning_content`、`finish_reason` 和 `raw_response`；失败抛出结构化异常。
-`complete_sync` 和 `complete_batch_sync` 提供同步版本。
+**单条 `complete()`** 总是返回 `ChatCompletionResult`，失败抛结构化异常：
 
-`chat_completions*` 继续保留原有字符串、`RequestResult` 和选项行为，并在使用旧式返回
-时发出 `LegacyResponseWarning`。迁移期间可继续使用；新代码应优先使用 `complete*`。
+| 字段 | 说明 |
+| --- | --- |
+| `content` | 文本内容 |
+| `usage` | `{"prompt_tokens", "completion_tokens", "total_tokens"}` |
+| `reasoning_content` | 思考内容（DeepSeek-R1 / Qwen3 / Claude / Gemini） |
+| `tool_calls` | `list[ToolCall]` |
+| `finish_reason` | `"stop"` / `"length"` / `"tool_calls"` …（各 provider 统一到这套值） |
+| `assistant_message` | 下一轮需原样回传的 assistant 消息（带签名的 thinking / tool_use 时非 None） |
+| `extra` | 响应里标准信封之外的顶层字段（网关挂的带外信息） |
+| `raw_response` | provider 原始响应 |
+| `cached` / `queue_time` | 是否缓存命中 / 客户端排队耗时 |
+| `error` / `ok` | 仅批量失败项使用，见下 |
 
-#### chat_completions
+失败抛 `LLMRequestError` 及其子类（`LLMHTTPError` / `LLMConnectionError` /
+`LLMTimeoutError` / `LLMResponseError`），带 `status_code`、`response_data`、
+`request_id`、`retryable`。
+
+**批量 `complete_batch()` 不抛异常**：批量里单条失败是预期结果的一种，不是控制流事件。
+返回等长同构的 `BatchResult`，失败项是 `content=None` 且带 `.error` 的同一种结果对象：
+
+```python
+results = await client.complete_batch(messages_list, output_jsonl="out.jsonl")
+
+for r in results:            # BatchResult 可迭代、可索引、可 len()
+    if r.ok:
+        use(r.content)
+    elif r.error.retryable:
+        retry_later(r)
+
+results.errors            # {index: LLMRequestError}，按原始 index 对齐
+results.ok                # 成功项
+results.failed            # 失败项
+results.success_count / results.failed_count / results.cached_count
+results.cost              # CostReport 或 None
+results.elapsed           # 秒
+results.raise_for_errors()  # 需要 fail-fast 时显式调用
+```
+
+只有整批开不了工（参数非法等）才抛异常。`complete_sync` / `complete_batch_sync`
+是同步版本。这两个入口不接受 `return_raw` / `return_usage` / `return_summary` /
+`return_cost_report` / `raise_on_error`——返回形状是固定的，传了会直接报错。
+
+批量常用参数：`output_jsonl`（断点续传）、`show_progress`、`track_cost`、
+`metadata_list`、`params_list`、`save_input`、`flush_interval`、`save_raw`。
+其中 `save_raw` 默认 `False`：checkpoint 的 `result` 字段不保存 `raw_response`
+（`content`/`usage` 已在记录顶层），百万级批量时这份冗余是实打实的磁盘开销；
+需要事后按原始响应分析时再打开。
+
+#### chat_completions（已弃用，0.18.0 移除）
 
 ```python
 async def chat_completions(
@@ -50,28 +93,16 @@ async def chat_completions(
     raise_on_error: bool = False,
     skip_cache: bool = False,
     **kwargs
- ) -> str | ChatCompletionResult
+) -> str | ChatCompletionResult | RequestResult
 ```
 
-单条异步请求。
+单条异步请求。返回形状由 `return_raw` / `return_usage` 决定；默认失败返回
+`RequestResult` 而不抛异常，`raise_on_error=True` 才抛结构化异常。
+使用旧返回形状时发出 `LegacyResponseWarning`。新代码用 `complete()`。
 
-**参数：**
-- `messages`: 消息列表
-- `model`: 覆盖默认模型
-- `return_raw`: 返回原始响应对象
-- `return_usage`: 返回 token 使用情况
-- `raise_on_error`: 默认 `False`，保留旧返回行为并发出弃用警告；传入 `True` 才抛出结构化 `LLMRequestError`
-- `skip_cache`: 跳过缓存
+`chat_completions_sync`、`chat_completions_or_raise` 同样已弃用。
 
-#### chat_completions_sync
-
-```python
-def chat_completions_sync(messages, **kwargs) -> str | ChatCompletionResult
-```
-
-单条同步请求（内部使用 asyncio.run）。
-
-#### chat_completions_batch
+#### chat_completions_batch（已弃用，0.18.0 移除）
 
 ```python
 async def chat_completions_batch(
@@ -79,23 +110,12 @@ async def chat_completions_batch(
     output_jsonl: str = None,
     show_progress: bool = True,
     return_summary: bool = False,
-    raise_on_error: bool = False,
-    flush_interval: float = 1.0,
-    metadata_list: List[dict] = None,
+    return_cost_report: bool = False,
     **kwargs
- ) -> List[str] | Tuple[List[str], dict]
+) -> List[str] | Tuple[List[str], dict]
 ```
 
-批量异步请求，支持断点续传。
-
-**参数：**
-- `messages_list`: 消息列表的列表
-- `output_jsonl`: 输出文件路径（启用断点续传）
-- `show_progress`: 显示进度条
-- `return_summary`: 返回统计摘要
-- `flush_interval`: 写入磁盘间隔
-- `metadata_list`: 元数据列表，与 `messages_list` 等长，每条记录的元数据会保存到输出文件
-- `raise_on_error`: 默认 `False`，保留旧批量返回行为并发出弃用警告；传入 `True` 才抛出 `BatchRequestError`
+批量异步请求，支持断点续传。失败项为 `None`——想知道每条为何失败，用 `complete_batch()`。
 
 #### chat_completions_stream
 

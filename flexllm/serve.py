@@ -17,7 +17,6 @@ API 端点:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
@@ -37,6 +36,7 @@ def _truncate(text: str | None, max_len: int = LOG_MAX_LEN) -> str:
 
 
 from .chat_web import ThinkTagParser
+from .clients.base import LLMRequestError
 
 
 @dataclass
@@ -170,16 +170,13 @@ class ServeServer:
         kwargs = self._get_kwargs(data)
 
         try:
-            result = await self._client.chat_completions(
-                messages, return_raw=True, raise_on_error=False, **kwargs
-            )
-            if hasattr(result, "status") and result.status == "error":
-                error_msg = result.data.get("detail", result.data.get("error", str(result.data)))
+            try:
+                result = await self._client.complete(messages, **kwargs)
+            except LLMRequestError as error:
                 elapsed = time.perf_counter() - start
-                logger.error("POST /api/generate 502 %.3fs error=%s", elapsed, error_msg)
-                return web.json_response({"error": error_msg}, status=502)
-            raw_data = result.data
-            parsed = self._parse_result(raw_data)
+                logger.error("POST /api/generate 502 %.3fs error=%s", elapsed, error)
+                return web.json_response({"error": str(error)}, status=502)
+            parsed = self._parse_result(result.raw_response)
             elapsed = time.perf_counter() - start
             logger.info(
                 "POST /api/generate 200 %.3fs output=%s",
@@ -285,26 +282,15 @@ class ServeServer:
         messages_list = [self._build_messages(c) for c in contents]
 
         try:
-            tasks = [
-                self._client.chat_completions(msgs, return_raw=True, raise_on_error=False, **kwargs)
-                for msgs in messages_list
+            # 批量走 complete_batch：并发/QPS 由客户端统一控制，单条失败不打断整批，
+            # 失败项自带 error，不需要在这里靠 isinstance 分辨三种返回值。
+            batch = await self._client.complete_batch(messages_list, show_progress=False, **kwargs)
+            results = [
+                self._parse_result(r.raw_response)
+                if r.ok
+                else {"content": None, "thinking": None, "usage": None, "error": str(r.error)}
+                for r in batch
             ]
-            raw_results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            results = []
-            for r in raw_results:
-                if isinstance(r, Exception):
-                    results.append(
-                        {"content": None, "thinking": None, "usage": None, "error": str(r)}
-                    )
-                elif hasattr(r, "status") and r.status == "error":
-                    error_msg = r.data.get("detail", r.data.get("error", str(r.data)))
-                    results.append(
-                        {"content": None, "thinking": None, "usage": None, "error": error_msg}
-                    )
-                else:
-                    parsed = self._parse_result(r.data)
-                    results.append(parsed)
 
             elapsed = time.perf_counter() - start
             success = sum(1 for r in results if "error" not in r)

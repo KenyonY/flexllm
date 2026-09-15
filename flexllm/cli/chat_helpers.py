@@ -5,22 +5,10 @@ from __future__ import annotations
 import asyncio
 import sys
 
+from ..clients.base import LLMRequestError
 from .utils import apply_user_template, extract_code_block
 
 # ========== Chat 辅助函数 ==========
-
-
-def _is_error_result(result) -> bool:
-    """判断显式兼容模式返回的失败 RequestResult。"""
-    return hasattr(result, "status") and getattr(result, "status", None) == "error"
-
-
-def _extract_error_message(result) -> str:
-    """从失败的 RequestResult 中提取可读错误信息"""
-    data = getattr(result, "data", None)
-    if isinstance(data, dict):
-        return str(data.get("detail", data.get("error", data)))
-    return str(data) if data is not None else "未知错误"
 
 
 def single_chat(
@@ -63,16 +51,12 @@ def single_chat(
 
             if output_format == "json":
                 t0 = time.perf_counter()
-                result = await client.chat_completions(messages, return_usage=True, **kwargs)
+                result = await client.complete(messages, **kwargs)
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
-                if _is_error_result(result):
-                    _fail(_extract_error_message(result))
                 payload = {
-                    "content": getattr(result, "content", None)
-                    if not isinstance(result, str)
-                    else result,
-                    "thinking": getattr(result, "reasoning_content", None),
-                    "usage": getattr(result, "usage", None),
+                    "content": result.content,
+                    "thinking": result.reasoning_content,
+                    "usage": result.usage,
                     "model": model,
                     "elapsed_ms": elapsed_ms,
                 }
@@ -92,9 +76,7 @@ def single_chat(
                         full_response += chunk
                     result = full_response
                 else:
-                    result = await client.chat_completions(messages, **kwargs)
-                    if _is_error_result(result):
-                        _fail(_extract_error_message(result))
+                    result = (await client.complete(messages, **kwargs)).content
                 output = str(result)
                 if extract:
                     code = extract_code_block(output)
@@ -136,8 +118,6 @@ def single_chat(
         if isinstance(e, typer.Exit):
             # cli_error 已经输出并携带退出码，直接向上传递
             raise
-        from flexllm import LLMRequestError
-
         from .errors import ErrorType, cli_error
 
         if isinstance(e, LLMRequestError):
@@ -217,14 +197,12 @@ def interactive_chat(
                         print()
                         messages.append({"role": "assistant", "content": full_response})
                     else:
-                        result = await client.chat_completions(messages, **kwargs)
-                        if _is_error_result(result):
+                        try:
+                            result = (await client.complete(messages, **kwargs)).content
+                        except LLMRequestError as error:
                             # 失败：打印错误、回滚本轮 user 消息，不入历史，继续会话
                             messages.pop()
-                            print(
-                                f"错误: LLM 调用失败: {_extract_error_message(result)}",
-                                file=sys.stderr,
-                            )
+                            print(f"错误: LLM 调用失败: {error}", file=sys.stderr)
                             continue
                         print(f"Assistant: {result}")
                         messages.append({"role": "assistant", "content": result})

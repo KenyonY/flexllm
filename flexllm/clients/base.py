@@ -37,6 +37,7 @@ from .completion import CompletionMixin, warn_legacy_response
 
 if TYPE_CHECKING:
     from ..async_api.interface import RequestResult
+    from ..pricing.cost_tracker import CostReport
 
 
 # 向后兼容的别名（仅 tests/unit/test_resume_jsonl.py 仍在 import，库内代码直接用 batch_helpers）
@@ -87,15 +88,6 @@ class LLMResponseError(LLMRequestError):
     """The endpoint returned an unusable response."""
 
 
-class BatchRequestError(LLMRequestError):
-    """One or more items in a batch failed after request processing completed."""
-
-    def __init__(self, message: str, *, results: list, errors: dict[int, LLMRequestError]):
-        super().__init__(message)
-        self.results = results
-        self.errors = errors
-
-
 def _request_error_from_result(result: "RequestResult") -> LLMRequestError:
     """Convert the internal requester envelope into a public typed exception."""
     data = result.data
@@ -142,6 +134,40 @@ def _request_error_from_result(result: "RequestResult") -> LLMRequestError:
     return LLMRequestError(f"LLM 请求失败: {error or detail or data}", response_data=response_data)
 
 
+def _result_payload(result: "ChatCompletionResult") -> dict:
+    """结构化结果的可序列化载荷（写缓存 / checkpoint 用）。
+
+    剔除 error：它是异常对象，json 序列化不了；而且失败项本来就不写缓存和 checkpoint，
+    失败的语义就是"下次重跑"。
+    """
+    payload = asdict(result)
+    payload.pop("error", None)
+    return payload
+
+
+# checkpoint 记录里 output/usage 已是顶层字段，result 不再重复存一份；raw_response
+# 通常是整条记录里最大的一块（content 已经单独存了），默认不落盘。
+_CHECKPOINT_SKIP_KEYS = frozenset({"content", "usage", "cached", "error"})
+
+
+def _checkpoint_payload(payload: dict, *, save_raw: bool) -> dict:
+    """结构化结果落到 JSONL 的形态：只留顶层 output/usage 表达不了的字段。"""
+    skip = _CHECKPOINT_SKIP_KEYS if save_raw else _CHECKPOINT_SKIP_KEYS | {"raw_response"}
+    return {k: v for k, v in payload.items() if k not in skip and v is not None}
+
+
+def _restore_from_record(record: dict) -> "ChatCompletionResult":
+    """从 checkpoint 记录还原结构化结果。
+
+    output 是最终形态（prefill 场景已含 prefix），所以它优先于 result 里的 content。
+    """
+    stored = record.get("result")
+    payload = dict(stored) if isinstance(stored, dict) else {}
+    payload["content"] = record["output"]
+    payload["usage"] = record.get("usage")
+    return ChatCompletionResult._from_payload(payload, cached=True)
+
+
 def _mark_error_result(result: "RequestResult", error: BaseException) -> "RequestResult":
     """Turn a successful transport envelope into an explicit extraction error."""
     result.status = "error"
@@ -186,13 +212,16 @@ class ChatCompletionResult:
     usage: dict | None = None  # {"prompt_tokens": x, "completion_tokens": y, "total_tokens": z}
     reasoning_content: str | None = None  # 思考内容（DeepSeek-R1、Qwen3 等）
     tool_calls: list["ToolCall"] | None = None  # 工具调用列表
-    queue_time: float | None = None  # 客户端排队耗时（semaphore + QPS 桶），缓存命中时为 None
+    # 客户端排队耗时（semaphore + QPS 桶）。缓存命中/checkpoint 恢复时为 None：
+    # 这两种情况下根本没排过队。
+    queue_time: float | None = None
     # 模型为何停止：OpenAI 语义 "stop" / "length" / "tool_calls" / "content_filter"…；
     # 其他 provider 映射到同一套值（Claude stop_reason、Gemini finishReason）。
-    # 缓存命中时为 None。调用方靠 "length" 判断输出被 max_tokens 截断。
+    # 调用方靠 "length" 判断输出被 max_tokens 截断。缓存命中时同样保留（缓存存的是
+    # 整个结果）；只有断点续传恢复的旧记录可能缺字段。
     finish_reason: str | None = None
     # 响应里标准信封之外的顶层字段。网关/代理会用它挂带外信息（如"这次工具调用被策略拦了"），
-    # 以前这些字段在解析时被无条件丢弃，调用方没有任何办法拿到。缓存命中时为 None。
+    # 以前这些字段在解析时被无条件丢弃，调用方没有任何办法拿到。
     extra: dict | None = None
     # 下一轮请求应原样回传的 assistant 消息。reasoning 模型可能要求携带
     # reasoning_content（DeepSeek）或带签名的 thinking blocks（Claude），仅靠
@@ -202,6 +231,15 @@ class ChatCompletionResult:
 
     raw_response: dict | None = None
     cached: bool = False
+    # 本条为何失败。仅批量路径会填：批量里单条失败是数据不是控制流，返回等长同构列表
+    # 比抛异常或塞 None 更好用（调用方用 .ok 分流，失败项仍带 index 对齐）。
+    # 单条 complete() 失败直接抛异常，其结果对象的 error 恒为 None。
+    # 不参与序列化：失败项不写缓存、不写 checkpoint（失败项的语义就是下次重跑）。
+    error: LLMRequestError | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
 
     @classmethod
     def _from_payload(cls, payload: dict, *, cached: bool = False):
@@ -211,7 +249,95 @@ class ChatCompletionResult:
             values["tool_calls"] = [ToolCall(**call) for call in values["tool_calls"]]
         if cached:
             values.update(cached=True, queue_time=None)
+        values.pop("error", None)
         return cls(**values)
+
+    @classmethod
+    def _from_error(cls, error: LLMRequestError):
+        """批量里失败的那一条：形状与成功项完全一致，只是 content 为 None 且带 error。"""
+        return cls(content=None, error=error)
+
+
+@dataclass
+class BatchResult:
+    """批量完成的返回值：等长同构的结果列表 + 派生统计。
+
+    是个可迭代/可索引的容器，``for r in result`` 和 ``result[0]`` 与返回 list 时写法一致，
+    同时 ``result.cost`` / ``result.errors`` 这类整批信息不必再靠额外的返回形状开关。
+    所有计数都从 results 派生，不另存一份，避免两处统计对不上。
+    """
+
+    results: list[ChatCompletionResult]
+    elapsed: float = 0.0
+    cost: "CostReport | None" = None
+
+    def __iter__(self):
+        return iter(self.results)
+
+    def __len__(self) -> int:
+        return len(self.results)
+
+    def __getitem__(self, index):
+        return self.results[index]
+
+    @property
+    def ok(self) -> list[ChatCompletionResult]:
+        """成功的那些条（保持原顺序，不保留原 index）"""
+        return [r for r in self.results if r.ok]
+
+    @property
+    def failed(self) -> list[ChatCompletionResult]:
+        return [r for r in self.results if not r.ok]
+
+    @property
+    def errors(self) -> dict[int, LLMRequestError]:
+        """{原始 index: 错误}，用于重试或定位失败样本"""
+        return {i: r.error for i, r in enumerate(self.results) if r.error is not None}
+
+    @property
+    def success_count(self) -> int:
+        return sum(1 for r in self.results if r.ok)
+
+    @property
+    def failed_count(self) -> int:
+        return len(self.results) - self.success_count
+
+    @property
+    def cached_count(self) -> int:
+        return sum(1 for r in self.results if r.cached)
+
+    def raise_for_errors(self):
+        """需要 fail-fast 时显式调用：有任何失败就抛出第一个错误。"""
+        for result in self.results:
+            if result.error is not None:
+                raise result.error
+
+
+@dataclass
+class _BatchRun:
+    """_run_batch 的输出：公开包装各取所需，避免真源里塞返回形状开关。
+
+    responses 的元素形状由 return_raw / return_usage 决定（失败项为 None），
+    errors 是 {index: 错误}，两者按 index 对齐。
+    """
+
+    responses: list
+    errors: dict[int, LLMRequestError]
+    summary: str | None
+    cost: "CostReport | None"
+    elapsed: float
+
+    def to_batch_result(self) -> BatchResult:
+        """结构化出口：失败项换成带 error 的同构结果，不丢 index 对齐。"""
+        results = [
+            response
+            if response is not None
+            else ChatCompletionResult._from_error(
+                self.errors.get(index, LLMRequestError("Batch item was not completed"))
+            )
+            for index, response in enumerate(self.responses)
+        ]
+        return BatchResult(results=results, elapsed=self.elapsed, cost=self.cost)
 
 
 class LLMClientBase(CompletionMixin, ABC):
@@ -618,7 +744,7 @@ class LLMClientBase(CompletionMixin, ABC):
                 return _mark_error_result(data, error)
 
             if use_cache:
-                payload = asdict(result)
+                payload = _result_payload(result)
                 payload["queue_time"] = None
                 self._response_cache.set(messages, payload, model=effective_model, **kwargs)
 
@@ -637,13 +763,11 @@ class LLMClientBase(CompletionMixin, ABC):
         return_usage: bool = False,
         **kwargs,
     ) -> Union[str, ChatCompletionResult]:
-        """
-        单条聊天完成（失败时抛异常）
+        """单条聊天完成（失败时抛异常）。
 
-        与 chat_completions() 行为相同，但请求失败时抛出异常而非返回 RequestResult。
-
-        Raises:
-            LLMRequestError: 请求失败时，包含状态码与结构化响应体（如有）
+        .. deprecated:: 0.17.0
+            用 complete()：同样是失败抛 typed error，但总是返回 ChatCompletionResult，
+            不需要再靠 return_usage 决定拿 str 还是对象。本方法在 0.18.0 移除。
         """
         result = await self.chat_completions(
             messages=messages,
@@ -675,15 +799,13 @@ class LLMClientBase(CompletionMixin, ABC):
             )
         )
 
-    async def chat_completions_batch(
+    async def _run_batch(
         self,
         messages_list: list[list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
-        return_summary: bool = False,
-        return_cost_report: bool = False,
         track_cost: bool = False,
         preprocess_msg: bool = False,
         output_jsonl: str | None = None,
@@ -693,11 +815,12 @@ class LLMClientBase(CompletionMixin, ABC):
         save_input: bool | str = True,
         include_prefix: bool = True,
         params_list: list[dict | None] | None = None,
-        raise_on_error: bool = False,
+        save_raw: bool = False,
         **kwargs,
-    ) -> list[str] | list[ChatCompletionResult] | tuple:
+    ) -> "_BatchRun":
         """
-        批量聊天完成（支持断点续传）
+        批量执行的单一真源：公开的 chat_completions_batch（旧形状）与 complete_batch
+        （BatchResult）都是它的包装，两者共用同一份缓存/断点续传/进度/成本逻辑。
 
         Args:
             messages_list: 消息列表
@@ -719,6 +842,9 @@ class LLMClientBase(CompletionMixin, ABC):
                   样本顺序变化（会导致 index 错位）时直接报错
                 - "last": 仅保存最后一个 user message 的 content
                 - False: 不保存 input 字段，断点续传仅基于 index 恢复
+            save_raw: checkpoint 的 result 字段是否保存 provider 原始响应（默认 False）。
+                raw_response 通常是整条记录里最大的一块，而 content/usage 已在顶层，
+                百万级批量时这份冗余是实打实的磁盘和 IO。需要事后按原始响应做分析时才开。
             params_list: per-record 参数列表（与 messages_list 等长，元素为 dict 或 None）。
                 每条的有效请求参数 = {**全局kwargs, **params_list[i]}，覆盖全局 kwargs，
                 并参与各自的缓存键计算。带 params 的行会把 params 原样回显到输出 JSONL。
@@ -739,9 +865,7 @@ class LLMClientBase(CompletionMixin, ABC):
             （超预算时抛 BudgetExceededError）不同：批量场景抛异常会丢弃已完成结果。
         """
         # track_cost 需要 usage 信息
-        warn_legacy_response(
-            return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
-        )
+        started = time.perf_counter()
         if track_cost:
             return_usage = True
         effective_model = self._get_effective_model(model)
@@ -781,7 +905,7 @@ class LLMClientBase(CompletionMixin, ABC):
         def extractor(result, idx: int):
             if return_raw:
                 return {"content": result.data, "usage": self._extract_usage(result.data)}
-            return asdict(self._completion_result(result, **merged_kwargs(idx)))
+            return _result_payload(self._completion_result(result, **merged_kwargs(idx)))
 
         def to_chat_result(extracted, idx: int):
             result = ChatCompletionResult._from_payload(extracted)
@@ -809,7 +933,6 @@ class LLMClientBase(CompletionMixin, ABC):
 
         # responses/progress 在 try 外初始化：预算超限提前跳出时二者必须有定义
         responses: list = [None] * len(messages_list)
-        error_results: dict[int, RequestResult] = {}
         batch_errors: dict[int, LLMRequestError] = {}
         progress = None
         budget_exceeded = False
@@ -840,7 +963,9 @@ class LLMClientBase(CompletionMixin, ABC):
                             i,
                             with_prefix(i, resp["content"]),
                             usage=resp.get("usage"),
-                            result=resp if return_usage and not return_raw else None,
+                            result=_checkpoint_payload(resp, save_raw=save_raw)
+                            if return_usage and not return_raw
+                            else None,
                         )
 
                 # 过滤掉文件中已完成的
@@ -883,7 +1008,6 @@ class LLMClientBase(CompletionMixin, ABC):
                                 )
                                 logger.debug(f"请求失败: {error_msg}")
                                 cached_responses[original_idx] = None
-                                error_results[original_idx] = result
                                 batch_errors[original_idx] = _request_error_from_result(result)
                                 writer.write_result(original_idx, None, "error", error_msg)
                                 continue
@@ -902,7 +1026,9 @@ class LLMClientBase(CompletionMixin, ABC):
                                     original_idx,
                                     with_prefix(original_idx, extracted["content"]),
                                     usage=extracted.get("usage"),
-                                    result=extracted if return_usage and not return_raw else None,
+                                    result=_checkpoint_payload(extracted, save_raw=save_raw)
+                                    if return_usage and not return_raw
+                                    else None,
                                 )
                                 # 记录成本
                                 if self._cost_tracker and extracted.get("usage"):
@@ -922,7 +1048,6 @@ class LLMClientBase(CompletionMixin, ABC):
                             except Exception as e:
                                 logger.warning(f"提取结果失败: {e}")
                                 cached_responses[original_idx] = None
-                                error_results[original_idx] = _mark_error_result(result, e)
                                 batch_errors[original_idx] = (
                                     e
                                     if isinstance(e, LLMRequestError)
@@ -968,7 +1093,6 @@ class LLMClientBase(CompletionMixin, ABC):
                                 )
                                 logger.debug(f"请求失败: {error_msg}")
                                 responses[original_idx] = None
-                                error_results[original_idx] = result
                                 batch_errors[original_idx] = _request_error_from_result(result)
                                 writer.write_result(original_idx, None, "error", error_msg)
                                 continue
@@ -979,7 +1103,9 @@ class LLMClientBase(CompletionMixin, ABC):
                                     original_idx,
                                     with_prefix(original_idx, extracted["content"]),
                                     usage=extracted.get("usage"),
-                                    result=extracted if return_usage and not return_raw else None,
+                                    result=_checkpoint_payload(extracted, save_raw=save_raw)
+                                    if return_usage and not return_raw
+                                    else None,
                                 )
                                 if self._cost_tracker and extracted.get("usage"):
                                     self._cost_tracker.record(extracted["usage"], effective_model)
@@ -997,7 +1123,6 @@ class LLMClientBase(CompletionMixin, ABC):
                             except Exception as e:
                                 logger.warning(f"Error: {e}, set content to None")
                                 responses[original_idx] = None
-                                error_results[original_idx] = _mark_error_result(result, e)
                                 batch_errors[original_idx] = (
                                     e
                                     if isinstance(e, LLMRequestError)
@@ -1040,33 +1165,50 @@ class LLMClientBase(CompletionMixin, ABC):
         for record in writer.restored_records:
             idx = record["index"]
             if return_usage and not return_raw:
-                restored = (
-                    ChatCompletionResult._from_payload(record["result"], cached=True)
-                    if isinstance(record.get("result"), dict)
-                    else ChatCompletionResult(content=record["output"], usage=record.get("usage"))
-                )
-                restored.content = record["output"]
-                final_responses[idx] = restored
+                final_responses[idx] = _restore_from_record(record)
             else:
                 final_responses[idx] = record["output"]
 
-        if error_results and raise_on_error:
-            raise BatchRequestError(
-                f"批量请求失败: {len(batch_errors)}/{len(messages_list)} 条",
-                results=final_responses,
-                errors=batch_errors,
-            )
+        return _BatchRun(
+            responses=final_responses,
+            errors=batch_errors,
+            summary=summary,
+            cost=self._cost_tracker.get_report() if self._cost_tracker else None,
+            elapsed=time.perf_counter() - started,
+        )
 
-        # 构建返回值
-        result = final_responses
+    async def chat_completions_batch(
+        self,
+        messages_list: list[list[dict]],
+        model: str = None,
+        return_raw: bool = False,
+        return_usage: bool = False,
+        return_summary: bool = False,
+        return_cost_report: bool = False,
+        **kwargs,
+    ) -> list[str] | list[ChatCompletionResult] | tuple:
+        """批量聊天完成（旧返回形状）。参数与行为见 _run_batch。
+
+        失败项为 None；需要知道每条为何失败请用 complete_batch()，它返回等长的
+        BatchResult，失败项是带 error 的 ChatCompletionResult。
+        """
+        warn_legacy_response(return_raw=return_raw, return_usage=return_usage)
+        run = await self._run_batch(
+            messages_list,
+            model=model,
+            return_raw=return_raw,
+            return_usage=return_usage,
+            **kwargs,
+        )
+        result = run.responses
         if return_summary:
-            result = (final_responses, summary)
-        if return_cost_report and self._cost_tracker:
-            cost_report = self._cost_tracker.get_report()
-            if return_summary:
-                result = (final_responses, summary, cost_report)
-            else:
-                result = (final_responses, cost_report)
+            result = (run.responses, run.summary)
+        if return_cost_report and run.cost is not None:
+            result = (
+                (run.responses, run.summary, run.cost)
+                if return_summary
+                else (run.responses, run.cost)
+            )
         return result
 
     def chat_completions_batch_sync(
@@ -1083,7 +1225,6 @@ class LLMClientBase(CompletionMixin, ABC):
         flush_interval: float = 1.0,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
-        raise_on_error: bool = False,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
@@ -1101,7 +1242,6 @@ class LLMClientBase(CompletionMixin, ABC):
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
                 save_input=save_input,
-                raise_on_error=raise_on_error,
                 **kwargs,
             )
         )

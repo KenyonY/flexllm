@@ -31,7 +31,7 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         ...     api_key="your-key",
         ...     model="gpt-4",
         ... )
-        >>> result = await client.chat_completions(messages)
+        >>> result = await client.complete(messages)
 
     Example (Ollama/vLLM 本地模型):
         >>> client = OpenAIClient(
@@ -41,12 +41,12 @@ class OpenAIClient(AudioMixin, LLMClientBase):
 
     Example (thinking 参数 - 统一的思考控制):
         >>> # 禁用思考（快速响应）
-        >>> result = client.chat_completions_sync(
+        >>> result = client.complete_sync(
         ...     messages=[{"role": "user", "content": "1+1=?"}],
         ...     thinking=False,
         ... )
         >>> # 启用思考并获取思考内容
-        >>> result = client.chat_completions_sync(
+        >>> result = client.complete_sync(
         ...     messages=[{"role": "user", "content": "1+1=?"}],
         ...     thinking=True,
         ...     return_raw=True,
@@ -327,7 +327,7 @@ class OpenAIClient(AudioMixin, LLMClientBase):
             }
 
         Example:
-            >>> result = client.chat_completions_sync(
+            >>> result = client.complete_sync(
             ...     messages=[...],
             ...     thinking=True,
             ...     return_raw=True,

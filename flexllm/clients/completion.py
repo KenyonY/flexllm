@@ -8,11 +8,15 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .base import ChatCompletionResult
+    from .base import BatchResult, ChatCompletionResult
 
 
 class LegacyResponseWarning(FutureWarning):
-    """A legacy return shape is being used during the migration period."""
+    """A legacy return shape is being used; these shapes go away in 0.18.0.
+
+    刻意用 FutureWarning 而不是 DeprecationWarning：后者默认对终端用户静默，
+    而这里需要调用方真的看见。
+    """
 
 
 _SUPPRESS_LEGACY_WARNING = ContextVar("flexllm_suppress_legacy_warning", default=False)
@@ -28,7 +32,7 @@ def suppress_legacy_response_warning():
         _SUPPRESS_LEGACY_WARNING.reset(token)
 
 
-def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error: bool):
+def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error: bool = False):
     if _SUPPRESS_LEGACY_WARNING.get() or (return_usage and not return_raw and raise_on_error):
         return
     # Attribute warnings to the consumer even through pool and sync wrappers.
@@ -38,10 +42,12 @@ def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error
         level += 1
         frame = frame.f_back
     warnings.warn(
-        "Legacy completion return shapes are deprecated; use complete()/complete_batch() "
-        "(or their _sync variants) for ChatCompletionResult with typed exceptions. "
+        "Legacy completion return shapes are deprecated and will be removed in flexllm 0.18.0; "
+        "use complete()/complete_batch() (or their _sync variants). complete() returns a "
+        "ChatCompletionResult and raises typed errors; complete_batch() returns an equal-length "
+        "BatchResult whose failed items carry .error instead of raising. "
         "Read .content for text and .raw_response for the provider response. "
-        "Existing return values remain unchanged during the migration period.",
+        "Existing return values stay unchanged until 0.18.0.",
         LegacyResponseWarning,
         stacklevel=level,
     )
@@ -76,29 +82,18 @@ class CompletionMixin:
         """Synchronous counterpart of complete()."""
         return asyncio.run(self.complete(messages, model=model, **kwargs))
 
-    async def complete_batch(
-        self, messages_list, model=None, **kwargs
-    ) -> list["ChatCompletionResult"]:
-        """Return ordered structured results; partial failures raise BatchRequestError."""
-        from .base import BatchRequestError, LLMRequestError
+    async def complete_batch(self, messages_list, model=None, **kwargs) -> "BatchResult":
+        """批量完成：等长同构的 BatchResult，单条失败不抛异常。
 
+        批量里"某条失败"是预期结果的一种，不是控制流事件——把它升级成异常会逼调用方
+        用 try/except 走正常分支，还会让已完成的结果需要从异常对象里捞。失败项是
+        content=None 且带 error 的 ChatCompletionResult，用 .ok 分流即可；需要
+        fail-fast 调用 result.raise_for_errors()。
+        """
         self._validate_completion_options(kwargs)
-        results = await self.chat_completions_batch(
-            messages_list, model=model, return_usage=True, raise_on_error=True, **kwargs
-        )
-        errors = {
-            i: LLMRequestError("Batch item was not completed")
-            for i, result in enumerate(results)
-            if result is None
-        }
-        if errors:
-            raise BatchRequestError(
-                "Batch stopped before completion", results=results, errors=errors
-            )
-        return results
+        run = await self._run_batch(messages_list, model=model, return_usage=True, **kwargs)
+        return run.to_batch_result()
 
-    def complete_batch_sync(
-        self, messages_list, model=None, **kwargs
-    ) -> list["ChatCompletionResult"]:
+    def complete_batch_sync(self, messages_list, model=None, **kwargs) -> "BatchResult":
         """Synchronous counterpart of complete_batch()."""
         return asyncio.run(self.complete_batch(messages_list, model=model, **kwargs))

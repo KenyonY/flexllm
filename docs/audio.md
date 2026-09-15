@@ -6,7 +6,7 @@ flexllm 支持 OpenAI 兼容的两个语音端点，以及对话接口里的音�
 |---|---|---|---|
 | 语音转录（音频→文字） | `/audio/transcriptions` | `transcribe` / `transcribe_batch` | `flexllm transcribe` |
 | 语音合成（文字→音频） | `/audio/speech` | `speech` / `speech_batch` | `flexllm speak` |
-| 音频输入对话 | `/chat/completions` | `chat_completions` | — |
+| 音频输入对话 | `/chat/completions` | `complete` | — |
 
 三者都复用客户端的并发、QPS 限流、重试和代理配置。
 
@@ -127,7 +127,7 @@ messages = [{"role": "user", "content": [
     {"type": "audio_url", "audio_url": {"url": "/path/to/a.wav"}},   # 本地路径
 ]}]
 
-resp = client.chat_completions_sync(messages, preprocess_msg=True)
+resp = client.complete_sync(messages, preprocess_msg=True)
 ```
 
 **`preprocess_msg=True` 必须显式开启**，否则本地路径不会被读取转成 base64。
@@ -144,7 +144,7 @@ MIME 子类型会规范化成 OpenAI 规范要求的 `format` 值。这一步是
 安装 `pip install "flexllm[audio]"`（soundfile + scipy）后可在预处理阶段重采样、转单声道、转格式、截断：
 
 ```python
-resp = await client.chat_completions(
+resp = await client.complete(
     messages, preprocess_msg=True,
     target_sample_rate=16000, target_channels=1,
     target_audio_format="wav", max_duration_seconds=30,

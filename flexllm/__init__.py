@@ -19,12 +19,12 @@ Example:
     )
 
     # 同步调用（简单场景）
-    result = client.chat_completions_sync(
+    result = client.complete_sync(
         messages=[{"role": "user", "content": "Hello!"}]
     )
 
     # 异步批量调用 + 断点续传
-    results = await client.chat_completions_batch(
+    results = await client.complete_batch(
         messages_list,
         show_progress=True,
         output_jsonl="results.jsonl",  # 增量写入，中断后自动恢复
@@ -56,11 +56,12 @@ Example:
         cache=ResponseCacheConfig(enabled=True),  # 启用响应缓存（默认1小时TTL）
     )
 
-    # 单条调用
-    result = await client.chat_completions(messages)
+    # 单条调用：返回 ChatCompletionResult，失败抛 LLMRequestError
+    result = await client.complete(messages)
 
     # 批量调用 + 断点续传（中断后自动从缓存/文件恢复）
-    results = await client.chat_completions_batch(
+    # 单条失败不抛异常：失败项是 content=None 且带 .error 的同一种结果对象
+    results = await client.complete_batch(
         messages_list,
         show_progress=True,
         output_jsonl="results.jsonl",  # 增量写入文件（断点续传）
@@ -82,7 +83,7 @@ Example:
         model="gemini-2.5-flash",
         concurrency_limit=10,
     )
-    result = await gemini.chat_completions(messages)
+    result = await gemini.complete(messages)
 
     # Vertex AI 模式
     gemini_vertex = GeminiClient(
@@ -93,7 +94,7 @@ Example:
     )
 
     # Gemini 思考模式
-    result = await gemini.chat_completions(
+    result = await gemini.complete(
         messages,
         thinking="high",  # False, True, "minimal", "low", "medium", "high"
     )
@@ -113,11 +114,11 @@ Example:
     )
 
     # 接口与 LLMClient 完全一致
-    result = await pool.chat_completions(messages)
-    results = await pool.chat_completions_batch(messages_list)
+    result = await pool.complete(messages)
+    results = await pool.complete_batch(messages_list)
 
     # 批量调用可分散到多个 endpoint 并行处理
-    results = await pool.chat_completions_batch(messages_list, distribute=True)
+    results = await pool.complete_batch(messages_list, distribute=True)
 
     # =====================================================
     # 5. 底层 Provider 路由器（高级用法）
@@ -158,7 +159,7 @@ from .batch_tools import MllmFolderProcessor, MllmTableProcessor
 # 响应缓存
 from .cache import ResponseCache, ResponseCacheConfig
 from .clients import (
-    BatchRequestError,
+    BatchResult,
     ChainOfThoughtClient,
     ChatCompletionResult,
     ClaudeClient,
@@ -211,7 +212,7 @@ __all__ = [
     "LLMConnectionError",
     "LLMTimeoutError",
     "LLMResponseError",
-    "BatchRequestError",
+    "BatchResult",
     "LegacyResponseWarning",
     "MllmClient",
     "MllmTableProcessor",

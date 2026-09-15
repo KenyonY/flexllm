@@ -26,7 +26,7 @@ import pytest
 # 整个文件标记为 slow（Mock Server 启动开销大）
 pytestmark = pytest.mark.slow
 
-from flexllm import BatchRequestError, LegacyResponseWarning, LLMClient, LLMClientPool, LLMHTTPError
+from flexllm import LegacyResponseWarning, LLMClient, LLMClientPool, LLMHTTPError
 from flexllm.clients import ClaudeClient, GeminiClient, LLMClientBase, OpenAIClient
 from flexllm.clients.base import ChatCompletionResult
 from flexllm.mock import MockLLMServer, MockLLMServerGroup, MockServerConfig
@@ -1258,34 +1258,33 @@ class TestErrorHandling:
 
     @pytest.mark.asyncio
     async def test_all_fail_batch(self):
-        """批量请求全部失败时抛出聚合错误并保留逐项错误"""
+        """批量全失败：不抛异常，每条自带 typed error"""
         cfg = MockServerConfig(port=19461, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
-                with pytest.raises(BatchRequestError) as raised:
-                    await client.chat_completions_batch(
-                        _batch_msgs(3), show_progress=False, raise_on_error=True
-                    )
-                assert len(raised.value.errors) == 3
-                assert all(
-                    isinstance(error, LLMHTTPError) for error in raised.value.errors.values()
-                )
+                results = await client.complete_batch(_batch_msgs(3), show_progress=False)
+                assert len(results) == 3
+                assert results.failed_count == 3
+                assert all(r.content is None and not r.ok for r in results)
+                assert all(isinstance(e, LLMHTTPError) for e in results.errors.values())
+                with pytest.raises(LLMHTTPError):
+                    results.raise_for_errors()
 
     @pytest.mark.asyncio
-    async def test_all_fail_batch_summary(self):
-        """批量全失败 + summary（需要 show_progress=True 才有 summary）"""
+    async def test_legacy_batch_keeps_none_for_failures(self):
+        """旧接口形状不变：失败项仍是 None"""
         cfg = MockServerConfig(port=19462, delay_min=0.01, delay_max=0.01, error_rate=1.0)
         with MockLLMServer(cfg) as server:
             async with LLMClient(
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
-                with pytest.raises(BatchRequestError) as raised:
-                    await client.chat_completions_batch(
-                        _batch_msgs(3), show_progress=True, return_summary=True, raise_on_error=True
+                with pytest.warns(LegacyResponseWarning):
+                    results = await client.chat_completions_batch(
+                        _batch_msgs(3), show_progress=False
                     )
-                assert len(raised.value.errors) == 3
+                assert results == [None, None, None]
 
     @pytest.mark.asyncio
     async def test_partial_fail_batch(self):
@@ -1299,15 +1298,12 @@ class TestErrorHandling:
                 retry_times=5,  # 多次重试
                 retry_delay=0.01,  # 加快重试速度
             ) as client:
-                try:
-                    results = await client.chat_completions_batch(
-                        _batch_msgs(10), show_progress=False
-                    )
-                    success_count = sum(r is not None for r in results)
-                except BatchRequestError as raised:
-                    success_count = sum(r is not None for r in raised.results)
-                # 有重试的情况下大部分应该成功；随机 mock 也可能恰好全成功
-                assert success_count > 0
+                results = await client.complete_batch(_batch_msgs(10), show_progress=False)
+                # 部分失败不抛异常：成功项和失败项在同一个等长列表里
+                assert len(results) == 10
+                assert results.success_count + results.failed_count == 10
+                assert results.success_count > 0
+                assert all(r.ok == (r.content is not None) for r in results)
 
     @pytest.mark.asyncio
     async def test_single_fail_raises_structured_error(self):

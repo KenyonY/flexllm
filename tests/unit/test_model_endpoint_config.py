@@ -152,9 +152,11 @@ def test_batch_pool_gateway_override_preserves_protocol_and_proxy(
         async def __aexit__(self, *args):
             pass
 
-        async def chat_completions_batch(self, **kwargs):
+        async def _run_batch(self, **kwargs):
+            from flexllm.clients.base import _BatchRun
+
             assert "proxy" not in kwargs
-            return [], {}
+            return _BatchRun(responses=[], errors={}, summary={}, cost=None, elapsed=0.0)
 
     monkeypatch.setattr("flexllm.LLMClient", Client)
     source = tmp_path / "input.jsonl"

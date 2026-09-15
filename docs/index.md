@@ -35,12 +35,15 @@ LLMClient (统一入口，LLMClientPool 的别名)
 
 ### 2. 请求模式
 
-| 模式 | 方法 | 说明 |
+| 模式 | 方法 | 返回 |
 |------|------|------|
-| 单条同步 | `chat_completions_sync()` | 简单场景 |
-| 单条异步 | `chat_completions()` | 高性能场景 |
-| 批量异步 | `chat_completions_batch()` | 大规模处理 |
-| 流式输出 | `chat_completions_stream()` | 实时显示 |
+| 单条异步 | `complete()` | `ChatCompletionResult`，失败抛 typed error |
+| 单条同步 | `complete_sync()` | 同上 |
+| 批量异步 | `complete_batch()` | `BatchResult`，失败项带 `.error`，不抛异常 |
+| 批量同步 | `complete_batch_sync()` | 同上 |
+| 流式输出 | `chat_completions_stream()` | 逐 token 迭代 |
+
+`chat_completions*` 是上一代接口，返回形状不变但已弃用，0.18.0 移除。
 
 ### 3. 缓存机制
 
@@ -59,15 +62,12 @@ cache = ResponseCacheConfig(enabled=True, ttl=0)
 ### 4. 成本追踪
 
 ```python
-# 简单启用成本追踪
-results, cost_report = await client.chat_completions_batch(
-    messages_list,
-    return_cost_report=True,
-)
-print(f"总成本: ${cost_report.total_cost:.4f}")
+# 成本报告随批量结果一起返回
+results = await client.complete_batch(messages_list)
+print(f"总成本: ${results.cost.total_cost:.4f}")
 
 # 进度条实时显示成本
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     track_cost=True,  # 进度条中显示 💰 $0.0012
 )
@@ -78,7 +78,7 @@ results = await client.chat_completions_batch(
 ### 5. 断点续传
 
 ```python
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     output_jsonl="results.jsonl",  # 关键：指定输出文件
 )

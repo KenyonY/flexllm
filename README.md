@@ -30,7 +30,7 @@ client = LLMClient(base_url="https://api.openai.com/v1", model="gpt-4", api_key=
 
 # Process 100k requests with automatic checkpoint recovery
 # Interrupted at 50k? Just restart - it continues from 50,001
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     output_jsonl="results.jsonl",  # Progress saved here
     show_progress=True,
@@ -53,7 +53,7 @@ client = LLMClient(
     fallback=True,  # Auto-switch on endpoint failure
 )
 
-results = await client.chat_completions_batch(messages_list, output_jsonl="results.jsonl")
+results = await client.complete_batch(messages_list, output_jsonl="results.jsonl")
 ```
 
 ---
@@ -110,30 +110,37 @@ async with LLMClient(
     base_url="https://api.openai.com/v1",
     api_key="your-api-key"
 ) as client:
-    # Async call
-    response = await client.chat_completions([
-        {"role": "user", "content": "Hello!"}
-    ])
+    result = await client.complete([{"role": "user", "content": "Hello!"}])
+    print(result.content)
+    print(result.usage)          # {'prompt_tokens': 10, 'completion_tokens': 5, ...}
+    print(result.finish_reason)  # "stop" / "length" / "tool_calls" ...
 
 # Sync version (also supports context manager)
 with LLMClient(model="gpt-4", base_url="...", api_key="...") as client:
-    response = client.chat_completions_sync([
-        {"role": "user", "content": "Hello!"}
-    ])
-
-# Get token usage
-result = await client.chat_completions(
-    messages=[{"role": "user", "content": "Hello!"}],
-    return_usage=True,  # Returns ChatCompletionResult with usage info
-)
-print(f"Tokens: {result.usage}")  # {'prompt_tokens': 10, 'completion_tokens': 5, ...}
+    result = client.complete_sync([{"role": "user", "content": "Hello!"}])
 ```
 
-新 `complete*` 接口失败时抛出结构化 `LLMRequestError`（包含 `status_code`、
-`response_data` 和 `retryable`）；`complete_batch()` 部分失败时抛出
-`BatchRequestError`，其中 `results` 和 `errors` 分别保留已完成结果与失败索引。
-旧 `chat_completions*` 接口默认继续返回原有类型并发出 `LegacyResponseWarning`；
-也可显式传入 `raise_on_error=True` 提前采用结构化异常。
+`complete()` 总是返回 `ChatCompletionResult`（`content` / `usage` / `tool_calls` /
+`reasoning_content` / `finish_reason` / `raw_response`），失败抛出结构化
+`LLMRequestError`（带 `status_code`、`response_data`、`retryable`）。
+
+批量则相反——单条失败是数据不是控制流，`complete_batch()` 不抛异常，返回等长同构的
+`BatchResult`，失败项是 `content=None` 且带 `.error` 的同一种结果对象：
+
+```python
+results = await client.complete_batch(messages_list)
+
+for r in results:                      # 可直接迭代/索引，与 list 写法一致
+    if r.ok:
+        print(r.content)
+    elif r.error.retryable:
+        ...                            # r.error 是 typed error，带 status_code
+print(results.success_count, results.failed_count, results.errors)  # errors: {index: error}
+results.raise_for_errors()             # 需要 fail-fast 时显式调用
+```
+
+旧的 `chat_completions*` 返回形状（`str` / `RequestResult` / 失败项 `None`）保持不变，
+但会发出 `LegacyResponseWarning`，将在 **0.18.0** 移除。
 
 ### Batch Processing with Checkpoint Recovery
 
@@ -146,7 +153,7 @@ messages_list = [
 ]
 
 # Interrupted at 50,000? Re-run and it continues from 50,001.
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     output_jsonl="results.jsonl",  # Progress saved here
     show_progress=True,
@@ -175,10 +182,10 @@ client = LLMClient(
 )
 
 # Single request — automatic failover across endpoints
-result = await client.chat_completions(messages)
+result = await client.complete(messages)
 
 # Distributed batch — shared queue, dynamic load balancing, checkpoint recovery
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     distribute=True,
     output_jsonl="results.jsonl",
@@ -213,24 +220,21 @@ client = LLMClient(
 )
 
 # First call: API request (~2s, ~$0.01)
-result1 = await client.chat_completions(messages)
+result1 = await client.complete(messages)
 
 # Second call: Cache hit (~0.001s, $0)
-result2 = await client.chat_completions(messages)
+result2 = await client.complete(messages)   # result2.cached is True
 ```
 
 ### Cost Tracking
 
 ```python
-# Track costs during batch processing
-results, cost_report = await client.chat_completions_batch(
-    messages_list,
-    return_cost_report=True,
-)
-print(f"Total cost: ${cost_report.total_cost:.4f}")
+# Cost report comes with the batch result — no extra return-shape flag
+results = await client.complete_batch(messages_list)
+print(f"Total cost: ${results.cost.total_cost:.4f}")
 
 # Real-time cost display in progress bar
-results = await client.chat_completions_batch(
+results = await client.complete_batch(
     messages_list,
     track_cost=True,  # Shows 💰 $0.0012 in progress bar
 )
@@ -253,14 +257,13 @@ async for result in client.iter_chat_completions_batch(messages_list):
 Unified interface for DeepSeek-R1, Qwen3, Claude extended thinking, Gemini thinking.
 
 ```python
-result = await client.chat_completions(
+result = await client.complete(
     messages,
     thinking=True,      # Enable where the provider supports a thinking toggle
-    return_raw=True,
 )
 
 # Unified parsing across all providers
-parsed = client.parse_thoughts(result.data)
+parsed = client.parse_thoughts(result.raw_response)
 print("Thinking:", parsed["thought"])
 print("Answer:", parsed["answer"])
 ```
@@ -300,7 +303,7 @@ messages = [
 
 # All local paths → base64 data URIs (async)
 processed = await messages_preprocess(messages)
-result = await client.chat_completions(processed)
+result = await client.complete(processed)
 ```
 
 | Content type   | Source field       | Output format             |
@@ -329,10 +332,9 @@ tools = [{
     },
 }]
 
-result = await client.chat_completions(
+result = await client.complete(
     messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
     tools=tools,
-    return_usage=True,
 )
 
 if result.tool_calls:
@@ -537,13 +539,16 @@ LLMClient(
 
 ### Main Methods
 
-| Method                                         | Description                 |
-| ---------------------------------------------- | --------------------------- |
-| `chat_completions(messages)`                 | Single async request        |
-| `chat_completions_sync(messages)`            | Single sync request         |
-| `chat_completions_batch(messages_list)`      | Batch async with checkpoint |
-| `iter_chat_completions_batch(messages_list)` | Streaming batch results     |
-| `chat_completions_stream(messages)`          | Token-by-token streaming    |
+| Method                                       | Description                                     |
+| -------------------------------------------- | ----------------------------------------------- |
+| `complete(messages)`                         | Single async request → `ChatCompletionResult`   |
+| `complete_sync(messages)`                    | Single sync request                             |
+| `complete_batch(messages_list)`              | Batch async with checkpoint → `BatchResult`     |
+| `complete_batch_sync(messages_list)`         | Batch sync                                      |
+| `iter_chat_completions_batch(messages_list)` | Streaming batch results                         |
+| `chat_completions_stream(messages)`          | Token-by-token streaming                        |
+
+`chat_completions*` 是上一代接口，形状不变但已弃用（0.18.0 移除）。
 
 ---
 

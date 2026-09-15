@@ -23,14 +23,14 @@ Example:
     )
 
     # 接口完全一致
-    result = await client.chat_completions(messages)
-    results = await pool.chat_completions_batch(messages_list)
+    result = await client.complete(messages)
+    results = await pool.complete_batch(messages_list)
 """
 
 import asyncio
 import logging
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union
 
 logger = logging.getLogger(__name__)
@@ -43,11 +43,14 @@ from ..pricing import get_model_pricing
 from ..pricing.cost_tracker import CostReport
 from ..utils.core import retry_callback
 from .base import (
-    BatchRequestError,
     ChatCompletionResult,
     LLMClientBase,
     LLMRequestError,
+    _BatchRun,
+    _checkpoint_payload,
     _request_error_from_result,
+    _restore_from_record,
+    _result_payload,
 )
 from .batch_helpers import (
     JsonlWriter,
@@ -741,7 +744,11 @@ class LLMClientPool(CompletionMixin):
         return_usage: bool = False,
         **kwargs,
     ) -> Union[str, ChatCompletionResult]:
-        """Complete through pool routing, raising a structured error after fallback is exhausted."""
+        """选路及故障转移后仍失败则抛结构化异常。
+
+        .. deprecated:: 0.17.0
+            用 complete()；本方法在 0.18.0 移除。
+        """
         result = await self.chat_completions(
             messages=messages, model=model, return_usage=return_usage, **kwargs
         )
@@ -785,15 +792,13 @@ class LLMClientPool(CompletionMixin):
             )
         )
 
-    async def chat_completions_batch(
+    async def _run_batch(
         self,
         messages_list: list[str | list[dict]],
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
-        return_summary: bool = False,
-        return_cost_report: bool = False,
         track_cost: bool = False,
         preprocess_msg: bool = False,
         output_jsonl: str | None = None,
@@ -802,11 +807,14 @@ class LLMClientPool(CompletionMixin):
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
-        raise_on_error: bool = False,
+        save_raw: bool = False,
         **kwargs,
-    ) -> list[str] | list[ChatCompletionResult] | tuple:
+    ) -> "_BatchRun":
         """
-        批量聊天完成（支持负载均衡和故障转移）
+        批量执行的单一真源（支持负载均衡和故障转移）
+
+        公开的 chat_completions_batch（旧形状）与 complete_batch（BatchResult）
+        都是它的包装，与单 endpoint 客户端共用同一个 _BatchRun 契约。
 
         Args:
             messages_list: 消息列表的列表
@@ -814,7 +822,6 @@ class LLMClientPool(CompletionMixin):
             return_raw: 是否返回原始响应
             return_usage: 是否返回包含 usage 的结果
             show_progress: 是否显示进度条
-            return_summary: 是否返回统计摘要
             track_cost: 是否在进度条中显示实时成本
             preprocess_msg: 是否预处理消息
             output_jsonl: 输出文件路径（JSONL）
@@ -827,35 +834,29 @@ class LLMClientPool(CompletionMixin):
             **kwargs: 其他参数
 
         Returns:
-            与 LLMClient.chat_completions_batch 返回值一致
+            _BatchRun（responses / errors / summary / cost / elapsed）
         """
-        warn_legacy_response(
-            return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
-        )
         kwargs = self._merge_config_params(kwargs)
         messages_list = self._prepare_messages_batch(messages_list)
 
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
-            with suppress_legacy_response_warning():
-                return await self._single_client.chat_completions_batch(
-                    messages_list=messages_list,
-                    model=model,
-                    return_raw=return_raw,
-                    return_usage=return_usage,
-                    show_progress=show_progress,
-                    return_summary=return_summary,
-                    return_cost_report=return_cost_report,
-                    track_cost=track_cost,
-                    preprocess_msg=preprocess_msg,
-                    output_jsonl=output_jsonl,
-                    flush_interval=flush_interval,
-                    metadata_list=metadata_list,
-                    save_input=save_input,
-                    params_list=params_list,
-                    raise_on_error=raise_on_error,
-                    **kwargs,
-                )
+            return await self._single_client._run_batch(
+                messages_list=messages_list,
+                model=model,
+                return_raw=return_raw,
+                return_usage=return_usage,
+                show_progress=show_progress,
+                track_cost=track_cost,
+                preprocess_msg=preprocess_msg,
+                output_jsonl=output_jsonl,
+                flush_interval=flush_interval,
+                metadata_list=metadata_list,
+                save_input=save_input,
+                params_list=params_list,
+                save_raw=save_raw,
+                **kwargs,
+            )
 
         # 多 endpoint 模式：参数校验
         # track_cost 需要 usage 信息
@@ -872,8 +873,6 @@ class LLMClientPool(CompletionMixin):
                 return_raw=return_raw,
                 return_usage=return_usage,
                 show_progress=show_progress,
-                return_summary=return_summary,
-                return_cost_report=return_cost_report,
                 track_cost=track_cost,
                 preprocess_msg=preprocess_msg,
                 output_jsonl=output_jsonl,
@@ -881,7 +880,7 @@ class LLMClientPool(CompletionMixin):
                 metadata_list=metadata_list,
                 save_input=save_input,
                 params_list=params_list,
-                raise_on_error=raise_on_error,
+                save_raw=save_raw,
                 **kwargs,
             )
         else:
@@ -892,8 +891,6 @@ class LLMClientPool(CompletionMixin):
                 return_raw=return_raw,
                 return_usage=return_usage,
                 show_progress=show_progress,
-                return_summary=return_summary,
-                return_cost_report=return_cost_report,
                 track_cost=track_cost,
                 preprocess_msg=preprocess_msg,
                 output_jsonl=output_jsonl,
@@ -901,9 +898,42 @@ class LLMClientPool(CompletionMixin):
                 metadata_list=metadata_list,
                 save_input=save_input,
                 params_list=params_list,
-                raise_on_error=raise_on_error,
+                save_raw=save_raw,
                 **kwargs,
             )
+
+    async def chat_completions_batch(
+        self,
+        messages_list: list[str | list[dict]],
+        model: str = None,
+        return_raw: bool = False,
+        return_usage: bool = False,
+        return_summary: bool = False,
+        return_cost_report: bool = False,
+        **kwargs,
+    ) -> list[str] | list[ChatCompletionResult] | tuple:
+        """批量聊天完成（旧返回形状）。参数与行为见 _run_batch。
+
+        失败项为 None；需要知道每条为何失败请用 complete_batch()。
+        """
+        warn_legacy_response(return_raw=return_raw, return_usage=return_usage)
+        run = await self._run_batch(
+            messages_list,
+            model=model,
+            return_raw=return_raw,
+            return_usage=return_usage,
+            **kwargs,
+        )
+        result = run.responses
+        if return_summary:
+            result = (run.responses, run.summary)
+        if return_cost_report and run.cost is not None:
+            result = (
+                (run.responses, run.summary, run.cost)
+                if return_summary
+                else (run.responses, run.cost)
+            )
+        return result
 
     async def _batch_with_fallback(
         self,
@@ -912,8 +942,6 @@ class LLMClientPool(CompletionMixin):
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
-        return_summary: bool = False,
-        return_cost_report: bool = False,
         track_cost: bool = False,
         preprocess_msg: bool = False,
         output_jsonl: str | None = None,
@@ -921,9 +949,9 @@ class LLMClientPool(CompletionMixin):
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
-        raise_on_error: bool = False,
+        save_raw: bool = False,
         **kwargs,
-    ):
+    ) -> "_BatchRun":
         """Use one endpoint at a time and retry only items that failed."""
         started = time.perf_counter()
         total = len(messages_list)
@@ -931,6 +959,9 @@ class LLMClientPool(CompletionMixin):
         final_errors: dict[int, LLMRequestError] = {}
         pending = list(range(total))
         tried_providers: list[ProviderConfig] = []
+        # 首轮由底层客户端直接落盘的 index；后续轮次恢复的结果才需要在这里补写，
+        # 否则每次 fallback 都会把已落盘的成功项重写一遍（靠 compact 去重掩盖）。
+        checkpointed: set[int] = set()
 
         for attempt in range(self._max_fallback_attempts):
             if not pending:
@@ -943,32 +974,24 @@ class LLMClientPool(CompletionMixin):
             local_metadata = [metadata_list[i] for i in pending] if metadata_list else None
             local_params = [params_list[i] for i in pending] if params_list else None
             try:
-                # Force typed errors internally so the pool can retain the exact
-                # status/body while still deciding fallback per item.
-                with suppress_legacy_response_warning():
-                    result = await client.chat_completions_batch(
-                        messages_list=local_messages,
-                        model=model or provider.model,
-                        return_raw=return_raw,
-                        return_usage=return_usage,
-                        show_progress=show_progress,
-                        return_summary=return_summary if attempt == 0 else False,
-                        return_cost_report=return_cost_report if attempt == 0 else False,
-                        track_cost=track_cost,
-                        preprocess_msg=preprocess_msg,
-                        output_jsonl=output_jsonl if attempt == 0 else None,
-                        flush_interval=flush_interval,
-                        metadata_list=local_metadata,
-                        save_input=save_input,
-                        params_list=local_params,
-                        raise_on_error=True,
-                        **kwargs,
-                    )
-                values = result[0] if isinstance(result, tuple) else result
-                local_errors = {}
-            except BatchRequestError as error:
-                values = error.results
-                local_errors = error.errors
+                run = await client._run_batch(
+                    messages_list=local_messages,
+                    model=model or provider.model,
+                    return_raw=return_raw,
+                    return_usage=return_usage,
+                    show_progress=show_progress,
+                    track_cost=track_cost,
+                    preprocess_msg=preprocess_msg,
+                    # 首轮之后换了 endpoint，本地 index 与文件 index 不再对齐，
+                    # 交由下面按原始 index 补写。
+                    output_jsonl=output_jsonl if attempt == 0 else None,
+                    flush_interval=flush_interval,
+                    metadata_list=local_metadata,
+                    save_input=save_input,
+                    params_list=local_params,
+                    **kwargs,
+                )
+                values, local_errors = run.responses, run.errors
             except Exception as error:
                 values = [None] * len(pending)
                 typed = error if isinstance(error, LLMRequestError) else LLMRequestError(str(error))
@@ -987,12 +1010,12 @@ class LLMClientPool(CompletionMixin):
                 else:
                     final_results[original_idx] = value
                     final_errors.pop(original_idx, None)
+                    if attempt == 0 and output_jsonl:
+                        checkpointed.add(original_idx)
 
             if not missing:
                 self._router.mark_success(provider)
                 pending = []
-                if attempt == 0:
-                    return result
                 break
             # A provider that returned failed items is unhealthy for fallback
             # routing, even if the client did not raise an aggregate exception.
@@ -1001,59 +1024,63 @@ class LLMClientPool(CompletionMixin):
             if not self._fallback:
                 break
 
-        # Results recovered from a later endpoint must be checkpointed with their
-        # original indices; the provider batch above intentionally used no output file.
-        if output_jsonl and any(value is not None for value in final_results):
+        # 后续 endpoint 恢复的结果要按原始 index 落盘；首轮已写入的不重复写。
+        recovered = [
+            i for i, v in enumerate(final_results) if v is not None and i not in checkpointed
+        ]
+        if output_jsonl and recovered:
             writer = JsonlWriter(
                 output_jsonl, messages_list, save_input, metadata_list, flush_interval, params_list
             )
             try:
-                for index, value in enumerate(final_results):
-                    if value is None:
-                        continue
+                for index in recovered:
+                    value = final_results[index]
                     if isinstance(value, ChatCompletionResult):
                         writer.write_result(
                             index,
                             value.content,
                             usage=value.usage,
-                            result=asdict(value) if return_usage else None,
+                            result=_checkpoint_payload(_result_payload(value), save_raw=save_raw)
+                            if return_usage
+                            else None,
                         )
                     else:
                         writer.write_result(index, value)
             finally:
                 writer.close()
 
-        if final_errors and raise_on_error:
-            raise BatchRequestError(
-                f"批量请求失败: {len(final_errors)}/{total} 条",
-                results=final_results,
-                errors=final_errors,
-            )
-
-        result = final_results
-        summary = None
-        if return_summary:
-            summary = {
+        return _BatchRun(
+            responses=final_results,
+            errors=final_errors,
+            summary={
                 "total": total,
                 "success": total - len(final_errors),
                 "failed": len(final_errors),
-                "cached": 0,
+                "cached": sum(1 for v in final_results if getattr(v, "cached", False)),
                 "elapsed": time.perf_counter() - started,
-            }
-            result = (final_results, summary)
-        if return_cost_report:
-            report = CostReport()
-            for client in self._clients:
-                tracker = getattr(client, "_cost_tracker", None)
-                if tracker:
-                    current = tracker.get_report()
-                    report.total_cost += current.total_cost
-                    report.total_input_tokens += current.total_input_tokens
-                    report.total_output_tokens += current.total_output_tokens
-                    report.request_count += current.request_count
-                    report.model = report.model or current.model
-            result = (final_results, summary, report) if return_summary else (final_results, report)
-        return result
+            },
+            cost=self._aggregate_cost_report(),
+            elapsed=time.perf_counter() - started,
+        )
+
+    def _aggregate_cost_report(self) -> CostReport:
+        """把各 endpoint 客户端的成本合成一份。
+
+        没开 cost_tracker 时返回空报告而不是 None：pool 的 return_cost_report 一直是
+        "要了就给"，返回形状不该随运行时是否配了 tracker 变化。
+        """
+        report = CostReport()
+        for client in self._clients:
+            tracker = getattr(client, "_cost_tracker", None)
+            if not tracker:
+                continue
+            current = tracker.get_report()
+            report.total_cost += current.total_cost
+            report.total_input_tokens += current.total_input_tokens
+            report.total_output_tokens += current.total_output_tokens
+            report.request_count += current.request_count
+            report.model = report.model or current.model
+        return report
 
     async def _batch_distributed(
         self,
@@ -1062,8 +1089,6 @@ class LLMClientPool(CompletionMixin):
         return_raw: bool = False,
         return_usage: bool = False,
         show_progress: bool = True,
-        return_summary: bool = False,
-        return_cost_report: bool = False,
         track_cost: bool = False,
         preprocess_msg: bool = False,
         output_jsonl: str | None = None,
@@ -1071,9 +1096,9 @@ class LLMClientPool(CompletionMixin):
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
-        raise_on_error: bool = False,
+        save_raw: bool = False,
         **kwargs,
-    ):
+    ) -> "_BatchRun":
         """
         动态分配：多个 worker 从共享队列取任务
 
@@ -1129,15 +1154,7 @@ class LLMClientPool(CompletionMixin):
         if completed_indices:
             for record in writer.restored_records:
                 if return_usage and not return_raw:
-                    restored = (
-                        ChatCompletionResult._from_payload(record["result"], cached=True)
-                        if isinstance(record.get("result"), dict)
-                        else ChatCompletionResult(
-                            content=record["output"], usage=record.get("usage")
-                        )
-                    )
-                    restored.content = record["output"]
-                    results[record["index"]] = restored
+                    results[record["index"]] = _restore_from_record(record)
                 else:
                     results[record["index"]] = record["output"]
 
@@ -1184,7 +1201,9 @@ class LLMClientPool(CompletionMixin):
                             idx,
                             content,
                             usage=cached_result.get("usage"),
-                            result=cached_result if return_usage else None,
+                            result=_checkpoint_payload(cached_result, save_raw=save_raw)
+                            if return_usage
+                            else None,
                         )
             if cached_count > 0:
                 logger.info(f"缓存命中: {cached_count}/{n}")
@@ -1199,15 +1218,19 @@ class LLMClientPool(CompletionMixin):
         if pending_count == 0:
             logger.info("所有任务已完成，无需执行")
             writer.close()
-            if return_summary:
-                return results, {
+            return _BatchRun(
+                responses=results,
+                errors={},
+                summary={
                     "total": n,
                     "success": n,
                     "failed": 0,
                     "cached": cached_count + file_restored_count,
-                    "elapsed": 0,
-                }
-            return results
+                    "elapsed": time.perf_counter() - start_time,
+                },
+                cost=self._aggregate_cost_report(),
+                elapsed=time.perf_counter() - start_time,
+            )
 
         logger.info(f"待执行: {pending_count}/{n}")
 
@@ -1300,7 +1323,6 @@ class LLMClientPool(CompletionMixin):
                     continue
 
                 task_start = time.perf_counter()
-                failed_result = None
                 try:
                     if tracker:
                         retry_callback.set(tracker.increment_retry)
@@ -1313,20 +1335,9 @@ class LLMClientPool(CompletionMixin):
                             model=worker_model,
                             return_raw=return_raw,
                             return_usage=return_usage or not return_raw,
-                            raise_on_error=raise_on_error,
+                            raise_on_error=True,
                             **({**kwargs, **row_extra} if row_extra else kwargs),
                         )
-
-                    # 检查是否返回了 RequestResult（表示失败）
-                    if hasattr(result, "status") and result.status != "success":
-                        failed_result = result
-                        error_type = "unknown"
-                        error_detail = ""
-                        if hasattr(result, "data") and isinstance(result.data, dict):
-                            error_type = result.data.get("error", "unknown")
-                            error_detail = result.data.get("detail", "")
-                        error_msg = f"{error_type}: {error_detail}" if error_detail else error_type
-                        raise RuntimeError(error_msg)
 
                     latency = time.perf_counter() - task_start
                     queue_time = getattr(result, "queue_time", None)
@@ -1373,7 +1384,7 @@ class LLMClientPool(CompletionMixin):
                             idx,
                             output_content,
                             usage=output_usage,
-                            result=asdict(result)
+                            result=_checkpoint_payload(_result_payload(result), save_raw=save_raw)
                             if return_usage and isinstance(result, ChatCompletionResult)
                             else None,
                         )
@@ -1396,7 +1407,7 @@ class LLMClientPool(CompletionMixin):
                         )
                         async with lock:
                             active_tasks -= 1
-                            req_result = failed_result or RequestResult(
+                            req_result = RequestResult(
                                 request_id=idx,
                                 data={"error": str(e)},
                                 status="error",
@@ -1420,23 +1431,21 @@ class LLMClientPool(CompletionMixin):
             if tracker:
                 tracker.summary(print_to_console=True)
 
-        if errors and raise_on_error:
-            raise BatchRequestError(
-                f"批量请求失败: {len(errors)}/{n} 条", results=results, errors=errors
-            )
-
-        if return_summary:
-            total_cached = cached_count + file_restored_count
-            summary = {
+        total_cached = cached_count + file_restored_count
+        elapsed = time.perf_counter() - start_time
+        return _BatchRun(
+            responses=results,
+            errors=errors,
+            summary={
                 "total": n,
                 "success": (tracker.success_count if tracker else 0) + total_cached,
                 "failed": tracker.error_count if tracker else 0,
                 "cached": total_cached,
-                "elapsed": time.perf_counter() - start_time,
-            }
-            return results, summary
-
-        return results
+                "elapsed": elapsed,
+            },
+            cost=self._aggregate_cost_report(),
+            elapsed=elapsed,
+        )
 
     def chat_completions_batch_sync(
         self,
@@ -1453,7 +1462,6 @@ class LLMClientPool(CompletionMixin):
         distribute: bool = True,
         metadata_list: list[dict] | None = None,
         save_input: bool | str = True,
-        raise_on_error: bool = False,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
         """同步版本的批量聊天完成"""
@@ -1475,7 +1483,6 @@ class LLMClientPool(CompletionMixin):
                 flush_interval=flush_interval,
                 metadata_list=metadata_list,
                 save_input=save_input,
-                raise_on_error=raise_on_error,
                 **kwargs,
             )
 
@@ -1495,7 +1502,6 @@ class LLMClientPool(CompletionMixin):
                 distribute=distribute,
                 metadata_list=metadata_list,
                 save_input=save_input,
-                raise_on_error=raise_on_error,
                 **kwargs,
             )
         )

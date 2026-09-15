@@ -228,10 +228,7 @@ def register_commands(app):
             from flexllm import LLMClient
 
             async with LLMClient(**client_options) as client:
-                # --format json 需要真实的 usage/thinking，走 return_usage 拿 ChatCompletionResult
-                return await client.chat_completions(
-                    messages, return_usage=(format == "json"), **model_params
-                )
+                return await client.complete(messages, **model_params)
 
         import time
 
@@ -239,7 +236,7 @@ def register_commands(app):
             t0 = time.perf_counter()
             result = asyncio.run(_ask())
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
-            if result is None:
+            if result.content is None:
                 cli_error(
                     ErrorType.GENERAL,
                     "模型返回空结果",
@@ -248,33 +245,18 @@ def register_commands(app):
                     doc="flexllm ask --help",
                     retryable=True,
                 )
-            if hasattr(result, "status") and result.status == "error":
-                error_msg = result.data.get("detail", result.data.get("error", "未知错误"))
-                cli_error(
-                    ErrorType.NETWORK_ERROR,
-                    f"LLM 调用失败: {error_msg}",
-                    context={
-                        "model": model_id,
-                        "base_url": base_url,
-                        "response_data": result.data,
-                    },
-                    suggestion="检查 API Key 和 base_url，或运行 flexllm test",
-                    doc="flexllm ask --help",
-                    retryable=True,
-                )
             if format == "json":
-                # return_usage=True 时返回 ChatCompletionResult(content/usage/reasoning_content)
                 payload = {
-                    "content": result if isinstance(result, str) else result.content,
-                    "thinking": getattr(result, "reasoning_content", None),
-                    "usage": getattr(result, "usage", None),
+                    "content": result.content,
+                    "thinking": result.reasoning_content,
+                    "usage": result.usage,
                     "model": model_id,
                     "elapsed_ms": elapsed_ms,
                 }
                 print(json.dumps(payload, ensure_ascii=False))
                 return
 
-            output = str(result) if not isinstance(result, str) else result
+            output = result.content
 
             if extract:
                 code = extract_code_block(output)
@@ -1253,12 +1235,11 @@ def register_commands(app):
                         pool_kwargs["total_max_qps"] = batch_config["total_max_qps"]
 
                     async with LLMClientPool(**pool_kwargs) as pool:
-                        results, summary = await pool.chat_completions_batch(
+                        run = await pool._run_batch(
                             messages_list=messages_list,
                             distribute=True,
                             output_jsonl=output,
                             show_progress=True,
-                            return_summary=True,
                             return_usage=effective_return_usage,
                             track_cost=effective_track_cost,
                             flush_interval=batch_config["flush_interval"],
@@ -1284,11 +1265,10 @@ def register_commands(app):
                         client_kwargs["max_qps"] = effective_max_qps
 
                     async with LLMClient(**client_kwargs) as client:
-                        results, summary = await client.chat_completions_batch(
+                        run = await client._run_batch(
                             messages_list=messages_list,
                             output_jsonl=output,
                             show_progress=True,
-                            return_summary=True,
                             return_usage=effective_return_usage,
                             track_cost=effective_track_cost,
                             preprocess_msg=effective_preprocess_msg,
@@ -1298,7 +1278,7 @@ def register_commands(app):
                             params_list=params_list,
                             **kwargs,
                         )
-                return results, summary
+                return run.responses, run.summary
 
             results, summary = asyncio.run(_run_batch())
 
