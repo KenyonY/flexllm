@@ -908,13 +908,25 @@ class LLMClientPool(CompletionMixin):
         model: str = None,
         return_raw: bool = False,
         return_usage: bool = False,
+        show_progress: bool = True,
         return_summary: bool = False,
         return_cost_report: bool = False,
+        track_cost: bool = False,
+        preprocess_msg: bool = False,
+        output_jsonl: str | None = None,
+        flush_interval: float = 1.0,
+        distribute: bool = True,
+        metadata_list: list[dict] | None = None,
+        save_input: bool | str = True,
+        params_list: list[dict | None] | None = None,
         **kwargs,
     ) -> list[str] | list[ChatCompletionResult] | tuple:
-        """批量聊天完成（旧返回形状）。参数与行为见 _run_batch。
+        """批量聊天完成（旧返回形状）。执行行为见 _run_batch。
 
-        失败项为 None；需要知道每条为何失败请用 complete_batch()。
+        .. deprecated:: 0.17.0
+            用 complete_batch()；本方法在 0.18.0 移除。
+
+        签名逐字保留 0.16.x 的参数顺序，位置参数调用的旧代码不受影响。
         """
         warn_legacy_response(return_raw=return_raw, return_usage=return_usage)
         run = await self._run_batch(
@@ -922,6 +934,15 @@ class LLMClientPool(CompletionMixin):
             model=model,
             return_raw=return_raw,
             return_usage=return_usage,
+            show_progress=show_progress,
+            track_cost=track_cost,
+            preprocess_msg=preprocess_msg,
+            output_jsonl=output_jsonl,
+            flush_interval=flush_interval,
+            distribute=distribute,
+            metadata_list=metadata_list,
+            save_input=save_input,
+            params_list=params_list,
             **kwargs,
         )
         result = run.responses
