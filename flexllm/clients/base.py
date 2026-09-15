@@ -1579,15 +1579,16 @@ class LLMClientBase(CompletionMixin, ABC):
                                     if reason:
                                         _finish_reason = reason
 
-                                # 带外字段必须在 thinking / tool_call 两个 continue 分支之前提取：
-                                # 网关的信号往往就挂在带 content 或 tool_call 的那条 chunk 上，
-                                # 放到后面会被 continue 短路掉
+                                # 带外字段先于内容提取：网关的信号往往就挂在带 content 或
+                                # tool_call 的那条 chunk 上，保证它在该帧内容之前先发出去
                                 if return_usage:
                                     extra = self._extract_extra(data)
                                     if extra:
                                         yield {"type": "extra", "extra": extra}
 
-                                # 提取思考内容
+                                # 同一帧的 delta 可以同时带 reasoning / tool_calls / content
+                                # （vLLM 在思考转正文的那一帧就是这样），三者必须各自独立提取，
+                                # 任何一个分支 continue 都会吞掉同帧的其余内容
                                 thinking = self._extract_stream_thinking(data)
                                 if thinking:
                                     _thinking_parts.append(thinking)
@@ -1598,7 +1599,6 @@ class LLMClientBase(CompletionMixin, ABC):
                                             yield "<think>\n"
                                             _thinking_started = True
                                         yield thinking
-                                    continue
 
                                 # 提取 tool_call delta
                                 tool_call_deltas = self._extract_stream_tool_calls(data)
@@ -1629,7 +1629,6 @@ class LLMClientBase(CompletionMixin, ABC):
                                             "type": "tool_call_delta",
                                             "tool_calls": tool_call_deltas,
                                         }
-                                    continue
 
                                 content = self._extract_stream_content(data)
                                 if content:
