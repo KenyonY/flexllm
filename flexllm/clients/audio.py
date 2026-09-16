@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Union
 
-from .base import LLMRequestError, _request_error_from_result
+from .base import _request_error_from_result
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +44,6 @@ class TranscriptionResult:
     duration: float | None = None
     segments: list[dict] = field(default_factory=list)
     raw: dict | None = None
-    # 本条为何失败。与 ChatCompletionResult.error 同义：批量里单条失败是数据，
-    # 返回等长同构列表比塞 RequestResult 或抛异常更好用。单条 transcribe 失败
-    # 由 raise_on_error 决定抛不抛，其结果对象的 error 恒为 None。
-    error: LLMRequestError | None = None
-
-    @property
-    def ok(self) -> bool:
-        return self.error is None
 
     def to_srt(self) -> str:
         """渲染为 SRT 字幕"""
@@ -310,9 +302,6 @@ class AudioMixin:
             raise _request_error_from_result(result)
         if return_raw:
             return result
-        if result.status != "success" and return_details:
-            # 结构化出口：失败项与成功项同形，调用方用 .ok 分流而不是做 isinstance
-            return TranscriptionResult(text="", error=_request_error_from_result(result))
         if result.status != "success":
             logger.warning("transcribe 请求失败: %s，返回 RequestResult", result.data)
             return result
@@ -341,8 +330,11 @@ class AudioMixin:
         """并发转录多个音频。
 
         并发数与 QPS 由客户端的 concurrency_limit / max_qps 控制。返回值与入参一一对应，
-        单条失败不抛异常：return_details=True 时失败项是带 error 的 TranscriptionResult
-        （用 .ok 分流），其余形状保持失败项为 RequestResult。
+        单条失败不抛异常，失败项为 RequestResult。
+
+        Note:
+            0.18.0 会把这里也换成 chat 那套同构返回（失败项带 .error 的
+            TranscriptionResult）；在那之前形状保持与 0.16.x 一致。
         """
         if filenames is not None and len(filenames) != len(audios):
             raise ValueError(f"filenames 数量({len(filenames)})与 audios({len(audios)})不一致")

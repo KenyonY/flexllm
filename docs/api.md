@@ -117,6 +117,24 @@ async def chat_completions_batch(
 
 批量异步请求，支持断点续传。失败项为 `None`——想知道每条为何失败，用 `complete_batch()`。
 
+#### 旧接口的兼容承诺（到 0.18.0）
+
+`chat_completions*` 的返回形状、参数顺序、失败时的返回值与 0.16.x 逐字一致，只在末尾
+追加了默认 `False` 的 `raise_on_error`。用 v0.16.6 的代码跑同一组调用逐行比对过，
+包括这些容易被忽略的角落：
+
+- 单条失败返回 `RequestResult` 而不抛异常；批量失败项为 `None`
+- `return_summary` 在单 endpoint 返回统计字符串、在 pool 返回 dict（两者本就不同）
+- `return_cost_report` 只在启用了 `cost_tracker` 时才多返回一项；**多 endpoint
+  分布式批量下不返回**（0.16.x 的分布式路径直接丢弃该参数，这个形状一并保留，
+  但会打一条 warning 指向 `complete_batch().cost`）
+- checkpoint JSONL 的字段集合不变；旧文件能被新版续跑，新文件也能被旧版读
+  （`resume_from_jsonl` 只挑它认识的键）
+- `transcribe` / `speech` 及其 batch 版本的失败项仍是 `RequestResult`
+
+唯一的行为差异：`chat_completions_or_raise` 失败时抛的是 `LLMHTTPError` 等子类而非
+`LLMRequestError` 基类，`except LLMRequestError` 照常捕获。
+
 #### chat_completions_stream
 
 ```python

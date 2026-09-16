@@ -196,22 +196,42 @@ class TestBatchFallbackContract:
         assert second_call["messages_list"] == [messages[1]]
 
     @pytest.mark.asyncio
-    async def test_cost_report_shape_does_not_hide_failed_items(self):
+    async def test_legacy_cost_report_keeps_0_16_shape(self):
+        """旧接口的 return_cost_report 形状不变：没有 cost_tracker 就不多出一项"""
         pool = self._pool()
         pool._clients[0]._run_batch = AsyncMock(
             return_value=_run([None], {0: LLMHTTPError("HTTP 500", status_code=500)})
         )
         pool._clients[1]._run_batch = AsyncMock(return_value=_run(["ok"]))
 
-        results, report = await pool.chat_completions_batch(
+        results = await pool.chat_completions_batch(
             [[{"role": "user", "content": "test"}]],
             distribute=False,
             return_cost_report=True,
         )
 
         assert results == ["ok"]
-        assert report.request_count == 0
         pool._clients[1]._run_batch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_legacy_cost_report_ignored_in_distributed_mode(self):
+        """0.16.x 的分布式路径直接丢弃 return_cost_report，形状保持 list"""
+        pool = LLMClientPool(
+            endpoints=[
+                {"base_url": "http://api1.com/v1", "model": "m"},
+                {"base_url": "http://api2.com/v1", "model": "m"},
+            ],
+            cost_tracker=True,
+        )
+        pool._batch_distributed = AsyncMock(return_value=_run(["ok"]))
+
+        results = await pool.chat_completions_batch(
+            [[{"role": "user", "content": "test"}]],
+            distribute=True,
+            return_cost_report=True,
+        )
+
+        assert results == ["ok"]
 
     @pytest.mark.asyncio
     async def test_all_failures_surface_last_typed_error_per_item(self):
@@ -233,6 +253,33 @@ class TestBatchFallbackContract:
         assert results.errors[0].status_code == 503
         with pytest.raises(LLMHTTPError):
             results.raise_for_errors()
+
+    @pytest.mark.asyncio
+    async def test_new_interface_still_gets_cost_in_distributed_mode(self):
+        """旧接口为兼容而丢掉 cost report，新接口不受牵连"""
+        pool = LLMClientPool(
+            endpoints=[
+                {"base_url": "http://api1.com/v1", "model": "m"},
+                {"base_url": "http://api2.com/v1", "model": "m"},
+            ],
+            cost_tracker=True,
+        )
+        pool._batch_distributed = AsyncMock(
+            return_value=_BatchRun(
+                responses=[ChatCompletionResult(content="ok")],
+                errors={},
+                summary=None,
+                cost=pool._aggregate_cost_report(),
+                elapsed=0.0,
+            )
+        )
+
+        results = await pool.complete_batch(
+            [[{"role": "user", "content": "test"}]], distribute=True
+        )
+
+        assert results.cost is not None
+        assert results.cost.request_count == 0
 
     @pytest.mark.asyncio
     async def test_recovered_items_are_checkpointed_without_rewriting(self, tmp_path):

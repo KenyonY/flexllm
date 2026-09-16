@@ -779,6 +779,10 @@ results = await client.complete_batch(
 )
 ```
 
+> 旧接口的 `return_cost_report=True` 在多 endpoint 分布式批量下不返回成本报告——
+> 0.16.x 就是这个行为（参数被接下来直接丢掉），为不破坏按旧形状解包的代码而保留到
+> 0.18.0，只是现在会打一条 warning。要在 pool 上拿成本，用 `complete_batch().cost`。
+
 ### CostReport 属性
 
 | 属性 | 说明 |

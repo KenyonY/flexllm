@@ -945,15 +945,20 @@ class LLMClientPool(CompletionMixin):
             params_list=params_list,
             **kwargs,
         )
+        cost = run.cost
+        if return_cost_report and self._mode != "single" and distribute:
+            # 0.16.x 的分布式路径把 return_cost_report 接下来就丢了，返回 list 而非
+            # tuple。这个形状要留到 0.18.0，否则按旧行为写的解包代码会突然多出一项。
+            logger.warning(
+                "多 endpoint 分布式批量不返回成本报告（保持 0.16.x 行为）；"
+                "改用 complete_batch()，成本在 BatchResult.cost 上"
+            )
+            cost = None
         result = run.responses
         if return_summary:
             result = (run.responses, run.summary)
-        if return_cost_report and run.cost is not None:
-            result = (
-                (run.responses, run.summary, run.cost)
-                if return_summary
-                else (run.responses, run.cost)
-            )
+        if return_cost_report and cost is not None:
+            result = (run.responses, run.summary, cost) if return_summary else (run.responses, cost)
         return result
 
     async def _batch_with_fallback(
@@ -1084,17 +1089,19 @@ class LLMClientPool(CompletionMixin):
             elapsed=time.perf_counter() - started,
         )
 
-    def _aggregate_cost_report(self) -> CostReport:
-        """把各 endpoint 客户端的成本合成一份。
+    def _aggregate_cost_report(self) -> CostReport | None:
+        """把各 endpoint 客户端的成本合成一份；都没开 cost_tracker 时返回 None。
 
-        没开 cost_tracker 时返回空报告而不是 None：pool 的 return_cost_report 一直是
-        "要了就给"，返回形状不该随运行时是否配了 tracker 变化。
+        返回 None 而不是空报告，是为了让旧的 return_cost_report 保持 0.16.x 的形状：
+        那时没有 tracker 就不返回 tuple。新接口读 BatchResult.cost，None 即"没追踪"。
         """
-        report = CostReport()
+        report = None
         for client in self._clients:
             tracker = getattr(client, "_cost_tracker", None)
             if not tracker:
                 continue
+            if report is None:
+                report = CostReport()
             current = tracker.get_report()
             report.total_cost += current.total_cost
             report.total_input_tokens += current.total_input_tokens
