@@ -399,8 +399,14 @@ class TestLatencyAwareRouting:
         router.observe(slow, 60.0)
         router.observe(fast, 2.0)
 
-        # 两者都被跳过 40 次：cost 衰减到 1e-17 量级，比值仍精确是 30
-        router._seq = 40
+        # 跳过 400 次后 cost 衰减到 1e-16/1e-18 量级，比值仍精确是 30。
+        # 必须取到这个量级才守得住回归：掺绝对容差（曾经的 +1e-12）会在这里把两者
+        # 判成并列，退回负载率后又稳定选回列表首个的慢节点。跳过次数少时两个 cost
+        # 都远大于 1e-12，加不加绝对项都一样，测不出区别。
+        router._seq = 400
+        costs = [router._cost(p) for p in router._providers]
+        assert costs[0] / costs[1] == pytest.approx(30.0)
+        assert max(costs) < 1e-15
 
         assert router.acquire().base_url == "http://api2.com/v1"
 
