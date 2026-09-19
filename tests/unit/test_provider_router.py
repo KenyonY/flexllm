@@ -331,7 +331,7 @@ class TestLatencyAwareRouting:
 
     def test_serial_calls_prefer_fast_endpoint(self):
         """并发度为 1 时也能避开慢 endpoint —— in-flight 在这里恒为 0，只能靠延迟"""
-        router = self._make_router([8, 8, 8], latency_tau=30.0)
+        router = self._make_router([8, 8, 8], latency_decay_calls=10.0)
         latencies = {
             "http://api1.com/v1": 60.0,  # 慢 30 倍，且排在第一位
             "http://api2.com/v1": 2.0,
@@ -353,57 +353,108 @@ class TestLatencyAwareRouting:
             router.release(p)
         assert set(urls) == {"http://api1.com/v1"}
 
-    def test_cost_uses_parallel_capacity_not_raw_inflight(self):
-        """未饱和时不计排队：延迟更低者胜出，即使它 in-flight 更多"""
+    def test_unsaturated_endpoint_ignores_inflight(self):
+        """未饱和 = 新请求无需排队，期望完成时间就是服务耗时，延迟低者胜出"""
         router = self._make_router([8, 8])
         p1, p2 = (s.config for s in router._providers)
         router.observe(p1, 1.0)
         router.observe(p2, 10.0)
-        router._providers[0].in_flight = 5  # 仍未饱和 -> 不排队
+        router._providers[0].in_flight = 5  # 仍未饱和
         router._providers[1].in_flight = 0
 
         assert router.acquire().base_url == "http://api1.com/v1"
 
-    def test_saturation_adds_queueing_penalty(self):
-        """饱和后每多一批排队就乘一次延迟，慢但空闲的 endpoint 重新胜出"""
+    def test_saturated_endpoint_is_excluded_despite_being_faster(self):
+        """容量维度由"饱和即出局"承担，不在 cost 里重复计算"""
         router = self._make_router([2, 2])
-        p1, p2 = (s.config for s in router._providers)
-        router.observe(p1, 1.0)
-        router.observe(p2, 2.5)
-        router._providers[0].in_flight = 4  # 2 批排队 -> cost = 1.0 * 3
-        router._providers[1].in_flight = 0  # cost = 2.5 * 1
-
-        assert router.acquire().base_url == "http://api2.com/v1"
-
-    def test_idle_decay_reprobes_slow_endpoint(self):
-        """慢 endpoint 闲置期间估计值衰减，在持续繁忙的快 endpoint 对比下重获探测机会
-
-        衰减是相对的：两个 endpoint 一起闲置时估计值同步下降、相对关系不变。
-        翻转发生在"快的一直在服务、慢的长期没被选中"时，也就是真实负载的形态。
-        """
-        router = self._make_router([8, 8], latency_tau=0.05)
-        slow, fast = (s.config for s in router._providers)
-        router.observe(slow, 10.0)
+        fast, slow = (s.config for s in router._providers)
         router.observe(fast, 1.0)
+        router.observe(slow, 2.5)
+        router._providers[0].in_flight = 2  # 饱和
+        router._providers[1].in_flight = 0
 
         assert router.acquire().base_url == "http://api2.com/v1"
-        router.release(fast)
 
-        time.sleep(0.4)  # 慢的那个闲置了 8 个 tau
-        router.observe(fast, 1.0)  # 快的刚服务完一条，估计值是新鲜的
+    def test_no_limit_uses_inflight_as_queue_depth(self):
+        """没有限额就无从判断饱和，退回 Finagle 的 rtt * (in_flight + 1)"""
+        router = self._make_router([None, None])
+        fast, slow = (s.config for s in router._providers)
+        router.observe(fast, 1.0)
+        router.observe(slow, 10.0)
+
+        router._providers[0].in_flight = 5  # cost = 1.0 * 6
         assert router.acquire().base_url == "http://api1.com/v1"
+        router._providers[0].in_flight = 20  # cost = 1.0 * 21 > 10.0 * 1
+        router.release(fast)
+        assert router.acquire().base_url == "http://api2.com/v1"
+
+    def test_long_idle_keeps_relative_ordering(self):
+        """长时间闲置后估计值一起衰减到极小，但比例不变，仍然分得出快慢
+
+        掺绝对容差会在这里把所有候选判成并列，退回负载率后又稳定选回列表首个——
+        也就是完整复现"逐条调用永远打第一个"的原始缺陷。
+        """
+        router = self._make_router([8, 8], latency_decay_calls=10.0)
+        slow, fast = (s.config for s in router._providers)
+        router.observe(slow, 60.0)
+        router.observe(fast, 2.0)
+
+        # 两者都被跳过 40 次：cost 衰减到 1e-17 量级，比值仍精确是 30
+        router._seq = 40
+
+        assert router.acquire().base_url == "http://api2.com/v1"
+
+    def test_extreme_idle_underflows_back_to_cold_start(self):
+        """跳过次数多到估计值浮点下溢时退回冷启动：信息确实已完全过期，重新探测正确"""
+        router = self._make_router([8, 8], latency_decay_calls=0.5)
+        slow, fast = (s.config for s in router._providers)
+        router.observe(slow, 60.0)
+        router.observe(fast, 2.0)
+        router._seq = 2000
+
+        assert all(router._cost(p) == 0.0 for p in router._providers)
+
+    def test_slow_endpoint_is_reprobed_after_being_skipped(self):
+        """慢 endpoint 每被跳过若干次就重获一次探测机会，快的拿绝大多数流量"""
+        router = self._make_router([8, 8], latency_decay_calls=2.0)
+        latencies = {"http://api1.com/v1": 10.0, "http://api2.com/v1": 1.0}
+        picked = self._serial(router, latencies, 20)
+
+        assert picked["http://api2.com/v1"] > picked["http://api1.com/v1"]
+        assert picked["http://api1.com/v1"] >= 1, "慢 endpoint 应当被周期性重新探测"
+
+    def test_probe_frequency_is_independent_of_call_spacing(self):
+        """密集批处理与稀疏交互式调用的探测频率一致
+
+        这正是衰减用"选路次数"而非墙上时间的理由：按秒衰减时，稀疏调用下每次选路
+        所有 endpoint 都已闲置远超 tau，衰减量由"谁最久没被选中"主导，延迟信息被
+        抹掉而退化成轮询——慢 endpoint 照样吃到 1/n 的流量。
+        """
+        latencies = {"http://api1.com/v1": 60.0, "http://api2.com/v1": 2.0}
+        dense = self._serial(self._make_router([8, 8]), latencies, 60)
+
+        sparse_router = self._make_router([8, 8])
+        sparse = Counter()
+        for _ in range(60):
+            p = sparse_router.acquire()
+            sparse[p.base_url] += 1
+            sparse_router.observe(p, latencies[p.base_url])
+            sparse_router.release(p)
+            time.sleep(0.01)  # 调用之间有真实的墙上时间间隔
+
+        assert sparse == dense
 
     def test_in_flight_blocks_decay(self):
-        """在途请求存在时不衰减——否则慢 endpoint 会被反复重新探测"""
-        router = self._make_router([8], latency_tau=0.01)
+        """在途请求存在时不衰减——请求进行中的估计值就是最新的"""
+        router = self._make_router([8], latency_decay_calls=0.5)
         p = router._providers[0]
         router.observe(p.config, 10.0)
-        p.last_active = time.time() - 100.0
+        router._seq = 100  # 已经被跳过很多次
 
         p.in_flight = 1
-        assert router._estimate(p, time.time()) == 10.0
+        assert router._estimate(p) == 10.0
         p.in_flight = 0
-        assert router._estimate(p, time.time()) < 1.0
+        assert router._estimate(p) < 1.0
 
     def test_observe_ignores_non_positive(self):
         router = self._make_router([8])

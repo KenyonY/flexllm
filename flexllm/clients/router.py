@@ -47,21 +47,25 @@ class ProviderStatus:
     in_flight: int = 0
     # 服务耗时的 EWMA 估计（秒）。None = 还没有成功样本，选路时按最乐观处理。
     ewma_latency: float | None = None
-    # 最后一次交互（被选中 / 拿到样本 / 请求结束）的时刻，闲置衰减以它为基准。
-    last_active: float = 0.0
+    # 最后一次交互（被选中 / 拿到样本 / 请求结束）时的全局选路序号，闲置衰减以它为基准。
+    last_active_seq: int = 0
 
 
 class ProviderRouter:
     """
     Provider 路由器
 
-    选路策略：延迟感知 + 容量感知。在健康且未饱和的 provider 中选期望完成时间最短者
+    选路策略：延迟感知 + 容量感知。两者分工明确——
 
-        cost = ewma_service_time * (in_flight // concurrency_limit + 1)
+    - 容量：饱和（in_flight >= concurrency_limit）的 provider 直接出局，全部饱和时
+      退回轮询，此时排队是正确行为
+    - 延迟：在剩下的（未饱和，即新请求无需排队）候选里选延迟估计最低者
 
-    括号项是"新请求前面还要排几批"：未饱和时恒为 1，此时纯按延迟择优——并发度为 1
-    的逐条调用也能避开慢 endpoint（in-flight 在那里恒为 0，提供不了任何信息）。
-    并发升高后括号项主导，自然退回容量感知。全部饱和时退回轮询。
+    这样并发度为 1 的逐条调用也能避开慢 endpoint——in-flight 在那里恒为 0，
+    提供不了任何信息，只能靠延迟。并发升高后饱和过滤接手，回到容量感知。
+
+    没有设 concurrency_limit 的 provider 无从判断饱和，改用 Finagle 的
+    cost = rtt * (in_flight + 1)，让 in-flight 直接进入比较。
 
     还没有延迟样本的 provider cost 记 0（最乐观），保证每个 endpoint 至少被探测一次；
     cost 相同时按负载率、绝对 in-flight 决胜，即冷启动阶段行为与纯容量感知一致。
@@ -79,7 +83,7 @@ class ProviderRouter:
         providers: list[ProviderConfig],
         failure_threshold: int | float = float("inf"),
         recovery_time: float = 60.0,
-        latency_tau: float = 30.0,
+        latency_decay_calls: float = 10.0,
     ):
         """
         初始化路由器
@@ -88,19 +92,23 @@ class ProviderRouter:
             providers: Provider 配置列表
             failure_threshold: 连续失败多少次后标记为不健康
             recovery_time: 不健康后多久尝试恢复 (秒)
-            latency_tau: 延迟估计的闲置衰减时间常数 (秒)。闲置 tau 秒后估计值衰减到
-                约 37%，慢 endpoint 借此周期性地被重新探测——调大则探测更稀疏
-                （省掉慢请求的代价），调小则恢复更快。设为 0 关闭衰减。
+            latency_decay_calls: 延迟估计的闲置衰减常数，单位是"选路次数"。某个
+                endpoint 每被跳过 N 次，其延迟估计衰减到约 37%，慢 endpoint 借此
+                周期性地被重新探测：慢 K 倍的 endpoint 大约每 N*ln(K) 次调用被探测
+                一次。用次数而非秒，是因为 endpoint 的快慢不会因为没人调用就改变，
+                而探测的代价恰恰是按请求计的——按墙上时间衰减会让稀疏/交互式调用
+                （每次调用时所有 endpoint 都已闲置很久）退化成轮询。设为 0 关闭衰减。
         """
         if not providers:
             raise ValueError("至少需要一个 provider")
 
         self.failure_threshold = failure_threshold
         self.recovery_time = recovery_time
-        self.latency_tau = latency_tau
+        self.latency_decay_calls = latency_decay_calls
 
         self._providers = [ProviderStatus(config=p) for p in providers if p.enabled]
         self._index = 0
+        self._seq = 0
         self._lock = Lock()
 
         if not self._providers:
@@ -127,35 +135,43 @@ class ProviderRouter:
         """按对象身份（优先）或值相等匹配 provider"""
         return status.config is provider or status.config == provider
 
-    def _estimate(self, status: ProviderStatus, now: float) -> float | None:
+    def _estimate(self, status: ProviderStatus) -> float | None:
         """当前延迟估计，None 表示还没有样本
 
-        衰减基准是"最后一次交互"（last_active），且在途请求存在时不衰减——衰减表达的
-        是"这份估计有多旧"，而请求进行中和刚结束时它都是最新的。
+        闲置按"被跳过了多少次选路"衡量，不按秒：endpoint 的快慢不会因为没人调用就
+        改变，而探测的代价恰恰是按请求计的。按墙上时间衰减时，稀疏/交互式调用下每次
+        选路所有 endpoint 都已闲置远超 tau，衰减量由"谁最久没被选中"主导，延迟信息
+        被完全抹掉，退化成轮询——慢 endpoint 照样吃到 1/n 的流量。
 
-        两个踩过的坑：基准取"上次拿到样本"时，慢 endpoint 的样本间隔天然远大于 tau，
-        估计值每次都衰减到接近 0 而被反复重新探测；基准取"上次被选中"时，一次 60s 的
-        请求结束时已经空过了 2 个 tau，等于按请求耗时给慢 endpoint 发折扣。
+        基准是"最后一次交互"（被选中 / 拿到样本 / 请求结束），且在途请求存在时不
+        衰减：衰减表达的是"这份估计有多旧"，而请求进行中和刚结束时它都是最新的。
+        基准若取"上次拿到样本"，慢 endpoint 的样本间隔天然更长，会被反复重新探测。
         """
         if status.ewma_latency is None:
             return None
-        if status.in_flight > 0 or self.latency_tau <= 0:
+        if status.in_flight > 0 or self.latency_decay_calls <= 0:
             return status.ewma_latency
-        idle = now - status.last_active
-        if idle <= 0:
+        skipped = self._seq - status.last_active_seq
+        if skipped <= 0:
             return status.ewma_latency
-        return status.ewma_latency * math.exp(-idle / self.latency_tau)
+        return status.ewma_latency * math.exp(-skipped / self.latency_decay_calls)
 
-    def _cost(self, status: ProviderStatus, now: float) -> float:
-        """期望完成时间。无样本记 0（最乐观），保证每个 endpoint 至少被探测一次"""
-        estimate = self._estimate(status, now)
+    def _cost(self, status: ProviderStatus) -> float:
+        """期望完成时间。无样本记 0（最乐观），保证每个 endpoint 至少被探测一次
+
+        设了 concurrency_limit 的 endpoint 直接返回延迟估计：acquire 只在未饱和的
+        候选之间比 cost，而未饱和意味着新请求无需排队，期望完成时间就是服务耗时本身。
+        容量维度由"饱和即出局"承担，不需要在 cost 里再算一次。
+
+        没有限额时无从判断饱和，用 in-flight 当排队深度的代理，即 Finagle 的
+        cost = rtt * (in_flight + 1)。
+        """
+        estimate = self._estimate(status)
         if estimate is None:
             return 0.0
-        limit = status.config.concurrency_limit
-        # 新请求前面还要排几批：endpoint 并行处理 limit 个，未饱和时无需排队。
-        # 无限额时退化成 in_flight，即 Finagle 的 (in_flight + 1) * rtt。
-        batches = status.in_flight // limit if limit else status.in_flight
-        return estimate * (batches + 1)
+        if status.config.concurrency_limit is None:
+            return estimate * (status.in_flight + 1)
+        return estimate
 
     def observe(self, provider: ProviderConfig, service_time: float) -> None:
         """记录一次成功请求的服务耗时，更新该 provider 的延迟估计
@@ -178,7 +194,7 @@ class ProviderRouter:
                         p.ewma_latency = (
                             p.ewma_latency * (1 - _EWMA_ALPHA) + service_time * _EWMA_ALPHA
                         )
-                    p.last_active = time.time()
+                    p.last_active_seq = self._seq
                     break
 
     def get_next(self) -> ProviderConfig:
@@ -203,7 +219,7 @@ class ProviderRouter:
         选路规则：
         - 过滤：健康 且 不在 exclude 中（按 ProviderConfig 对象匹配，非 base_url）
         - 未饱和（in_flight < concurrency_limit）的候选按 _cost() 取最低；cost 相同
-          （典型是都还没有延迟样本）时按 in_flight/concurrency_limit 比值决胜，
+          （只可能是都还没有延迟样本）时按 in_flight/concurrency_limit 比值决胜，
           异构限额下比绝对计数公平
         - 全部饱和时退回轮询，此时排队是正确行为
 
@@ -223,20 +239,21 @@ class ProviderRouter:
             if not candidates:
                 return None
 
-            now = time.time()
+            self._seq += 1
             available = [
                 p
                 for p in candidates
                 if p.config.concurrency_limit is None or p.in_flight < p.config.concurrency_limit
             ]
             if available:
-                costs = [self._cost(p, now) for p in available]
+                costs = [self._cost(p) for p in available]
                 cheapest = min(costs)
-                # 容差让"都还没有样本"（cost 全 0）以及浮点相等的情况落进同一组，
-                # 由下面的负载率决胜，冷启动阶段行为与纯容量感知一致。
-                finalists = [
-                    p for p, cost in zip(available, costs) if cost <= cheapest * (1 + 1e-9) + 1e-12
-                ]
+                # 纯相对容差：闲置衰减是等比的，长时间闲置后各 endpoint 的估计值
+                # 会一起衰减到极小，但彼此的比例不变，仍然可比。掺绝对容差会在那时
+                # 把所有候选判成并列，退回负载率后又稳定选回列表首个。
+                # cheapest 为 0 只可能是"都还没有样本"，那时才该让所有候选并列。
+                tolerance = cheapest * (1 + 1e-9) if cheapest > 0 else 0.0
+                finalists = [p for p, cost in zip(available, costs) if cost <= tolerance]
                 chosen = min(
                     finalists,
                     key=lambda p: (
@@ -251,7 +268,7 @@ class ProviderRouter:
                 self._index += 1
 
             chosen.in_flight += 1
-            chosen.last_active = now
+            chosen.last_active_seq = self._seq
             return chosen.config
 
     def release(self, provider: ProviderConfig) -> None:
@@ -267,7 +284,7 @@ class ProviderRouter:
             for p in self._providers:
                 if self._matches(p, provider):
                     p.in_flight = max(0, p.in_flight - 1)
-                    p.last_active = time.time()
+                    p.last_active_seq = self._seq
                     break
 
     def mark_failed(self, provider: ProviderConfig) -> None:

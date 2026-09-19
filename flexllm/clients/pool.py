@@ -120,7 +120,6 @@ class LLMClientPool(CompletionMixin):
         max_fallback_attempts: int = None,
         failure_threshold: int | float = float("inf"),
         recovery_time: float = 60.0,
-        latency_tau: float = 30.0,
         # 共享参数
         concurrency_limit: int = 10,
         max_qps: int = None,
@@ -138,6 +137,8 @@ class LLMClientPool(CompletionMixin):
         credentials=None,
         # 响应缓存配置
         cache: ResponseCacheConfig | None = None,
+        # 追加在末尾：新增参数不得挤动既有位置参数的顺序
+        latency_decay_calls: float = 10.0,
         **kwargs,
     ):
         """
@@ -156,9 +157,10 @@ class LLMClientPool(CompletionMixin):
             max_fallback_attempts: 最大故障转移次数，默认为 endpoint 数量
             failure_threshold: 连续失败多少次后标记为不健康
             recovery_time: 不健康后多久尝试恢复（秒）
-            latency_tau: 延迟估计的闲置衰减时间常数（秒）。endpoint 闲置越久其延迟
-                估计越往乐观方向衰减，慢节点借此周期性重新获得探测机会；调大则探测
-                更稀疏，调小则恢复更快。设为 0 关闭衰减。
+            latency_decay_calls: 延迟估计的闲置衰减常数，单位是"选路次数"。endpoint
+                每被跳过 N 次其延迟估计衰减到约 37%，慢 K 倍的节点大约每 N*ln(K) 次
+                调用被重新探测一次；调大则探测更稀疏，调小则恢复更快。设为 0 关闭衰减。
+                用次数而非秒，是为了让密集批处理与稀疏交互式调用有一致的探测频率。
 
             # 共享参数
             concurrency_limit: 并发请求限制（多 endpoint 模式下为每个 endpoint 的默认值）
@@ -266,7 +268,7 @@ class LLMClientPool(CompletionMixin):
                 max_fallback_attempts=max_fallback_attempts,
                 failure_threshold=failure_threshold,
                 recovery_time=recovery_time,
-                latency_tau=latency_tau,
+                latency_decay_calls=latency_decay_calls,
                 concurrency_limit=concurrency_limit,
                 max_qps=max_qps,
                 timeout=timeout,
@@ -520,7 +522,7 @@ class LLMClientPool(CompletionMixin):
         max_fallback_attempts: int,
         failure_threshold: float,
         recovery_time: float,
-        latency_tau: float,
+        latency_decay_calls: float,
         concurrency_limit: int,
         max_qps: int,
         timeout: int,
@@ -606,7 +608,7 @@ class LLMClientPool(CompletionMixin):
             providers=provider_configs,
             failure_threshold=failure_threshold,
             recovery_time=recovery_time,
-            latency_tau=latency_tau,
+            latency_decay_calls=latency_decay_calls,
         )
 
         # provider -> client 映射：以 ProviderConfig 对象身份为键。

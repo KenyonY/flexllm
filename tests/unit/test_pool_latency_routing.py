@@ -89,7 +89,7 @@ class TestSerialCallsPreferFastEndpoint:
     async def test_serial_calls_drift_to_fast_endpoint(self):
         """并发度为 1 的逐条调用也能避开慢 endpoint（in-flight 在这里恒为 0）"""
         recorder = SpeedByHost({"slow.test": 0.12, "fast.test": 0.01})
-        pool = LLMClientPool(endpoints=ENDPOINTS, latency_tau=30.0)
+        pool = LLMClientPool(endpoints=ENDPOINTS, latency_decay_calls=10.0)
         _patch(pool, recorder)
 
         for _ in range(12):
@@ -117,8 +117,11 @@ class TestSerialCallsPreferFastEndpoint:
 
 
 class TestTauPlumbing:
-    def test_latency_tau_reaches_router(self):
-        assert LLMClientPool(endpoints=ENDPOINTS, latency_tau=120.0)._router.latency_tau == 120.0
+    def test_latency_decay_calls_reaches_router(self):
+        assert (
+            LLMClientPool(endpoints=ENDPOINTS, latency_decay_calls=50.0)._router.latency_decay_calls
+            == 50.0
+        )
 
-    def test_latency_tau_defaults_to_30(self):
-        assert LLMClientPool(endpoints=ENDPOINTS)._router.latency_tau == 30.0
+    def test_latency_decay_calls_defaults_to_10(self):
+        assert LLMClientPool(endpoints=ENDPOINTS)._router.latency_decay_calls == 10.0
