@@ -30,7 +30,7 @@ LLMClient (统一入口，LLMClientPool 的别名)
     │   └── ClaudeClient (Anthropic Claude)
     │
     └── 多 endpoint 模式：负载均衡
-        └── ProviderRouter (容量感知，全饱和时退回轮询)
+        └── ProviderRouter (延迟感知 + 容量感知，全饱和时退回轮询)
 ```
 
 ### 2. 请求模式

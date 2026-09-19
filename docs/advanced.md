@@ -263,8 +263,35 @@ pool = LLMClientPool(
 
 选路策略：
 
-- **单条调用**（`chat_completions` / `chat_completions_stream`）：容量感知选路——在健康且未饱和的 endpoint 中选负载率（in-flight / concurrency_limit）最低者，全部饱和时退回轮询。异构 endpoint 下慢节点饱和后，流量自动流向快节点。
-- **批量调用**（`distribute=True`）：worker 模型——每个 endpoint 的 worker 数等于其并发上限，所有 worker 从共享队列抢任务，快 endpoint 周转快自然多拿任务。
+- **单条调用**（`chat_completions`）：延迟感知 + 容量感知。在健康且未饱和的 endpoint 中选期望完成时间最短者
+
+  ```
+  cost = ewma_service_time × (in_flight // concurrency_limit + 1)
+  ```
+
+  括号项是"新请求前面还要排几批"。未饱和时它恒为 1，此时纯按延迟择优——**并发度为 1 的逐条调用也能避开慢 endpoint**（in-flight 在那里恒为 0，提供不了任何信息）；并发升高后括号项主导，退回容量感知。全部饱和时退回轮询。
+
+- **批量调用**（`distribute=True`）：worker 模型——每个 endpoint 的 worker 数等于其并发上限，所有 worker 从共享队列抢任务，快 endpoint 周转快自然多拿任务。这条路径不经过上面的选路器，work-stealing 本身已经按实际速度分配吞吐。
+
+- **流式调用**（`chat_completions_stream`）：容量感知选路，但不采集延迟样本——流的总耗时受调用方消费 chunk 的速度影响，不能代表 endpoint 的服务能力。
+
+延迟感知的行为细节：
+
+- **样本**来自成功的单条调用，取 `服务耗时 = 端到端耗时 − 客户端本地排队`（semaphore 与 QPS 漏桶造成的等待不算在 endpoint 头上）。失败不计入——失败往往返回得更快，计入会让坏 endpoint 显得更优而吸引流量；处理失败是健康检查（`failure_threshold`）的职责。
+- **没有样本的 endpoint 按最乐观处理**，保证每个 endpoint 至少被探测一次；估计值相同时按负载率决胜，所以冷启动阶段的行为与纯容量感知完全一致。
+- **闲置衰减**（`latency_tau`，默认 30 秒）：endpoint 闲置越久，其延迟估计越往乐观方向衰减，慢节点借此周期性地重新获得探测机会，恢复后无需人工干预即可回到轮换。调大则探测更稀疏（省掉慢请求的代价），调小则恢复更快。
+
+  ```python
+  pool = LLMClientPool(endpoints=[...], latency_tau=120.0)
+  ```
+
+  衰减是**相对**的：所有 endpoint 一起闲置时估计值同步下降、相对关系不变。慢节点重新被选中，发生在"快节点持续有流量、慢节点长期没被选中"时，也就是真实负载的形态。若整体调用极其稀疏（每次调用时所有 endpoint 都已闲置很久），估计值一起趋零，选路退化回冷启动时的容量感知——此时信息确实已经过期，重新探索是合理的。
+- 各 endpoint 的当前估计可以从 `pool.stats` 读到（秒；`None` 表示还没有样本）。用它来确认池子里是不是混进了明显拖后腿的节点：
+
+  ```python
+  for p in pool.stats["router_stats"]["providers"]:
+      print(p["base_url"], p["ewma_latency"], p["in_flight"], p["healthy"])
+  ```
 
 ### 模型级 endpoints 配置
 

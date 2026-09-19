@@ -120,6 +120,7 @@ class LLMClientPool(CompletionMixin):
         max_fallback_attempts: int = None,
         failure_threshold: int | float = float("inf"),
         recovery_time: float = 60.0,
+        latency_tau: float = 30.0,
         # 共享参数
         concurrency_limit: int = 10,
         max_qps: int = None,
@@ -155,6 +156,9 @@ class LLMClientPool(CompletionMixin):
             max_fallback_attempts: 最大故障转移次数，默认为 endpoint 数量
             failure_threshold: 连续失败多少次后标记为不健康
             recovery_time: 不健康后多久尝试恢复（秒）
+            latency_tau: 延迟估计的闲置衰减时间常数（秒）。endpoint 闲置越久其延迟
+                估计越往乐观方向衰减，慢节点借此周期性重新获得探测机会；调大则探测
+                更稀疏，调小则恢复更快。设为 0 关闭衰减。
 
             # 共享参数
             concurrency_limit: 并发请求限制（多 endpoint 模式下为每个 endpoint 的默认值）
@@ -262,6 +266,7 @@ class LLMClientPool(CompletionMixin):
                 max_fallback_attempts=max_fallback_attempts,
                 failure_threshold=failure_threshold,
                 recovery_time=recovery_time,
+                latency_tau=latency_tau,
                 concurrency_limit=concurrency_limit,
                 max_qps=max_qps,
                 timeout=timeout,
@@ -515,6 +520,7 @@ class LLMClientPool(CompletionMixin):
         max_fallback_attempts: int,
         failure_threshold: float,
         recovery_time: float,
+        latency_tau: float,
         concurrency_limit: int,
         max_qps: int,
         timeout: int,
@@ -600,6 +606,7 @@ class LLMClientPool(CompletionMixin):
             providers=provider_configs,
             failure_threshold=failure_threshold,
             recovery_time=recovery_time,
+            latency_tau=latency_tau,
         )
 
         # provider -> client 映射：以 ProviderConfig 对象身份为键。
@@ -695,6 +702,7 @@ class LLMClientPool(CompletionMixin):
                 break  # 健康的 endpoint 都已尝试过
 
             tried_providers.append(provider)
+            started = time.perf_counter()
 
             try:
                 with suppress_legacy_response_warning():
@@ -718,6 +726,11 @@ class LLMClientPool(CompletionMixin):
                         return result
                     continue  # 尝试下一个 endpoint
 
+                # 喂给延迟感知选路：扣掉客户端本地排队（semaphore + QPS 漏桶），
+                # 只留 endpoint 自己的服务耗时。用户没要 usage 时结果是纯字符串、
+                # 拿不到 queue_time，退化成全量耗时——配了 max_qps 时会略微高估。
+                queue_time = getattr(result, "queue_time", None) or 0.0
+                self._router.observe(provider, time.perf_counter() - started - queue_time)
                 self._router.mark_success(provider)
                 return result
 

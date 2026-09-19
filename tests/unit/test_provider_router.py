@@ -307,3 +307,124 @@ class TestCreateRouterFromUrls:
         assert router.stats["total"] == 2
         provider = router.get_next()
         assert provider.api_key == "sk-xxx"
+
+
+class TestLatencyAwareRouting:
+    """测试延迟感知选路（observe + cost）"""
+
+    def _make_router(self, limits: list[int | None], **kwargs) -> ProviderRouter:
+        providers = [
+            ProviderConfig(base_url=f"http://api{i}.com/v1", concurrency_limit=limit)
+            for i, limit in enumerate(limits, 1)
+        ]
+        return ProviderRouter(providers, **kwargs)
+
+    def _serial(self, router: ProviderRouter, latencies: dict[str, float], n: int) -> Counter:
+        """模拟严格串行调用：acquire -> observe -> release"""
+        picked = Counter()
+        for _ in range(n):
+            p = router.acquire()
+            picked[p.base_url] += 1
+            router.observe(p, latencies[p.base_url])
+            router.release(p)
+        return picked
+
+    def test_serial_calls_prefer_fast_endpoint(self):
+        """并发度为 1 时也能避开慢 endpoint —— in-flight 在这里恒为 0，只能靠延迟"""
+        router = self._make_router([8, 8, 8], latency_tau=30.0)
+        latencies = {
+            "http://api1.com/v1": 60.0,  # 慢 30 倍，且排在第一位
+            "http://api2.com/v1": 2.0,
+            "http://api3.com/v1": 2.0,
+        }
+        picked = self._serial(router, latencies, 30)
+
+        # 慢 endpoint 只承担探测流量，绝大多数请求落到两个快的上
+        assert picked["http://api1.com/v1"] <= 5
+        assert picked["http://api2.com/v1"] + picked["http://api3.com/v1"] >= 25
+
+    def test_serial_without_latency_signal_is_unchanged(self):
+        """没有 observe 时行为与纯容量感知一致（现状：稳定选第一个）"""
+        router = self._make_router([8, 8, 8])
+        urls = []
+        for _ in range(5):
+            p = router.acquire()
+            urls.append(p.base_url)
+            router.release(p)
+        assert set(urls) == {"http://api1.com/v1"}
+
+    def test_cost_uses_parallel_capacity_not_raw_inflight(self):
+        """未饱和时不计排队：延迟更低者胜出，即使它 in-flight 更多"""
+        router = self._make_router([8, 8])
+        p1, p2 = (s.config for s in router._providers)
+        router.observe(p1, 1.0)
+        router.observe(p2, 10.0)
+        router._providers[0].in_flight = 5  # 仍未饱和 -> 不排队
+        router._providers[1].in_flight = 0
+
+        assert router.acquire().base_url == "http://api1.com/v1"
+
+    def test_saturation_adds_queueing_penalty(self):
+        """饱和后每多一批排队就乘一次延迟，慢但空闲的 endpoint 重新胜出"""
+        router = self._make_router([2, 2])
+        p1, p2 = (s.config for s in router._providers)
+        router.observe(p1, 1.0)
+        router.observe(p2, 2.5)
+        router._providers[0].in_flight = 4  # 2 批排队 -> cost = 1.0 * 3
+        router._providers[1].in_flight = 0  # cost = 2.5 * 1
+
+        assert router.acquire().base_url == "http://api2.com/v1"
+
+    def test_idle_decay_reprobes_slow_endpoint(self):
+        """慢 endpoint 闲置期间估计值衰减，在持续繁忙的快 endpoint 对比下重获探测机会
+
+        衰减是相对的：两个 endpoint 一起闲置时估计值同步下降、相对关系不变。
+        翻转发生在"快的一直在服务、慢的长期没被选中"时，也就是真实负载的形态。
+        """
+        router = self._make_router([8, 8], latency_tau=0.05)
+        slow, fast = (s.config for s in router._providers)
+        router.observe(slow, 10.0)
+        router.observe(fast, 1.0)
+
+        assert router.acquire().base_url == "http://api2.com/v1"
+        router.release(fast)
+
+        time.sleep(0.4)  # 慢的那个闲置了 8 个 tau
+        router.observe(fast, 1.0)  # 快的刚服务完一条，估计值是新鲜的
+        assert router.acquire().base_url == "http://api1.com/v1"
+
+    def test_in_flight_blocks_decay(self):
+        """在途请求存在时不衰减——否则慢 endpoint 会被反复重新探测"""
+        router = self._make_router([8], latency_tau=0.01)
+        p = router._providers[0]
+        router.observe(p.config, 10.0)
+        p.last_active = time.time() - 100.0
+
+        p.in_flight = 1
+        assert router._estimate(p, time.time()) == 10.0
+        p.in_flight = 0
+        assert router._estimate(p, time.time()) < 1.0
+
+    def test_observe_ignores_non_positive(self):
+        router = self._make_router([8])
+        p = router._providers[0].config
+        router.observe(p, 0.0)
+        router.observe(p, -1.0)
+        assert router.stats["providers"][0]["ewma_latency"] is None
+
+    def test_ewma_smooths_single_outlier(self):
+        """单次长回答不应把 endpoint 判死（对称 EWMA，不取峰值）"""
+        router = self._make_router([8])
+        p = router._providers[0].config
+        for _ in range(10):
+            router.observe(p, 1.0)
+        router.observe(p, 100.0)
+
+        # 取峰值会跳到 100，对称 EWMA 只吸收 alpha 的比例
+        assert router.stats["providers"][0]["ewma_latency"] < 30.0
+
+    def test_stats_exposes_latency(self):
+        router = self._make_router([8])
+        p = router._providers[0].config
+        router.observe(p, 3.0)
+        assert router.stats["providers"][0]["ewma_latency"] == 3.0
