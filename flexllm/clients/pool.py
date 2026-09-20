@@ -644,6 +644,21 @@ class LLMClientPool(CompletionMixin):
             return None, None
         return self._client_map[id(provider)], provider
 
+    def _observe_service_time(self, provider: ProviderConfig, result, started: float) -> None:
+        """把这次调用的服务耗时喂给延迟感知选路
+
+        两类样本要排除，否则 endpoint 会显得比实际快而吸走流量：
+
+        - 缓存命中：耗时是微秒级的本地读取，而且缓存跨 endpoint 共享，命中与否
+          和是哪个 endpoint 无关
+        - 客户端本地排队（semaphore + QPS 漏桶）：扣掉 queue_time，只留 endpoint
+          自己的服务耗时
+        """
+        if getattr(result, "cached", False):
+            return
+        queue_time = getattr(result, "queue_time", None) or 0.0
+        self._router.observe(provider, time.perf_counter() - started - queue_time)
+
     async def chat_completions(
         self,
         messages: str | list[dict],
@@ -712,7 +727,10 @@ class LLMClientPool(CompletionMixin):
                         messages=messages,
                         model=model or provider.model,
                         return_raw=return_raw,
-                        return_usage=return_usage,
+                        # 内部强制取 ChatCompletionResult：缓存命中标记与 queue_time
+                        # 都只挂在它身上，用户要纯字符串时在下面解包回去。
+                        # 与批量路径同一套做法；return_raw 时 RequestResult 本身就带。
+                        return_usage=return_usage or not return_raw,
                         show_progress=show_progress,
                         preprocess_msg=preprocess_msg,
                         raise_on_error=raise_on_error,
@@ -728,12 +746,11 @@ class LLMClientPool(CompletionMixin):
                         return result
                     continue  # 尝试下一个 endpoint
 
-                # 喂给延迟感知选路：扣掉客户端本地排队（semaphore + QPS 漏桶），
-                # 只留 endpoint 自己的服务耗时。用户没要 usage 时结果是纯字符串、
-                # 拿不到 queue_time，退化成全量耗时——配了 max_qps 时会略微高估。
-                queue_time = getattr(result, "queue_time", None) or 0.0
-                self._router.observe(provider, time.perf_counter() - started - queue_time)
+                self._observe_service_time(provider, result, started)
                 self._router.mark_success(provider)
+
+                if not return_usage and not return_raw and hasattr(result, "content"):
+                    result = result.content  # 用户没要 usage，解包回 str
                 return result
 
             except Exception as e:
