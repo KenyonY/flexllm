@@ -34,6 +34,7 @@ from .batch_helpers import (
     validate_batch_params,
 )
 from .completion import CompletionMixin, warn_legacy_response
+from .message_images import omit_images
 
 if TYPE_CHECKING:
     from ..async_api.interface import RequestResult
@@ -376,6 +377,7 @@ class LLMClientBase(CompletionMixin, ABC):
         cache: bool | ResponseCacheConfig | None = None,
         cost_tracker: bool | CostTrackerConfig | None = None,
         proxy: str | None = None,
+        vision: bool = True,
         **kwargs,
     ):
         """
@@ -405,7 +407,11 @@ class LLMClientBase(CompletionMixin, ABC):
                    - True: 启用成本追踪（仅追踪，不限预算）
                    - False/None: 禁用成本追踪（默认）
                    - CostTrackerConfig: 自定义配置（含预算控制）
+            vision: 模型是否支持图片输入（默认 True）。False 时所有消息（含 tool 结果）里的
+                   图片块在发送前替换为占位文本，而不是让请求 400——图片一旦进入会话历史，
+                   不降级的话之后每次请求都会失败。
         """
+        self._vision = vision
         self._base_url = base_url.rstrip("/") if base_url else None
         self._api_key = api_key
         self._model = model
@@ -558,6 +564,15 @@ class LLMClientBase(CompletionMixin, ABC):
         return self._get_url(model, stream=True)
 
     # ========== 通用工具方法 ==========
+
+    @property
+    def vision(self) -> bool:
+        """模型是否支持图片输入；调用方可据此提前告知模型"看不了图"。"""
+        return self._vision
+
+    def _vision_messages(self, messages: list[dict]) -> list[dict]:
+        """不支持视觉时降级图片块；各子类在 _build_request_body 入口调用。"""
+        return messages if self._vision else omit_images(messages)
 
     def _get_effective_model(self, model: str = None) -> str:
         effective_model = model or self._model

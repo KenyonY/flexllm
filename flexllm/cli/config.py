@@ -15,7 +15,7 @@ def model_client_kwargs(entry: dict, **overrides) -> dict:
         "base_url": entry.get("base_url"),
         "api_key": entry.get("api_key", "EMPTY"),
     }
-    for key in ("provider", "proxy", "endpoints", "fallback"):
+    for key in ("provider", "proxy", "endpoints", "fallback", "vision"):
         if key in entry:
             options[key] = entry[key]
     if overrides.get("base_url") is not None and "endpoints" not in overrides:
@@ -26,6 +26,8 @@ def model_client_kwargs(entry: dict, **overrides) -> dict:
 
     if "fallback" in options and not isinstance(options["fallback"], bool):
         raise ValueError("fallback 必须是布尔值 true 或 false")
+    if "vision" in options and not isinstance(options["vision"], bool):
+        raise ValueError("vision 必须是布尔值 true 或 false")
     if "endpoints" in options:
         endpoints = options["endpoints"]
         if not isinstance(endpoints, list) or not endpoints:
@@ -63,6 +65,7 @@ class FlexLLMConfig:
         "endpoints",
         "fallback",
         "proxy",
+        "vision",
     }
 
     CONFIG_PATHS = [

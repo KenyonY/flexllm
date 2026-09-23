@@ -17,6 +17,7 @@ from ..cache import ResponseCacheConfig
 from ..msg_processors.audio_processor import normalize_audio_format
 from .audio import AudioMixin
 from .base import LLMClientBase
+from .message_images import move_tool_images_to_user
 
 
 class OpenAIClient(AudioMixin, LLMClientBase):
@@ -166,7 +167,9 @@ class OpenAIClient(AudioMixin, LLMClientBase):
             官方 OpenAI 端点（api.openai.com）严格校验请求体会返回 400，
             因此对官方端点不注入这两个字段；其他端点维持现状。
         """
-        processed_messages = self._convert_audio_url_to_input_audio(messages)
+        # Chat Completions 的 tool 消息只收文本：图片挪到整串 tool 消息之后的 user 消息
+        processed_messages = move_tool_images_to_user(self._vision_messages(messages))
+        processed_messages = self._convert_audio_url_to_input_audio(processed_messages)
 
         body = {"messages": processed_messages, "model": model, "stream": stream}
         if max_tokens is not None:

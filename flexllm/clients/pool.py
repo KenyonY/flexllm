@@ -1990,6 +1990,13 @@ class LLMClientPool(CompletionMixin):
             return "multi"
 
     @property
+    def vision(self) -> bool:
+        """模型是否支持图片输入（多模式下所有 endpoint 都支持才为 True）"""
+        if self._mode == "single":
+            return self._single_client.vision
+        return all(client.vision for client in self._clients)
+
+    @property
     def client(self) -> LLMClientBase:
         """返回底层客户端实例（单模式）或第一个客户端（多模式）"""
         if self._mode == "single":

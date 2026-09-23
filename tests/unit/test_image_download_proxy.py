@@ -16,9 +16,18 @@ from aiohttp import ClientSession, web
 from PIL import Image
 
 from flexllm import LLMClient
-from flexllm.msg_processors.unified_processor import unified_messages_preprocess
+from flexllm.msg_processors.unified_processor import (
+    UnifiedProcessorConfig,
+    unified_messages_preprocess,
+)
 
 from .test_socks_proxy import Socks5Server
+
+# 磁盘缓存默认开、默认写 ~/.flexllm/cache/image_cache，会跨测试运行持久化。
+# 而这些用例的图片 URL 是 http://127.0.0.1:<系统分配端口>/img.png——端口被 OS
+# 复用时 URL 会与历史记录撞上，下载直接走缓存，hit_count 恒为 0 而断言挂掉。
+# 单测不该依赖也不该写入用户的持久化状态，这里一律关掉磁盘缓存。
+NO_DISK_CACHE = UnifiedProcessorConfig(enable_disk_cache=False)
 
 
 def _png_bytes() -> bytes:
@@ -108,7 +117,7 @@ class TestUnifiedPreprocessProxy:
         """回归：图片下载 session 曾固定 TCPConnector，SOCKS 下无法建隧道"""
         async with PngServer() as img, Socks5Server() as proxy:
             processed = await unified_messages_preprocess(
-                _image_message(img.url()), proxy=proxy.url()
+                _image_message(img.url()), proxy=proxy.url(), processor_config=NO_DISK_CACHE
             )
 
         assert img.hit_count == 1
@@ -119,7 +128,7 @@ class TestUnifiedPreprocessProxy:
     async def test_download_via_http_proxy(self):
         async with PngServer() as img, HttpForwardProxy() as proxy:
             processed = await unified_messages_preprocess(
-                _image_message(img.url()), proxy=proxy.url()
+                _image_message(img.url()), proxy=proxy.url(), processor_config=NO_DISK_CACHE
             )
 
         assert img.hit_count == 1
@@ -129,7 +138,9 @@ class TestUnifiedPreprocessProxy:
     async def test_no_proxy_direct_download(self):
         """不传 proxy 时正常直连下载（向后兼容）"""
         async with PngServer() as img:
-            processed = await unified_messages_preprocess(_image_message(img.url()))
+            processed = await unified_messages_preprocess(
+                _image_message(img.url()), processor_config=NO_DISK_CACHE
+            )
 
         assert img.hit_count == 1
         assert _extract_data_uri(processed).startswith("data:image/")
@@ -138,7 +149,9 @@ class TestUnifiedPreprocessProxy:
         """SOCKS5 默认 rdns：域名交给代理解析，VPN 场景关键"""
         async with PngServer() as img, Socks5Server() as proxy:
             await unified_messages_preprocess(
-                _image_message(img.url(host="localhost")), proxy=proxy.url()
+                _image_message(img.url(host="localhost")),
+                proxy=proxy.url(),
+                processor_config=NO_DISK_CACHE,
             )
 
         assert proxy.targets[0][0] == "localhost"

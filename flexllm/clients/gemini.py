@@ -165,7 +165,7 @@ class GeminiClient(LLMClientBase):
                 - {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}:
                   按 JSON schema 输出（转换为 Gemini 的 responseSchema）
         """
-        contents, system_obj = self._convert_messages_to_contents(messages)
+        contents, system_obj = self._convert_messages_to_contents(self._vision_messages(messages))
         body = {"contents": contents}
 
         if system_obj:

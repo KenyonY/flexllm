@@ -25,6 +25,7 @@ from .base import (
     ToolCall,
     _decode_error_body,
 )
+from .message_images import TOOL_IMAGE_PLACEHOLDER, has_non_text_parts
 
 # Anthropic Messages 流式事件的全集（含本客户端不处理但属于规范的 ping / *_stop / error）。
 # 这个集合之外的事件被当作带外信息透出，而不是静默丢弃。
@@ -276,7 +277,7 @@ class ClaudeClient(LLMClientBase):
         system_content = None
         user_messages = []
 
-        for msg in messages:
+        for msg in self._vision_messages(messages):
             if msg.get("role") == "system":
                 # 合并多个 system messages
                 content = msg.get("content", "")
@@ -472,6 +473,11 @@ class ClaudeClient(LLMClientBase):
 
         # tool result 消息 → Claude tool_result content block
         if role == "tool":
+            # 带图的块列表按 user 消息同样规则转换；纯文本内容原样透传
+            if has_non_text_parts(content):
+                content = self._convert_content_blocks(content)
+                if not any(block["type"] == "text" for block in content):
+                    content.insert(0, {"type": "text", "text": TOOL_IMAGE_PLACEHOLDER})
             return {
                 "role": "user",
                 "content": [
@@ -525,85 +531,90 @@ class ClaudeClient(LLMClientBase):
 
         # 处理多模态内容
         if isinstance(content, list):
-            claude_content = []
-            for item in content:
-                if isinstance(item, str):
-                    claude_content.append({"type": "text", "text": item})
-                elif isinstance(item, dict):
-                    item_type = item.get("type", "text")
-                    if item_type == "text":
-                        claude_content.append({"type": "text", "text": item.get("text", "")})
-                    elif item_type == "image_url":
-                        # 转换 OpenAI 图片格式到 Claude 格式
-                        url = item.get("image_url", {}).get("url", "")
-                        if url.startswith("data:"):
-                            # base64 格式
-                            match = re.match(r"data:([^;]+);base64,(.+)", url)
-                            if match:
-                                claude_content.append(
-                                    {
-                                        "type": "image",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": match.group(1),
-                                            "data": match.group(2),
-                                        },
-                                    }
-                                )
-                        else:
-                            # URL 格式
+            return {"role": claude_role, "content": self._convert_content_blocks(content)}
+
+        return {"role": claude_role, "content": content}
+
+    @staticmethod
+    def _convert_content_blocks(content: list) -> list[dict]:
+        """OpenAI 格式的块列表 → Claude content blocks（text/image/document）"""
+        claude_content = []
+        for item in content:
+            if isinstance(item, str):
+                claude_content.append({"type": "text", "text": item})
+            elif isinstance(item, dict):
+                item_type = item.get("type", "text")
+                if item_type == "text":
+                    claude_content.append({"type": "text", "text": item.get("text", "")})
+                elif item_type == "image_url":
+                    # 转换 OpenAI 图片格式到 Claude 格式
+                    url = item.get("image_url", {}).get("url", "")
+                    if url.startswith("data:"):
+                        # base64 格式
+                        match = re.match(r"data:([^;]+);base64,(.+)", url)
+                        if match:
                             claude_content.append(
                                 {
                                     "type": "image",
                                     "source": {
-                                        "type": "url",
-                                        "url": url,
+                                        "type": "base64",
+                                        "media_type": match.group(1),
+                                        "data": match.group(2),
                                     },
                                 }
                             )
-                    elif item_type in ("video_url", "audio_url"):
-                        # 转换视频/音频到 Claude document 格式
-                        media_key = item_type  # "video_url" 或 "audio_url"
-                        url = item.get(media_key, {}).get("url", "")
-                        if url.startswith("data:"):
-                            match = re.match(r"data:([^;]+);base64,(.+)", url)
-                            if match:
-                                claude_content.append(
-                                    {
-                                        "type": "document",
-                                        "source": {
-                                            "type": "base64",
-                                            "media_type": match.group(1),
-                                            "data": match.group(2),
-                                        },
-                                    }
-                                )
-                        else:
-                            claude_content.append(
-                                {
-                                    "type": "document",
-                                    "source": {"type": "url", "url": url},
-                                }
-                            )
-                    elif item_type == "input_audio":
-                        # 转换 OpenAI input_audio 到 Claude document 格式
-                        audio_data = item.get("input_audio", {})
-                        data = audio_data.get("data", "")
-                        fmt = audio_data.get("format", "wav")
-                        if data:
+                    else:
+                        # URL 格式
+                        claude_content.append(
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": url,
+                                },
+                            }
+                        )
+                elif item_type in ("video_url", "audio_url"):
+                    # 转换视频/音频到 Claude document 格式
+                    media_key = item_type  # "video_url" 或 "audio_url"
+                    url = item.get(media_key, {}).get("url", "")
+                    if url.startswith("data:"):
+                        match = re.match(r"data:([^;]+);base64,(.+)", url)
+                        if match:
                             claude_content.append(
                                 {
                                     "type": "document",
                                     "source": {
                                         "type": "base64",
-                                        "media_type": f"audio/{fmt}",
-                                        "data": data,
+                                        "media_type": match.group(1),
+                                        "data": match.group(2),
                                     },
                                 }
                             )
-            return {"role": claude_role, "content": claude_content}
-
-        return {"role": claude_role, "content": content}
+                    else:
+                        claude_content.append(
+                            {
+                                "type": "document",
+                                "source": {"type": "url", "url": url},
+                            }
+                        )
+                elif item_type == "input_audio":
+                    # 转换 OpenAI input_audio 到 Claude document 格式
+                    audio_data = item.get("input_audio", {})
+                    data = audio_data.get("data", "")
+                    fmt = audio_data.get("format", "wav")
+                    if data:
+                        claude_content.append(
+                            {
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": f"audio/{fmt}",
+                                    "data": data,
+                                },
+                            }
+                        )
+        return claude_content
 
     def _extract_content(self, response_data: dict, **gen_kwargs) -> str | None:
         """提取 Claude 响应中的文本内容"""
