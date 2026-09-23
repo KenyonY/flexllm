@@ -294,10 +294,15 @@ class ChatCompletionResult:
     usage: Optional[dict] = None          # Token 使用情况
     reasoning_content: Optional[str] = None  # 思考内容
     tool_calls: Optional[list[ToolCall]] = None
-    queue_time: Optional[float] = None    # 客户端排队耗时
+    queue_time: Optional[float] = None    # 客户端排队耗时（semaphore + QPS 漏桶）；缓存命中为 None
     finish_reason: Optional[str] = None   # 停止原因（OpenAI 语义，见 chat_completions_stream 的 finish 事件）；缓存命中为 None
     assistant_message: Optional[dict] = None  # 下一轮应原样回传的 provider 续接消息
+    latency: Optional[float] = None       # 端到端耗时；缓存命中为 None
 ```
+
+`latency = queue_time + service_time`，只覆盖真实请求，不含消息预处理（图片下载转
+base64）。想知道某个 endpoint 自己有多快，用 `latency - queue_time`，多 endpoint
+选路正是据此判断快慢（见[高级用法 · 负载均衡策略](advanced.md#负载均衡策略)）。
 
 `finish_reason == "length"` 表示输出被 `max_tokens` 截断。注意 reasoning 模型的思考
 tokens 也计入 `max_tokens`：预算过小时可能 `content` 为空而 `finish_reason == "length"`。
