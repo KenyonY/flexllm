@@ -41,6 +41,41 @@ result = await client.complete(processed)
 - Claude: `video_url`/`audio_url` → `document` 类型，`input_audio` → `document` 类型
 - Gemini: 统一转换为 `inline_data` 格式
 
+### 工具结果带图
+
+`role=tool` 的 `content` 可以是块列表，工具（读截图、生成图表、MCP 返回图片）直接把图随结果交给模型，
+不必在业务层伪造 user 消息：
+
+```python
+{"role": "tool", "tool_call_id": "call_1", "content": [
+    {"type": "text", "text": "Read image file /x/shot.png"},
+    {"type": "image_url", "image_url": {"url": "data:image/png;base64,..."}},
+]}
+```
+
+各协议在发送时转换，不改写调用方传入的 messages：
+
+| Provider | 发出的请求 |
+|---|---|
+| Claude | `tool_result.content = [text, image]`；只有图时补占位文本 `(see attached image)` |
+| OpenAI 兼容 | Chat Completions 的 tool 消息只收文本：tool 消息只留文本，图片挪到**整串** tool 消息之后的一条 user 消息（`Attached image(s) from tool result:` + 图，按工具结果顺序） |
+| Gemini | tool 结果作为 user turn 发送，图片转 `inline_data` |
+
+纯字符串或纯文本块的 tool content 原样发送，与之前一致。
+
+**不支持视觉的模型**：在模型配置里加 `vision: false`（或 `LLMClient(..., vision=False)`）。
+所有消息（user 与 tool）里的图片块在发送前替换为 `[image omitted: model does not support vision]`，
+而不是让请求 400——否则图片一旦进入会话历史，之后每次请求都会失败。调用方可读 `client.vision`
+提前告诉模型"当前模型看不了图"。
+
+```yaml
+models:
+  - name: deepseek
+    id: deepseek-chat
+    base_url: https://api.deepseek.com/v1
+    vision: false
+```
+
 ### 通用媒体编码
 
 对于单个文件的 base64 编码，可直接使用 `encode_media_to_base64`：

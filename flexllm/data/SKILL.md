@@ -55,6 +55,7 @@ async with LLMClient(model="gpt-4", base_url="...", api_key="...") as client:
 - **语音**：`transcribe` / `transcribe_batch` / `speech` / `speech_batch`（各有 `_sync` 版本），返回 `TranscriptionResult`，配 `segments_to_srt` / `segments_to_vtt` 生成字幕
 - 关键参数：`return_usage` / `thinking`（跨厂商统一：DeepSeek-R1/Qwen3/Claude/Gemini，取值 `True|False|"minimal"|"low"|"medium"|"high"`）/ `response_format` / `return_raw`
 - 其余 kwargs 原样透传给 API（如 `tools`）；响应中的 `tool_calls` 会解析进 `ChatCompletionResult.tool_calls`（注意：缓存不存储 tool_calls）
+- `role=tool` 的 content 可以是 `[text, image_url]` 块列表（工具结果带图），各 provider 发送时自动适配；不支持视觉的模型设 `vision: false`（配置或构造参数），图片会被替换成占位文本，`client.vision` 可读
 
 ## Python API 高级能力
 

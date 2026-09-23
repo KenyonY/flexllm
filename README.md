@@ -534,6 +534,7 @@ LLMClient(
     proxy: str = None,             # Forward proxy: http(s):// or socks4/socks5/socks5h://
                                    # (SOCKS requires: pip install "flexllm[socks]")
     use_vertex_ai: bool = False,   # Vertex AI mode (Gemini provider; also: project_id, location, credentials)
+    vision: bool = True,           # False: replace image blocks with a text placeholder before sending
 )
 ```
 
