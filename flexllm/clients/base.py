@@ -236,6 +236,12 @@ class ChatCompletionResult:
     # 单条 complete() 失败直接抛异常，其结果对象的 error 恒为 None。
     # 不参与序列化：失败项不写缓存、不写 checkpoint（失败项的语义就是下次重跑）。
     error: LLMRequestError | None = None
+    # 端到端耗时（秒），与 RequestResult.latency 同义：latency = queue_time + service_time。
+    # 扣掉 queue_time 才是 endpoint 自己的服务耗时，多 endpoint 选路据此判断快慢——
+    # 调用方自己拿秒表计时会把消息预处理（图片下载转 base64）也算进去，那不是 endpoint
+    # 的耗时。与 queue_time 一样，缓存命中/checkpoint 恢复时为 None：那时没有真实请求。
+    # 放在末尾以保持已有 dataclass 位置参数的兼容性。
+    latency: float | None = None
 
     @property
     def ok(self) -> bool:
@@ -248,7 +254,7 @@ class ChatCompletionResult:
         if values.get("tool_calls"):
             values["tool_calls"] = [ToolCall(**call) for call in values["tool_calls"]]
         if cached:
-            values.update(cached=True, queue_time=None)
+            values.update(cached=True, queue_time=None, latency=None)
         values.pop("error", None)
         return cls(**values)
 
@@ -631,6 +637,7 @@ class LLMClientBase(CompletionMixin, ABC):
                 assistant_message=self._extract_assistant_message(data),
                 tool_calls=tools,
                 queue_time=result.queue_time,
+                latency=result.latency,
                 finish_reason=finish_reason,
                 extra=self._extract_extra(data),
                 raw_response=deepcopy(data),
@@ -746,6 +753,7 @@ class LLMClientBase(CompletionMixin, ABC):
             if use_cache:
                 payload = _result_payload(result)
                 payload["queue_time"] = None
+                payload["latency"] = None
                 self._response_cache.set(messages, payload, model=effective_model, **kwargs)
 
             if effective_prefix and result.content is not None:
@@ -951,7 +959,9 @@ class LLMClientBase(CompletionMixin, ABC):
                 # 提前绑定：后续对 cached_responses 的原地写入即对 responses 的写入，
                 # 预算超限提前跳出时已完成部分不丢失
                 cached_responses = [
-                    {**r, "cached": True, "queue_time": None} if r is not None else None
+                    {**r, "cached": True, "queue_time": None, "latency": None}
+                    if r is not None
+                    else None
                     for r in cached_responses
                 ]
                 responses = cached_responses

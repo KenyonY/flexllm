@@ -644,20 +644,21 @@ class LLMClientPool(CompletionMixin):
             return None, None
         return self._client_map[id(provider)], provider
 
-    def _observe_service_time(self, provider: ProviderConfig, result, started: float) -> None:
+    def _observe_service_time(self, provider: ProviderConfig, result) -> None:
         """把这次调用的服务耗时喂给延迟感知选路
 
-        两类样本要排除，否则 endpoint 会显得比实际快而吸走流量：
+        用结果自带的 latency 而不是在这里拿秒表计时：秒表会把消息预处理（图片下载
+        转 base64）一起算进去，那不是 endpoint 的耗时。latency 只覆盖真实请求，
+        RequestResult 与 ChatCompletionResult 都带，两种返回形状统一。
 
-        - 缓存命中：耗时是微秒级的本地读取，而且缓存跨 endpoint 共享，命中与否
-          和是哪个 endpoint 无关
-        - 客户端本地排队（semaphore + QPS 漏桶）：扣掉 queue_time，只留 endpoint
-          自己的服务耗时
+        再扣掉 queue_time（semaphore + QPS 漏桶造成的本地排队），剩下的才是
+        endpoint 自己的服务耗时。缓存命中没有真实请求，latency 为 None，跳过。
         """
-        if getattr(result, "cached", False):
+        latency = getattr(result, "latency", None)
+        if latency is None:
             return
         queue_time = getattr(result, "queue_time", None) or 0.0
-        self._router.observe(provider, time.perf_counter() - started - queue_time)
+        self._router.observe(provider, latency - queue_time)
 
     async def chat_completions(
         self,
@@ -719,7 +720,6 @@ class LLMClientPool(CompletionMixin):
                 break  # 健康的 endpoint 都已尝试过
 
             tried_providers.append(provider)
-            started = time.perf_counter()
 
             try:
                 with suppress_legacy_response_warning():
@@ -746,7 +746,7 @@ class LLMClientPool(CompletionMixin):
                         return result
                     continue  # 尝试下一个 endpoint
 
-                self._observe_service_time(provider, result, started)
+                self._observe_service_time(provider, result)
                 self._router.mark_success(provider)
 
                 if not return_usage and not return_raw and hasattr(result, "content"):

@@ -213,3 +213,82 @@ class TestSingleCallReturnShapesUnchanged:
         _patch(pool, SpeedByHost({"slow.test": 0.001, "fast.test": 0.001}))
         assert await pool.chat_completions("q") == "ok"
         assert await pool.chat_completions("q") == "ok"
+
+
+class TestLatencyExcludesLocalWork:
+    """延迟样本只能是 endpoint 的耗时，不含调用方这边的开销"""
+
+    def _pool_with_preprocess_delay(self, delay: float) -> tuple[LLMClientPool, SpeedByHost]:
+        recorder = SpeedByHost({"slow.test": 0.02, "fast.test": 0.02})
+        pool = LLMClientPool(endpoints=ENDPOINTS)
+        for client in pool._clients:
+            client._client.make_requests = recorder
+            original = client._preprocess_messages
+
+            async def delayed(messages, flag, _orig=original, _d=delay):
+                await asyncio.sleep(_d)  # 模拟图片下载转 base64
+                return await _orig(messages, flag)
+
+            client._preprocess_messages = delayed
+        return pool, recorder
+
+    def _sampled(self, pool: LLMClientPool) -> float:
+        values = [
+            p["ewma_latency"]
+            for p in pool.stats["router_stats"]["providers"]
+            if p["ewma_latency"] is not None
+        ]
+        assert len(values) == 1
+        return values[0]
+
+    async def test_message_preprocessing_is_not_counted(self):
+        """预处理发生在请求之前，拿秒表包住整个调用会把它算成 endpoint 变慢"""
+        fast_pool, _ = self._pool_with_preprocess_delay(0.0)
+        await fast_pool.chat_completions("q", preprocess_msg=True)
+        baseline = self._sampled(fast_pool)
+
+        slow_pool, _ = self._pool_with_preprocess_delay(0.3)
+        await slow_pool.chat_completions("q", preprocess_msg=True)
+        with_preprocess = self._sampled(slow_pool)
+
+        assert with_preprocess < baseline + 0.1, (
+            f"预处理耗时被计入了服务耗时：{with_preprocess:.3f}s vs 基线 {baseline:.3f}s"
+        )
+
+    async def test_latency_is_carried_on_result(self):
+        pool = LLMClientPool(endpoints=ENDPOINTS)
+        _patch(pool, SpeedByHost({"slow.test": 0.02, "fast.test": 0.02}))
+        result = await pool.chat_completions("q", return_usage=True)
+        assert result.latency is not None
+        assert result.latency >= 0.02
+        assert result.queue_time is not None
+
+    async def test_cache_hit_carries_no_latency(self, tmp_path):
+        pool = LLMClientPool(
+            endpoints=ENDPOINTS,
+            cache=ResponseCacheConfig(enabled=True, cache_dir=str(tmp_path), ttl=600),
+        )
+        _patch(pool, SpeedByHost({"slow.test": 0.02, "fast.test": 0.02}))
+        first = await pool.chat_completions("q", return_usage=True)
+        assert first.latency is not None
+
+        second = await pool.chat_completions("q", return_usage=True)
+        assert second.cached is True
+        assert second.latency is None, "缓存命中没有真实请求，latency 必须为 None"
+        assert second.queue_time is None
+
+
+class TestResultPayloadBackCompat:
+    def test_payload_without_latency_still_loads(self):
+        """旧缓存/checkpoint 记录里没有 latency 字段，读取时按缺省 None 处理"""
+        legacy = {"content": "ok", "usage": {"total_tokens": 2}, "queue_time": 0.1}
+        result = ChatCompletionResult._from_payload(legacy)
+        assert result.content == "ok"
+        assert result.latency is None
+
+    def test_latency_is_appended_at_the_end(self):
+        """新字段必须追加在末尾，不能挤动既有 dataclass 位置参数"""
+        from dataclasses import fields
+
+        names = [f.name for f in fields(ChatCompletionResult)]
+        assert names[-1] == "latency"
