@@ -475,7 +475,12 @@ class ClaudeClient(LLMClientBase):
         if role == "tool":
             # 带图的块列表按 user 消息同样规则转换；纯文本内容原样透传
             if has_non_text_parts(content):
-                content = self._convert_content_blocks(content)
+                # Anthropic 拒绝空 text 块：丢掉空文本，没有文字时补占位
+                content = [
+                    block
+                    for block in self._convert_content_blocks(content)
+                    if block["type"] != "text" or block["text"]
+                ]
                 if not any(block["type"] == "text" for block in content):
                     content.insert(0, {"type": "text", "text": TOOL_IMAGE_PLACEHOLDER})
             return {

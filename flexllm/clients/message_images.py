@@ -31,7 +31,10 @@ def _text_of(part) -> str:
 
 
 def omit_images(messages: list[dict]) -> list[dict]:
-    """把所有消息中的图片块替换为占位文本；不含图片的消息原样复用。"""
+    """把所有消息中的图片块替换为占位文本；不含图片的消息原样复用。
+
+    被改写的消息同时丢掉空文本块（Anthropic 拒绝空 text 块），占位保证内容非空。
+    """
     result = []
     for msg in messages:
         content = msg.get("content")
@@ -39,6 +42,7 @@ def omit_images(messages: list[dict]) -> list[dict]:
             content = [
                 {"type": "text", "text": VISION_OMITTED_TEXT} if _is_image_part(p) else p
                 for p in content
+                if not (_is_text_part(p) and not _text_of(p))
             ]
             msg = {**msg, "content": content}
         result.append(msg)

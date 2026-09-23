@@ -167,8 +167,9 @@ class OpenAIClient(AudioMixin, LLMClientBase):
             官方 OpenAI 端点（api.openai.com）严格校验请求体会返回 400，
             因此对官方端点不注入这两个字段；其他端点维持现状。
         """
-        # Chat Completions 的 tool 消息只收文本：图片挪到整串 tool 消息之后的 user 消息
-        processed_messages = move_tool_images_to_user(self._vision_messages(messages))
+        # Chat Completions 的 tool 消息只收文本：图片挪到整串 tool 消息之后的 user 消息。
+        # 先挪再降级，vision=False 时 tool content 同样是字符串
+        processed_messages = self._vision_messages(move_tool_images_to_user(messages))
         processed_messages = self._convert_audio_url_to_input_audio(processed_messages)
 
         body = {"messages": processed_messages, "model": model, "stream": stream}

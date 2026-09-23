@@ -75,6 +75,14 @@ class TestClaudeToolImages:
         assert blocks[0] == {"type": "text", "text": TOOL_IMAGE_PLACEHOLDER}
         assert blocks[1]["type"] == "image"
 
+    def test_empty_text_with_image_gets_placeholder(self):
+        """Anthropic 拒绝空 text 块，空文本等同于没有文字"""
+        content = [{"type": "text", "text": ""}, _img("A")]
+        msgs = [_assistant_calls("c1"), {"role": "tool", "tool_call_id": "c1", "content": content}]
+        blocks = _claude()._build_request_body(msgs, "m")["messages"][1]["content"][0]["content"]
+        assert [b["type"] for b in blocks] == ["text", "image"]
+        assert blocks[0]["text"] == TOOL_IMAGE_PLACEHOLDER
+
     def test_text_only_list_passes_through_unchanged(self):
         """纯文本块列表（含 cache_control 等额外字段）保持原样透传"""
         content = [{"type": "text", "text": "r", "cache_control": {"type": "ephemeral"}}]
@@ -170,14 +178,28 @@ class TestVisionDowngrade:
     def test_openai(self):
         msgs = _openai(vision=False)._build_request_body(self._history(), "m")["messages"]
         self._assert_no_images(msgs)
-        # 图已降级为文本，不再需要附图 user 消息
-        assert [m["role"] for m in msgs] == ["user", "assistant", "tool", "tool", "tool"]
+        # tool 消息保持字符串（部分兼容后端不收列表形式的 tool content）
+        assert [m["content"] for m in msgs[2:5]] == [
+            "Read a.png",
+            "plain text",
+            TOOL_IMAGE_PLACEHOLDER,
+        ]
+        assert msgs[5]["content"][1:] == [{"type": "text", "text": VISION_OMITTED_TEXT}] * 2
 
     def test_claude(self):
         self._assert_no_images(_claude(vision=False)._build_request_body(self._history(), "m"))
 
     def test_gemini(self):
         self._assert_no_images(_gemini(vision=False)._build_request_body(self._history(), "m"))
+
+    def test_claude_empty_text_dropped_when_image_omitted(self):
+        """占位替换后不能留下空 text 块（Anthropic 拒绝）"""
+        content = [{"type": "text", "text": ""}, _img("A")]
+        msgs = [_assistant_calls("c1"), {"role": "tool", "tool_call_id": "c1", "content": content}]
+        body = _claude(vision=False)._build_request_body(msgs, "m")
+        assert body["messages"][1]["content"][0]["content"] == [
+            {"type": "text", "text": VISION_OMITTED_TEXT}
+        ]
 
     def test_default_is_vision_enabled(self):
         assert _openai().vision is True
