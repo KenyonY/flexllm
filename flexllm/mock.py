@@ -15,7 +15,8 @@
 - Tool Call 支持：请求含 tools 时自动返回 tool_call 响应（OpenAI tool_calls / Claude tool_use / Gemini functionCall）
 - Gemini 端点按真实 API（Gemini 3）的协议行为还原：functionCall 带 id 与 thoughtSignature，
   且像真实 API 一样拒绝非法请求（OpenAI 格式的 tools、parameters 里的 additionalProperties、
-  非对象的 functionResponse.response、当前轮缺 thoughtSignature 的 functionCall），
+  responseSchema 里的 additionalProperties、非对象的 functionResponse.response、
+  当前轮缺 thoughtSignature 的 functionCall），
   usage 的 candidatesTokenCount 不含思考 token（单列 thoughtsTokenCount）
 
 用法:
@@ -1370,6 +1371,14 @@ class MockLLMServer:
                         f"'tools[{i}].function_declarations[{j}].parameters': Cannot find field."
                     )
 
+        if "additionalProperties" in json.dumps(
+            data.get("generationConfig", {}).get("responseSchema", {})
+        ):
+            return (
+                'Invalid JSON payload received. Unknown name "additionalProperties" at '
+                "'generation_config.response_schema': Cannot find field."
+            )
+
         contents = data["contents"]
         # "当前轮"从最后一条用户文本消息开始；只有当前轮的 functionCall 要求签名
         turn_start = 0
@@ -1613,11 +1622,13 @@ class MockLLMServer:
             )
 
         user_text = self._extract_last_user_text(contents, "gemini")
-        # Gemini: responseMimeType=application/json + responseSchema → JSON 模式
+        # Gemini: responseMimeType=application/json + responseJsonSchema/responseSchema → JSON 模式
         gen_config = data.get("generationConfig", {})
         gemini_rf = None
         if gen_config.get("responseMimeType") == "application/json":
-            response_schema = gen_config.get("responseSchema")
+            response_schema = gen_config.get("responseJsonSchema") or gen_config.get(
+                "responseSchema"
+            )
             if response_schema:
                 gemini_rf = {"type": "json_schema", "json_schema": {"schema": response_schema}}
             else:

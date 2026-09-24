@@ -338,3 +338,38 @@ class TestAgainstMockServer:
         assert first.usage["completion_tokens_details"]["reasoning_tokens"] > 0
         assert second.finish_reason == "stop"
         assert second.content
+
+
+class TestGenerationConfig:
+    def _gen(self, **kwargs):
+        body = _client()._build_request_body([{"role": "user", "content": "q"}], "m", **kwargs)
+        return body.get("generationConfig", {})
+
+    @pytest.mark.parametrize(
+        "thinking,expected",
+        [
+            (False, {"thinkingBudget": 0}),
+            (True, {"includeThoughts": True}),
+            ("low", {"thinkingLevel": "low", "includeThoughts": True}),
+            ("xhigh", {"thinkingLevel": "high", "includeThoughts": True}),
+            (2048, {"thinkingBudget": 2048, "includeThoughts": True}),
+        ],
+    )
+    def test_thinking(self, thinking, expected):
+        assert self._gen(thinking=thinking)["thinkingConfig"] == expected
+
+    def test_gemini_2_levels_become_budgets(self):
+        body = _client()._build_request_body(
+            [{"role": "user", "content": "q"}], "gemini-2.5-flash", thinking="high"
+        )
+        assert body["generationConfig"]["thinkingConfig"] == {
+            "thinkingBudget": 24576,
+            "includeThoughts": True,
+        }
+
+    def test_json_schema_uses_full_json_schema_field(self):
+        schema = {"type": "object", "additionalProperties": False}
+        rf = {"type": "json_schema", "json_schema": {"name": "x", "schema": schema}}
+        gen = self._gen(response_format=rf)
+        assert gen["responseJsonSchema"] == schema
+        assert "responseSchema" not in gen

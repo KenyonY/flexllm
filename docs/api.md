@@ -297,9 +297,14 @@ client = GeminiClient(
 ```
 
 **thinking 参数：**
-- `False`: 禁用
-- `True`: 启用
-- `"minimal"`, `"low"`, `"medium"`, `"high"`: 思考级别
+- `False`: 禁用（`thinkingBudget=0`；Pro 系列不能关思考，API 会拒绝）
+- `True`: 启用并返回思考内容
+- `"minimal"`, `"low"`, `"medium"`, `"high"`: 思考级别（`"xhigh"`/`"max"`/`"ultra"` 取最高档 `"high"`）。
+  Gemini 3 发 `thinkingLevel`；Gemini 2.x 不支持级别，换算成 `thinkingBudget`（512/2048/8192/24576）
+- `int`: 思考 token 预算（`thinkingBudget`，Gemini 2.5 与 3 均支持）
+
+`response_format` 的 `json_schema` 走 `responseJsonSchema`，OpenAI strict 模式的 schema（带
+`additionalProperties: false`）可直接用。
 
 **工具调用（与 OpenAI 用法一致）：**
 - `tools` 传 OpenAI 格式即可，自动转成 `functionDeclarations`（schema 走 `parametersJsonSchema`，
@@ -540,7 +545,8 @@ Gemini 端点按真实 API（Gemini 3，实测）还原协议，客户端的协�
   thought part；`candidatesTokenCount` 不含思考，思考单列 `thoughtsTokenCount`
 - 与真实 API 一样返回 400 的请求：
   - `tools` 里有未知字段（如 OpenAI 格式的 `type` / `function`）
-  - `functionDeclarations[].parameters` 含 `additionalProperties`（应改用 `parametersJsonSchema`）
+  - `functionDeclarations[].parameters` 含 `additionalProperties`（应改用 `parametersJsonSchema`）；
+    `generationConfig.responseSchema` 同理（应改用 `responseJsonSchema`）
   - `functionResponse.response` 不是对象
   - 当前轮（最后一条用户文本之后）的 functionCall 缺 `thoughtSignature`，或签名不是合法 base64
     （标准与 URL-safe 字母表都接受，官方占位签名 `skip_thought_signature_validator` 可通过）

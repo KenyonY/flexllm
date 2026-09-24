@@ -63,9 +63,10 @@ class GeminiClient(LLMClientBase):
         >>> parsed = GeminiClient.parse_thoughts(result.data)
 
     thinking 参数值:
-        - False: 禁用思考（thinkingLevel=minimal）
+        - False: 禁用思考（thinkingBudget=0）
         - True: 启用思考并返回思考内容（includeThoughts=True）
-        - "minimal"/"low"/"medium"/"high": 设置思考深度（仅 Gemini 3）
+        - "minimal"/"low"/"medium"/"high": 设置思考深度（Gemini 2.x 换算为预算；xhigh/max/ultra → high）
+        - int: 思考 token 预算（thinkingBudget）
         - None: 使用模型默认行为
     """
 
@@ -166,14 +167,17 @@ class GeminiClient(LLMClientBase):
 
         Args:
             thinking: 统一的思考控制参数
-                - False: 禁用思考（thinkingLevel=minimal）
+                - False: 禁用思考（thinkingBudget=0；Pro 系列不能关思考，API 会拒绝）
                 - True: 启用思考并返回思考内容（includeThoughts=True）
-                - "minimal"/"low"/"medium"/"high": 设置思考深度
+                - "minimal"/"low"/"medium"/"high": 设置思考深度（Gemini 3 用 thinkingLevel；
+                  Gemini 2.x 不支持 level，换算成 thinkingBudget）；"xhigh"/"max"/"ultra" 取最高档
+                - int: 思考 token 预算（thinkingBudget，Gemini 2.5 与 3 均支持）
                 - None: 使用模型默认行为
             response_format: 响应格式控制
                 - {"type": "json_object"}: 输出 JSON
                 - {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}:
-                  按 JSON schema 输出（转换为 Gemini 的 responseSchema）
+                  按 JSON schema 输出（转换为 responseJsonSchema：它收完整 JSON Schema，
+                  responseSchema 只收 OpenAPI 子集，strict 模式必带的 additionalProperties 会被 400）
             tools: OpenAI 格式（{"type": "function", ...}）转为 functionDeclarations；
                 Gemini 原生格式原样透传
             tool_choice: OpenAI 语义（"auto"/"none"/"required"/指定函数）转为 toolConfig
@@ -209,19 +213,26 @@ class GeminiClient(LLMClientBase):
                 gen_config["responseMimeType"] = "application/json"
                 schema = response_format.get("json_schema", {}).get("schema")
                 if schema:
-                    gen_config["responseSchema"] = schema
+                    gen_config["responseJsonSchema"] = schema
 
         # 构建 thinkingConfig
+        # 实测：thinkingLevel 在 Gemini 2.5 上 400，而 thinkingBudget=0 在 2.5/3 的 Flash 上
+        # 都能关思考（minimal 在 2.5 上不行）；level 只认 minimal/low/medium/high
         thinking_config = {}
         if thinking is False:
-            # 禁用思考
-            thinking_config["thinkingLevel"] = "minimal"
+            thinking_config["thinkingBudget"] = 0
         elif thinking is True:
-            # 启用思考并返回思考内容
+            thinking_config["includeThoughts"] = True
+        elif isinstance(thinking, int):
+            thinking_config["thinkingBudget"] = thinking
             thinking_config["includeThoughts"] = True
         elif isinstance(thinking, str):
-            # 设置思考深度
-            thinking_config["thinkingLevel"] = thinking
+            level = "high" if thinking in ("xhigh", "max", "ultra") else thinking
+            if model.startswith("gemini-2"):
+                # 2.5 不认 thinkingLevel（实测 400），按级别换算成预算
+                thinking_config["thinkingBudget"] = self._GEMINI_2_BUDGETS[level]
+            else:
+                thinking_config["thinkingLevel"] = level
             thinking_config["includeThoughts"] = True
         # thinking=None 时不设置，使用默认行为
 
@@ -246,6 +257,9 @@ class GeminiClient(LLMClientBase):
             body["safetySettings"] = safety_settings
 
         return body
+
+    # Gemini 2.5 的级别→预算（Flash 上限 24576）
+    _GEMINI_2_BUDGETS = {"minimal": 512, "low": 2048, "medium": 8192, "high": 24576}
 
     # Gemini generateContent 请求体的合法键（用于 **kwargs 透传映射）
     _TOP_LEVEL_KEYS = frozenset(
