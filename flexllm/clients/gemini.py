@@ -5,8 +5,10 @@ Gemini API Client - Google Gemini 模型的批量调用客户端
 """
 
 import asyncio
+import json
 import logging
 import re
+from copy import deepcopy
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,12 @@ from .base import (
     LLMTimeoutError,
     _decode_error_body,
 )
+from .message_images import has_non_text_parts
+
+# 注入的 functionCall（从统一 tool_calls 重建、没有模型签发的签名）用的占位签名。
+# Gemini 3 对当前轮缺签名的 functionCall 直接 400；这个值是官方文档给出的跳过校验方式，
+# 代价是模型看不到自己之前的推理上下文。能拿到原生 parts 时总是优先原样回传。
+_SKIP_SIGNATURE = "skip_thought_signature_validator"
 
 
 class GeminiClient(LLMClientBase):
@@ -149,6 +157,8 @@ class GeminiClient(LLMClientBase):
         safety_settings: list[dict] = None,
         thinking: bool | str | None = None,
         response_format: dict = None,
+        tools: list[dict] = None,
+        tool_choice: str | dict = None,
         **kwargs,
     ) -> dict:
         """
@@ -164,12 +174,19 @@ class GeminiClient(LLMClientBase):
                 - {"type": "json_object"}: 输出 JSON
                 - {"type": "json_schema", "json_schema": {"name": "...", "schema": {...}}}:
                   按 JSON schema 输出（转换为 Gemini 的 responseSchema）
+            tools: OpenAI 格式（{"type": "function", ...}）转为 functionDeclarations；
+                Gemini 原生格式原样透传
+            tool_choice: OpenAI 语义（"auto"/"none"/"required"/指定函数）转为 toolConfig
         """
         contents, system_obj = self._convert_messages_to_contents(self._vision_messages(messages))
         body = {"contents": contents}
 
         if system_obj:
             body["systemInstruction"] = system_obj
+        if tools:
+            body["tools"] = self._convert_tools(tools)
+        if tool_choice is not None:
+            body["toolConfig"] = {"functionCallingConfig": self._convert_tool_choice(tool_choice)}
 
         gen_config = {}
         if max_tokens is not None:
@@ -294,7 +311,12 @@ class GeminiClient(LLMClientBase):
     }
 
     def _extract_finish_reason(self, response_data: dict) -> str | None:
-        """Gemini candidates[0].finishReason → OpenAI 语义（非流式与流式 chunk 结构相同）"""
+        """Gemini candidates[0].finishReason → OpenAI 语义（非流式与流式 chunk 结构相同）
+
+        Gemini 发起工具调用时 finishReason 仍是 STOP；OpenAI 语义下这是 "tool_calls"，
+        调用方靠它判断要不要执行工具。流式的 functionCall 与 finishReason 不在同一个
+        chunk，那条路径在流末尾单独修正。
+        """
         candidates = (response_data or {}).get("candidates")
         if not candidates:
             if (response_data or {}).get("promptFeedback", {}).get("blockReason"):
@@ -303,7 +325,55 @@ class GeminiClient(LLMClientBase):
         reason = candidates[0].get("finishReason")
         if not reason:
             return None
-        return self._FINISH_REASON_MAP.get(reason, reason.lower())
+        mapped = self._FINISH_REASON_MAP.get(reason, reason.lower())
+        if mapped == "stop" and any("functionCall" in p for p in self._parts(response_data)):
+            return "tool_calls"
+        return mapped
+
+    @staticmethod
+    def _parts(response_data: dict) -> list[dict]:
+        candidates = (response_data or {}).get("candidates")
+        if not candidates:
+            return []
+        return candidates[0].get("content", {}).get("parts", [])
+
+    @staticmethod
+    def _needs_continuation(parts: list[dict]) -> bool:
+        """parts 里有下一轮必须原样回传的状态（签名、思考、函数调用）"""
+        return any(
+            "functionCall" in p or "thoughtSignature" in p or p.get("thought") for p in parts
+        )
+
+    @staticmethod
+    def _tool_call_from_part(fc: dict, fallback_id: str) -> dict:
+        """functionCall → OpenAI 形态的 tool_call。Gemini 3 返回真实 id，老模型/Vertex
+        可能没有，此时用本地合成的 fallback_id。"""
+        return {
+            "id": fc.get("id") or fallback_id,
+            "type": "function",
+            "function": {"name": fc.get("name", ""), "arguments": json.dumps(fc.get("args", {}))},
+        }
+
+    def _extract_reasoning_content(self, response_data: dict) -> str | None:
+        thoughts = [
+            p["text"] for p in self._parts(response_data) if p.get("thought") and "text" in p
+        ]
+        return "".join(thoughts) or None
+
+    def _extract_assistant_message(self, response_data: dict) -> dict | None:
+        """原生 parts 原样保留：Gemini 3 要求回传 functionCall 上的 thoughtSignature，
+        从统一 tool_calls 重建会丢掉它。content 放原生 parts（与 Claude 放原生 blocks 同理），
+        tool_calls 仍给 OpenAI 形态，供调用方执行工具、按 id 回填结果。"""
+        parts = self._parts(response_data)
+        if not self._needs_continuation(parts):
+            return None
+        message = {"role": "assistant", "content": deepcopy(parts)}
+        tool_calls = self._extract_tool_calls(response_data)
+        if tool_calls:
+            message["tool_calls"] = [
+                {"id": c.id, "type": c.type, "function": deepcopy(c.function)} for c in tool_calls
+            ]
+        return message
 
     def _extract_usage(self, response_data: dict) -> dict | None:
         """
@@ -333,11 +403,19 @@ class GeminiClient(LLMClientBase):
         if not usage_metadata:
             return None
 
-        return {
+        # candidatesTokenCount 不含思考 token，而思考按输出计费；OpenAI 语义下
+        # completion_tokens 包含 reasoning tokens，不加上会让成本和用量都少算
+        thoughts = usage_metadata.get("thoughtsTokenCount", 0)
+        usage = {
             "prompt_tokens": usage_metadata.get("promptTokenCount", 0),
-            "completion_tokens": usage_metadata.get("candidatesTokenCount", 0),
+            "completion_tokens": usage_metadata.get("candidatesTokenCount", 0) + thoughts,
             "total_tokens": usage_metadata.get("totalTokenCount", 0),
         }
+        if thoughts:
+            usage["completion_tokens_details"] = {"reasoning_tokens": thoughts}
+        if cached := usage_metadata.get("cachedContentTokenCount"):
+            usage["prompt_tokens_details"] = {"cached_tokens": cached}
+        return usage
 
     def _extract_tool_calls(self, response_data: dict):
         """
@@ -357,33 +435,14 @@ class GeminiClient(LLMClientBase):
             }]
         }
         """
-        import json
-
         from .base import ToolCall
 
-        try:
-            candidates = response_data.get("candidates", [])
-            if not candidates:
-                return None
-
-            parts = candidates[0].get("content", {}).get("parts", [])
-            tool_calls = []
-            for i, part in enumerate(parts):
-                if "functionCall" in part:
-                    fc = part["functionCall"]
-                    tool_calls.append(
-                        ToolCall(
-                            id=f"call_{i}",  # Gemini 没有 id，生成一个
-                            type="function",
-                            function={
-                                "name": fc.get("name", ""),
-                                "arguments": json.dumps(fc.get("args", {})),
-                            },
-                        )
-                    )
-            return tool_calls if tool_calls else None
-        except Exception:
-            return None
+        tool_calls = [
+            ToolCall(**self._tool_call_from_part(part["functionCall"], f"call_{i}"))
+            for i, part in enumerate(self._parts(response_data))
+            if "functionCall" in part
+        ]
+        return tool_calls or None
 
     @staticmethod
     def parse_thoughts(response_data: dict) -> dict:
@@ -437,36 +496,27 @@ class GeminiClient(LLMClientBase):
             logger.warning(f"Failed to parse thoughts: {e}")
             return {"thought": "", "answer": ""}
 
-    def _extract_stream_content(self, data: dict) -> str | None:
-        """从 Gemini 流式响应中提取文本内容（跳过 thought parts）"""
-        candidates = data.get("candidates")
-        if not candidates:
-            return None
-        parts = candidates[0].get("content", {}).get("parts", [])
-        for part in parts:
-            if "text" in part and not part.get("thought"):
-                return part["text"]
-        return None
-
-    def _extract_stream_thinking(self, data: dict) -> str | None:
-        """从 Gemini 流式响应中提取思考内容（thought: true 的 parts）"""
-        candidates = data.get("candidates")
-        if not candidates:
-            return None
-        parts = candidates[0].get("content", {}).get("parts", [])
-        for part in parts:
-            if part.get("thought") and "text" in part:
-                return part["text"]
-        return None
-
     @staticmethod
-    def _extract_stream_function_calls(data: dict) -> list[dict]:
-        """从 Gemini 流式 chunk 中提取完整的 functionCall（Gemini 不分片发送参数）"""
-        candidates = data.get("candidates")
-        if not candidates:
-            return []
-        parts = candidates[0].get("content", {}).get("parts", [])
-        return [part["functionCall"] for part in parts if "functionCall" in part]
+    def _append_stream_part(parts: list[dict], part: dict) -> None:
+        """把流式 part 拼回与非流式等价的 parts：同类文本片段合并，签名随合并落在
+        这段文本上（Gemini 把签名放在一段文本的末尾片段，常是一个空文本 part）。
+        functionCall 各自独立，不合并。"""
+        last = parts[-1] if parts else None
+        text_keys = {"text", "thought", "thoughtSignature"}
+        if (
+            last is not None
+            and "text" in part
+            and "text" in last
+            and set(part) <= text_keys
+            and set(last) <= text_keys
+            and bool(part.get("thought")) == bool(last.get("thought"))
+            and "thoughtSignature" not in last
+        ):
+            last["text"] += part["text"]
+            if "thoughtSignature" in part:
+                last["thoughtSignature"] = part["thoughtSignature"]
+            return
+        parts.append(deepcopy(part))
 
     def _extract_stream_usage(self, data: dict) -> dict | None:
         """从 Gemini 流式 chunk 中提取 usage（usageMetadata 字段）"""
@@ -498,7 +548,6 @@ class GeminiClient(LLMClientBase):
         ClaudeClient 都透出）。Gemini 把 api_key 拼在 query string 里，本来就不该经
         网关转发，所以带外信号在这条链路上没有来源。真需要时照基类那段补即可。
         """
-        import json
 
         import aiohttp
 
@@ -539,11 +588,9 @@ class GeminiClient(LLMClientBase):
 
                     _last_usage = None
                     _finish_reason = None
-                    # Gemini 没有 tool call id，也没有跨 chunk 的 index：functionCall 每次整条
-                    # 到达，按 functionCall 的到达顺序编号。注意与非流式不同——非流式
-                    # _extract_tool_calls 用 part 下标（前面有 text/thought part 时会跳号）；
-                    # 两者都是本地合成的 id，只保证单次响应内唯一
-                    _tool_call_count = 0
+                    # 拼回的原生 parts：流末尾作为 assistant_message 发出，保留签名
+                    _parts: list[dict] = []
+                    _tool_calls: list[dict] = []
                     async for line in response.content:
                         line = line.decode("utf-8").strip()
                         if line.startswith("data: "):
@@ -553,36 +600,28 @@ class GeminiClient(LLMClientBase):
                             try:
                                 data = json.loads(data_str)
 
-                                # thinking 和 content 可能在同一个 chunk 中
-                                thinking = self._extract_stream_thinking(data)
-                                if thinking:
-                                    if return_usage:
-                                        yield {"type": "thinking", "content": thinking}
-
-                                content = self._extract_stream_content(data)
-                                if content:
-                                    if return_usage:
-                                        yield {"type": "content", "content": content}
-                                    else:
-                                        yield content
-
-                                if return_usage:
-                                    tool_calls = []
-                                    for fc in self._extract_stream_function_calls(data):
-                                        tool_calls.append(
-                                            {
-                                                "index": _tool_call_count,
-                                                "id": f"call_{_tool_call_count}",
-                                                "type": "function",
-                                                "function": {
-                                                    "name": fc.get("name", ""),
-                                                    "arguments": json.dumps(fc.get("args", {})),
-                                                },
-                                            }
+                                # 一个 chunk 可以有多个 part（思考、正文、函数调用混排），
+                                # 按顺序逐个处理，任何一个都不能漏
+                                for part in self._parts(data):
+                                    self._append_stream_part(_parts, part)
+                                    if "functionCall" in part:
+                                        # functionCall 整条到达、没有跨 chunk 的 index，
+                                        # 按到达顺序编号；Gemini 3 自带真实 id
+                                        call = self._tool_call_from_part(
+                                            part["functionCall"], f"call_{len(_tool_calls)}"
                                         )
-                                        _tool_call_count += 1
-                                    if tool_calls:
-                                        yield {"type": "tool_call_delta", "tool_calls": tool_calls}
+                                        call["index"] = len(_tool_calls)
+                                        _tool_calls.append(call)
+                                        if return_usage:
+                                            yield {"type": "tool_call_delta", "tool_calls": [call]}
+                                    elif part.get("text"):
+                                        if part.get("thought"):
+                                            if return_usage:
+                                                yield {"type": "thinking", "content": part["text"]}
+                                        elif return_usage:
+                                            yield {"type": "content", "content": part["text"]}
+                                        else:
+                                            yield part["text"]
 
                                 # Gemini 每个 chunk 都带 usageMetadata（累计值），
                                 # 只记录最新值，流结束后统一 yield，保证 usage 事件唯一且在最后
@@ -598,6 +637,17 @@ class GeminiClient(LLMClientBase):
                                 continue
 
                     if return_usage:
+                        if self._needs_continuation(_parts):
+                            message = {"role": "assistant", "content": _parts}
+                            if _tool_calls:
+                                message["tool_calls"] = [
+                                    {k: v for k, v in c.items() if k != "index"}
+                                    for c in _tool_calls
+                                ]
+                            yield {"type": "assistant_message", "message": message}
+                        # functionCall 与 finishReason 不在同一个 chunk，这里补上非流式的修正
+                        if _tool_calls and _finish_reason == "stop":
+                            _finish_reason = "tool_calls"
                         yield {"type": "finish", "reason": _finish_reason}
                         if _last_usage:
                             yield {"type": "usage", "usage": _last_usage}
@@ -641,9 +691,17 @@ class GeminiClient(LLMClientBase):
     def _convert_messages_to_contents(
         self, messages: list[dict], system_instruction: str = None
     ) -> tuple[list[dict], dict | None]:
-        """将 OpenAI 格式的 messages 转换为 Gemini 格式"""
+        """将 OpenAI 格式的 messages 转换为 Gemini 格式
+
+        - assistant 的 tool_calls → functionCall parts；flexllm 返回的 assistant_message
+          （content 是原生 parts）原样回传，保住 thoughtSignature
+        - tool 消息 → functionResponse；Gemini 按函数名配对，名字从前面 assistant 的
+          tool_calls 按 tool_call_id 查。同一步的多条结果并进同一条 user 消息
+        - 多条 system 消息按顺序拼接
+        """
         contents = []
-        extracted_system = system_instruction
+        system_texts = [system_instruction] if system_instruction else []
+        tool_names: dict[str, str] = {}
 
         for msg in messages:
             role = msg.get("role", "user")
@@ -651,20 +709,123 @@ class GeminiClient(LLMClientBase):
 
             if role == "system":
                 if isinstance(content, str):
-                    extracted_system = content
+                    system_texts.append(content)
                 elif isinstance(content, list):
                     texts = [p.get("text", "") for p in content if p.get("type") == "text"]
-                    extracted_system = "\n".join(texts)
+                    system_texts.append("\n".join(texts))
                 continue
 
-            gemini_role = "model" if role == "assistant" else "user"
-            parts = self._convert_content_to_parts(content)
+            if role == "tool":
+                part = self._convert_tool_result(msg, tool_names)
+                last = contents[-1] if contents else None
+                if last and last["role"] == "user" and "functionResponse" in last["parts"][-1]:
+                    last["parts"].append(part)
+                else:
+                    contents.append({"role": "user", "parts": [part]})
+                continue
+
+            if role == "assistant":
+                for tc in msg.get("tool_calls") or []:
+                    # 合成 id（call_0…）每轮都会重复，后出现的覆盖先出现的，
+                    # 保证 tool 消息配到离它最近的那次调用
+                    tool_names[tc.get("id")] = tc.get("function", {}).get("name", "")
+                parts = self._convert_assistant_parts(msg)
+            else:
+                parts = self._convert_content_to_parts(content)
 
             if parts:
-                contents.append({"role": gemini_role, "parts": parts})
+                contents.append(
+                    {"role": "model" if role == "assistant" else "user", "parts": parts}
+                )
 
-        system_obj = {"parts": [{"text": extracted_system}]} if extracted_system else None
+        system_texts = [t for t in system_texts if t]
+        system_obj = {"parts": [{"text": "\n\n".join(system_texts)}]} if system_texts else None
         return contents, system_obj
+
+    @staticmethod
+    def _is_native_parts(content: Any) -> bool:
+        """content 是 flexllm 从 Gemini 响应保留下来的原生 parts（见 _extract_assistant_message）"""
+        return isinstance(content, list) and any(
+            isinstance(p, dict) and ("functionCall" in p or "thoughtSignature" in p)
+            for p in content
+        )
+
+    def _convert_assistant_parts(self, msg: dict) -> list[dict]:
+        content = msg.get("content")
+        if self._is_native_parts(content):
+            return deepcopy(content)
+
+        parts = self._convert_content_to_parts(content)
+        for i, tc in enumerate(msg.get("tool_calls") or []):
+            func = tc.get("function", {})
+            arguments = func.get("arguments") or "{}"
+            call = {
+                "name": func.get("name", ""),
+                "args": json.loads(arguments) if isinstance(arguments, str) else arguments,
+            }
+            if tc.get("id"):
+                call["id"] = tc["id"]
+            part = {"functionCall": call}
+            # 签名只要求挂在每一步的第一个 functionCall 上
+            if i == 0:
+                part["thoughtSignature"] = _SKIP_SIGNATURE
+            parts.append(part)
+        return parts
+
+    def _convert_tool_result(self, msg: dict, tool_names: dict[str, str]) -> dict:
+        call_id = msg.get("tool_call_id")
+        name = msg.get("name") or tool_names.get(call_id)
+        if not name:
+            raise ValueError(
+                f"tool 消息 tool_call_id={call_id!r} 找不到对应的 assistant tool_call："
+                "Gemini 的 functionResponse 必须带函数名"
+            )
+        content = msg.get("content")
+        response = {"name": name}
+        if call_id:
+            response["id"] = call_id
+        if has_non_text_parts(content):
+            # Gemini 3 支持工具结果直接带图：媒体放 functionResponse.parts
+            texts = [p if isinstance(p, str) else p.get("text", "") for p in content]
+            media = [part for part in self._convert_content_to_parts(content) if "text" not in part]
+            response["response"] = {"result": "".join(t for t in texts if t)}
+            response["parts"] = media
+        elif isinstance(content, list):
+            response["response"] = {"result": "".join(p.get("text", "") for p in content)}
+        else:
+            # response 必须是对象（protobuf Struct），纯字符串会被 400
+            response["response"] = {"result": content or ""}
+        return {"functionResponse": response}
+
+    @staticmethod
+    def _convert_tools(tools: list[dict]) -> list[dict]:
+        """OpenAI 格式的函数合并成一个 functionDeclarations；原生格式原样透传。
+
+        参数 schema 用 parametersJsonSchema：它接受完整 JSON Schema，而 parameters
+        只收 OpenAPI 子集，OpenAI 常见的 additionalProperties 会被 400。
+        """
+        declarations, native = [], []
+        for tool in tools:
+            if tool.get("type") != "function":
+                native.append(tool)
+                continue
+            func = tool["function"]
+            declaration = {"name": func["name"]}
+            if func.get("description"):
+                declaration["description"] = func["description"]
+            if func.get("parameters"):
+                declaration["parametersJsonSchema"] = func["parameters"]
+            declarations.append(declaration)
+        return ([{"functionDeclarations": declarations}] if declarations else []) + native
+
+    @staticmethod
+    def _convert_tool_choice(tool_choice: str | dict) -> dict:
+        modes = {"auto": "AUTO", "none": "NONE", "required": "ANY"}
+        if isinstance(tool_choice, str) and tool_choice in modes:
+            return {"mode": modes[tool_choice]}
+        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
+            return {"mode": "ANY", "allowedFunctionNames": [tool_choice["function"]["name"]]}
+        raise ValueError(f"不支持的 tool_choice: {tool_choice!r}")
 
     def _convert_content_to_parts(self, content: Any) -> list[dict]:
         """将 OpenAI 格式的 content 转换为 Gemini 格式的 parts"""
@@ -698,6 +859,34 @@ class GeminiClient(LLMClientBase):
                             parts.append(img)
             return parts
         return []
+
+    _MEDIA_PART_TYPES = ("image_url", "video_url", "audio_url")
+
+    @classmethod
+    def _has_remote_media(cls, messages: list[dict]) -> bool:
+        """是否含 http(s) 媒体 URL。Gemini 不会替你拉取外部 URL（fileData 给外链直接
+        400 "Cannot fetch content"），不转 base64 这张图就只能被丢掉。"""
+        for msg in messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and item.get("type") in cls._MEDIA_PART_TYPES:
+                    url = item.get(item["type"], {}).get("url", "")
+                    if url.startswith(("http://", "https://")):
+                        return True
+        return False
+
+    async def _preprocess_messages(self, messages, preprocess_msg: bool = False):
+        return await super()._preprocess_messages(
+            messages, preprocess_msg or self._has_remote_media(messages)
+        )
+
+    async def _preprocess_messages_batch(self, messages_list, preprocess_msg: bool = False):
+        return await super()._preprocess_messages_batch(
+            messages_list,
+            preprocess_msg or any(self._has_remote_media(m) for m in messages_list),
+        )
 
     def _convert_image_url(self, image_url_obj: dict) -> dict | None:
         """将 OpenAI 的 image_url 格式转换为 Gemini 的 inline_data 格式"""

@@ -159,8 +159,8 @@ async for event in client.complete_stream(messages, model=None, **kwargs):
 与 `complete()` 的差异（均为有意）：
 - `content` 只含正文。OpenAI 兼容端点在 `thinking=True` 时，`complete()` 的 `content`
   带 `<think>…</think>` 前缀，这里思考只在 `reasoning_content`；没有正文时为 `None`。
-- Gemini 的 tool call id 是本地合成的（Gemini 不返回 id）：流式按 functionCall 顺序编号
-  `call_0, call_1…`，非流式按 part 下标编号，二者不保证相同，只保证单次响应内唯一。
+- 响应里不带 functionCall id 时（老版本 Gemini 模型），tool call id 是本地合成的：流式按
+  functionCall 顺序编号，非流式按 part 下标编号，二者不保证相同。Gemini 3 返回真实 id，两边一致。
 
 ```python
 async for event in client.complete_stream(messages, tools=tools):
@@ -284,14 +284,14 @@ from flexllm import GeminiClient
 # Developer API 模式
 client = GeminiClient(
     api_key: str,
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-3-flash-preview",
 )
 
 # Vertex AI 模式
 client = GeminiClient(
     project_id: str,
     location: str = "us-central1",
-    model: str = "gemini-2.5-flash",
+    model: str = "gemini-3-flash-preview",
     use_vertex_ai: bool = True,
 )
 ```
@@ -300,6 +300,21 @@ client = GeminiClient(
 - `False`: 禁用
 - `True`: 启用
 - `"minimal"`, `"low"`, `"medium"`, `"high"`: 思考级别
+
+**工具调用（与 OpenAI 用法一致）：**
+- `tools` 传 OpenAI 格式即可，自动转成 `functionDeclarations`（schema 走 `parametersJsonSchema`，
+  完整 JSON Schema 可用）；Gemini 原生格式（含 `googleSearch` 等）原样透传。
+  `tool_choice` 的 `"auto"` / `"none"` / `"required"` / 指定函数映射到 `toolConfig`。
+- 多轮时把 `result.assistant_message` 原样追加进 messages。Gemini 3 要求回传 functionCall 上的
+  `thoughtSignature`，缺了直接 400；`assistant_message.content` 保存的就是带签名的原生 parts。
+  只保留了 OpenAI 格式历史（`content` + `tool_calls`）也能继续，flexllm 会补官方的跳过校验占位签名，
+  代价是模型看不到自己之前的推理。
+- `role="tool"` 消息按 `tool_call_id` 找回函数名，转成 `functionResponse`；同一步的多条结果并进
+  一条消息。结果可以带图（`[text, image_url]` 块列表），图片放进 `functionResponse.parts`。
+- 工具调用时 `finish_reason` 为 `"tool_calls"`（Gemini 原始值是 `STOP`）。
+- `usage.completion_tokens` 包含思考 token（`completion_tokens_details.reasoning_tokens`），
+  Gemini 的 `candidatesTokenCount` 不含它，但它按输出计费。
+- 外部图片/音视频 URL 会自动下载转 base64（Gemini 不拉取外链），无需手动 `preprocess_msg=True`。
 
 ---
 

@@ -135,11 +135,18 @@ class TestOpenAIToolImages:
 
 
 class TestGeminiToolImages:
-    def test_tool_image_is_kept_as_inline_data(self):
+    def test_tool_image_rides_inside_function_response(self):
+        """三条结果并进一条 user 消息；图片挂在各自 functionResponse.parts 上"""
         body = _gemini()._build_request_body(_parallel_round(), "m")
-        parts = [p for c in body["contents"] for p in c["parts"]]
-        inline = [p["inline_data"]["data"] for p in parts if "inline_data" in p]
-        assert inline == ["AAA", "CCC"]
+        responses = [p["functionResponse"] for p in body["contents"][-1]["parts"]]
+        assert [r["id"] for r in responses] == ["c1", "c2", "c3"]
+        assert [r["response"] for r in responses] == [
+            {"result": "Read a.png"},
+            {"result": "plain text"},
+            {"result": ""},
+        ]
+        media = [[p["inline_data"]["data"] for p in r.get("parts", [])] for r in responses]
+        assert media == [["AAA"], [], ["CCC"]]
 
 
 ALL_CLIENTS = [_openai, _claude, _gemini]
