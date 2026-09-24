@@ -4,6 +4,8 @@ import json
 
 from flexllm import ClaudeClient, GeminiClient, OpenAIClient, ToolCall
 
+from .test_extra_passthrough import ScriptedServer, _sse
+
 
 class TestToolCallDataClass:
     """Test ToolCall dataclass"""
@@ -154,6 +156,49 @@ class TestGeminiToolCallExtraction:
         client = GeminiClient(api_key="test", model="test")
         tool_calls = client._extract_tool_calls(response_data)
         assert tool_calls is None
+
+
+class TestGeminiStreamToolCalls:
+    """Gemini 流式曾经完全丢弃 functionCall part"""
+
+    async def test_stream_yields_function_calls_with_distinct_indexes(self):
+        def chunk(parts, finish=None):
+            candidate = {"content": {"role": "model", "parts": parts}}
+            if finish:
+                candidate["finishReason"] = finish
+            return _sse({"candidates": [candidate]})
+
+        lines = [
+            chunk([{"text": "checking"}]),
+            chunk([{"functionCall": {"name": "get_weather", "args": {"city": "Tokyo"}}}]),
+            chunk(
+                [
+                    {"functionCall": {"name": "get_time", "args": {}}},
+                    {"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}},
+                ],
+                finish="STOP",
+            ),
+        ]
+        async with ScriptedServer(
+            stream_lines=lines, path="/v1/models/m:streamGenerateContent"
+        ) as server:
+            client = GeminiClient(base_url=server.base_url, api_key="k", model="m")
+            events = [
+                e
+                async for e in client.chat_completions_stream(
+                    [{"role": "user", "content": "hi"}], return_usage=True
+                )
+            ]
+            await client.aclose()
+
+        calls = [tc for e in events if e["type"] == "tool_call_delta" for tc in e["tool_calls"]]
+        assert [(tc["index"], tc["id"], tc["function"]["name"]) for tc in calls] == [
+            (0, "call_0", "get_weather"),
+            (1, "call_1", "get_time"),
+            (2, "call_2", "get_weather"),
+        ]
+        assert json.loads(calls[2]["function"]["arguments"]) == {"city": "Paris"}
+        assert [e["content"] for e in events if e["type"] == "content"] == ["checking"]
 
 
 class TestClaudeToolCallExtraction:

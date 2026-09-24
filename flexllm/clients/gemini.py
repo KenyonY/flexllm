@@ -459,6 +459,15 @@ class GeminiClient(LLMClientBase):
                 return part["text"]
         return None
 
+    @staticmethod
+    def _extract_stream_function_calls(data: dict) -> list[dict]:
+        """从 Gemini 流式 chunk 中提取完整的 functionCall（Gemini 不分片发送参数）"""
+        candidates = data.get("candidates")
+        if not candidates:
+            return []
+        parts = candidates[0].get("content", {}).get("parts", [])
+        return [part["functionCall"] for part in parts if "functionCall" in part]
+
     def _extract_stream_usage(self, data: dict) -> dict | None:
         """从 Gemini 流式 chunk 中提取 usage（usageMetadata 字段）"""
         if "usageMetadata" in data:
@@ -530,6 +539,9 @@ class GeminiClient(LLMClientBase):
 
                     _last_usage = None
                     _finish_reason = None
+                    # Gemini 没有 tool call id，也没有跨 chunk 的 index：functionCall 每次整条
+                    # 到达，按到达顺序编号，与非流式 _extract_tool_calls 的 call_{i} 一致
+                    _tool_call_count = 0
                     async for line in response.content:
                         line = line.decode("utf-8").strip()
                         if line.startswith("data: "):
@@ -551,6 +563,24 @@ class GeminiClient(LLMClientBase):
                                         yield {"type": "content", "content": content}
                                     else:
                                         yield content
+
+                                if return_usage:
+                                    tool_calls = []
+                                    for fc in self._extract_stream_function_calls(data):
+                                        tool_calls.append(
+                                            {
+                                                "index": _tool_call_count,
+                                                "id": f"call_{_tool_call_count}",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": fc.get("name", ""),
+                                                    "arguments": json.dumps(fc.get("args", {})),
+                                                },
+                                            }
+                                        )
+                                        _tool_call_count += 1
+                                    if tool_calls:
+                                        yield {"type": "tool_call_delta", "tool_calls": tool_calls}
 
                                 # Gemini 每个 chunk 都带 usageMetadata（累计值），
                                 # 只记录最新值，流结束后统一 yield，保证 usage 事件唯一且在最后
