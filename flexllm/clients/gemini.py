@@ -540,7 +540,9 @@ class GeminiClient(LLMClientBase):
                     _last_usage = None
                     _finish_reason = None
                     # Gemini 没有 tool call id，也没有跨 chunk 的 index：functionCall 每次整条
-                    # 到达，按到达顺序编号，与非流式 _extract_tool_calls 的 call_{i} 一致
+                    # 到达，按 functionCall 的到达顺序编号。注意与非流式不同——非流式
+                    # _extract_tool_calls 用 part 下标（前面有 text/thought part 时会跳号）；
+                    # 两者都是本地合成的 id，只保证单次响应内唯一
                     _tool_call_count = 0
                     async for line in response.content:
                         line = line.decode("utf-8").strip()

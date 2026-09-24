@@ -31,8 +31,9 @@ Example:
     )
 
     # 流式输出
-    async for chunk in client.chat_completions_stream(messages):
-        print(chunk, end="", flush=True)
+    async for event in client.complete_stream(messages):
+        if event["type"] == "content":
+            print(event["content"], end="", flush=True)
 
     # 使用 Gemini
     gemini_client = LLMClient(
@@ -69,8 +70,9 @@ Example:
     )
 
     # 流式输出
-    async for chunk in client.chat_completions_stream(messages):
-        print(chunk, end="", flush=True)
+    async for event in client.complete_stream(messages):
+        if event["type"] == "content":
+            print(event["content"], end="", flush=True)
 
     # =====================================================
     # 3. GeminiClient - Google Gemini（Developer API / Vertex AI）

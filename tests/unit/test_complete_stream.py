@@ -186,3 +186,36 @@ class TestCompleteStream:
         with pytest.raises(ValueError, match="return_usage"):
             async for _ in client.complete_stream(MESSAGES, return_usage=False):
                 pass
+
+
+class TestCompleteStreamEdges:
+    async def test_empty_stream_still_yields_result(self):
+        events = await _collect_openai(["data: [DONE]\n\n"])
+
+        assert [e["type"] for e in events] == ["result"]
+        assert events[0]["result"].content is None
+
+    async def test_http_error_raises_typed_error(self):
+        from aiohttp import web
+
+        from flexllm import LLMHTTPError
+
+        async def handler(request):
+            return web.json_response({"error": "boom"}, status=500)
+
+        app = web.Application()
+        app.router.add_post("/v1/chat/completions", handler)
+        runner = web.AppRunner(app)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = site._server.sockets[0].getsockname()[1]
+        client = OpenAIClient(base_url=f"http://127.0.0.1:{port}/v1", api_key="k", model="m")
+        try:
+            with pytest.raises(LLMHTTPError) as exc:
+                async for _ in client.complete_stream(MESSAGES):
+                    pass
+            assert exc.value.status_code == 500
+        finally:
+            await client.aclose()
+            await runner.cleanup()

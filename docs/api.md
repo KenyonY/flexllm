@@ -156,6 +156,12 @@ async for event in client.complete_stream(messages, model=None, **kwargs):
 `assistant_message`（下一轮需原样回传的续接状态，如 Claude 带签名的 thinking block）也都在上面，
 调用方不需要自己拼。失败抛 typed error，与 `complete()` 相同。
 
+与 `complete()` 的差异（均为有意）：
+- `content` 只含正文。OpenAI 兼容端点在 `thinking=True` 时，`complete()` 的 `content`
+  带 `<think>…</think>` 前缀，这里思考只在 `reasoning_content`；没有正文时为 `None`。
+- Gemini 的 tool call id 是本地合成的（Gemini 不返回 id）：流式按 functionCall 顺序编号
+  `call_0, call_1…`，非流式按 part 下标编号，二者不保证相同，只保证单次响应内唯一。
+
 ```python
 async for event in client.complete_stream(messages, tools=tools):
     if event["type"] == "content":
