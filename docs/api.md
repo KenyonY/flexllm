@@ -315,11 +315,17 @@ client = GeminiClient(
   只保留了 OpenAI 格式历史（`content` + `tool_calls`）也能继续，flexllm 会补官方的跳过校验占位签名，
   代价是模型看不到自己之前的推理。
 - `role="tool"` 消息按 `tool_call_id` 找回函数名，转成 `functionResponse`；同一步的多条结果并进
-  一条消息。结果可以带图（`[text, image_url]` 块列表），图片放进 `functionResponse.parts`。
+  一条消息。结果可以带图（`[text, image_url]` 块列表）：Gemini 3 放进 `functionResponse.parts`；
+  Gemini 2.x 不支持多模态函数结果，图片挪到紧随其后的一条 user 消息（与 functionResponse
+  同消息时模型看不见，实测）。
+- Gemini 3 的纯文本回答也带签名，所以 `assistant_message` 通常不为 `None`，不要拿它判断
+  "有没有工具调用"，用 `tool_calls`。只有思考摘要、没有签名的回答（Gemini 2.x）不产出它。
 - 工具调用时 `finish_reason` 为 `"tool_calls"`（Gemini 原始值是 `STOP`）。
 - `usage.completion_tokens` 包含思考 token（`completion_tokens_details.reasoning_tokens`），
   Gemini 的 `candidatesTokenCount` 不含它，但它按输出计费。
 - 外部图片/音视频 URL 会自动下载转 base64（Gemini 不拉取外链），无需手动 `preprocess_msg=True`。
+- 以上协议行为均在 Gemini Developer API（gemini-3-flash-preview / gemini-2.5-flash）上实测；
+  Vertex AI 路径（`use_vertex_ai=True`）共用同一套转换，但未经真实调用验证。
 
 ---
 

@@ -109,7 +109,8 @@ def _request_error_from_result(result: "RequestResult") -> LLMRequestError:
         )
     if isinstance(status_code, int) and status_code >= 400:
         return LLMHTTPError(
-            f"LLM 请求失败: HTTP {status_code}: {error or detail or response_data}",
+            # error 只是 "HTTP 400" 这样的状态复述，真正的原因在响应体里
+            f"LLM 请求失败: HTTP {status_code}: {response_data or detail or error}",
             status_code=status_code,
             response_data=response_data,
             request_id=request_id,

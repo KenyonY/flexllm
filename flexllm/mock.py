@@ -52,6 +52,7 @@ import base64
 import json
 import multiprocessing
 import random
+import re
 import time
 import uuid
 from dataclasses import dataclass
@@ -544,8 +545,15 @@ class MockLLMServer:
                 )
             return True
         elif api_format == "gemini":
-            parts = messages[-1].get("parts", []) if messages else []
-            return not any(isinstance(p, dict) and "functionResponse" in p for p in parts)
+            # 工具结果之后可能还跟着一条单独的附件消息（2.x 的工具图片），
+            # 所以看最后一次 model 发言之后有没有 functionResponse，而不只看最后一条
+            answered = False
+            for content in reversed(messages):
+                if content.get("role") == "model":
+                    break
+                parts = content.get("parts", [])
+                answered |= any(isinstance(p, dict) and "functionResponse" in p for p in parts)
+            return not answered
         return True
 
     def _pick_tool(self, tools: list[dict], api_format: str = "openai") -> tuple[str, dict]:
@@ -1354,7 +1362,14 @@ class MockLLMServer:
             usage["thoughtsTokenCount"] = thought_tokens
         return usage
 
-    def _validate_gemini_request(self, data: dict) -> str | None:
+    @staticmethod
+    def _is_gemini_2(model: str) -> bool:
+        """URL 里的模型名是 Gemini 2.x：不签发 id/签名、不要求签名、不支持多模态
+        functionResponse。其余名字（含 mock-model）按 Gemini 3 行为处理。"""
+        match = re.search(r"gemini-(\d+)", model)
+        return match is not None and int(match.group(1)) < 3
+
+    def _validate_gemini_request(self, data: dict, legacy: bool = False) -> str | None:
         """还原真实 API 会 400 的几类请求（错误文案取自实测），合法返回 None"""
         for i, tool in enumerate(data.get("tools") or []):
             unknown = [k for k in tool if k not in self._GEMINI_TOOL_KEYS]
@@ -1389,6 +1404,8 @@ class MockLLMServer:
         for i, content in enumerate(contents):
             for j, part in enumerate(content.get("parts", [])):
                 if "functionResponse" in part:
+                    if legacy and part["functionResponse"].get("parts"):
+                        return "Multimodal function responses are not supported for this model."
                     if not isinstance(part["functionResponse"].get("response"), dict):
                         return (
                             f"Invalid value at 'contents[{i}].parts[{j}].function_response.response' "
@@ -1408,7 +1425,7 @@ class MockLLMServer:
                             f'(TYPE_BYTES), Base64 decoding failed for "{signature}"'
                         )
             calls = [p for p in content.get("parts", []) if "functionCall" in p]
-            if i > turn_start and calls and "thoughtSignature" not in calls[0]:
+            if not legacy and i > turn_start and calls and "thoughtSignature" not in calls[0]:
                 name = calls[0]["functionCall"].get("name", "")
                 return (
                     "Function call is missing a thought_signature in functionCall parts. "
@@ -1426,6 +1443,7 @@ class MockLLMServer:
         prompt_tokens: int,
         output_tokens: int,
         thought_tokens: int = 0,
+        signature: dict | None = None,
     ) -> web.StreamResponse:
         """生成 Gemini 格式的流式响应
 
@@ -1482,7 +1500,7 @@ class MockLLMServer:
             "candidates": [
                 {
                     "content": {
-                        "parts": [{"text": "", "thoughtSignature": self.GEMINI_SIGNATURE}],
+                        "parts": [{"text": "", **(signature or {})}],
                         "role": "model",
                     },
                     "finishReason": "STOP",
@@ -1500,6 +1518,8 @@ class MockLLMServer:
         self.request_count += 1
 
         model_action = request.match_info["model_action"]
+        legacy = self._is_gemini_2(model_action.split(":")[0])
+        signature = {} if legacy else {"thoughtSignature": self.GEMINI_SIGNATURE}
         is_stream = "streamGenerateContent" in model_action
 
         # 请求校验：与真实 Gemini API 一致，非法请求返回 400
@@ -1529,7 +1549,7 @@ class MockLLMServer:
                 },
                 status=400,
             )
-        if error := self._validate_gemini_request(data):
+        if error := self._validate_gemini_request(data, legacy):
             return self._gemini_error(error)
         include_thinking = self._should_include_thinking(data)
 
@@ -1560,15 +1580,11 @@ class MockLLMServer:
                 {"prompt_tokens": prompt_tokens, "completion_tokens": output_tokens},
             )
 
-            # 与 Gemini 3 一致：functionCall 带 id，第一个 functionCall part 带签名
-            func_call_part = {
-                "functionCall": {
-                    "name": tool_name,
-                    "args": tool_args,
-                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                },
-                "thoughtSignature": self.GEMINI_SIGNATURE,
-            }
+            # 与 Gemini 3 一致：functionCall 带 id，第一个 functionCall part 带签名；2.x 都没有
+            func_call = {"name": tool_name, "args": tool_args}
+            if not legacy:
+                func_call["id"] = f"call_{uuid.uuid4().hex[:8]}"
+            func_call_part = {"functionCall": func_call, **signature}
 
             if is_stream:
                 resp = web.StreamResponse(
@@ -1646,13 +1662,19 @@ class MockLLMServer:
 
         if is_stream:
             return await self._gemini_stream_response(
-                request, response_text, thinking_text, prompt_tokens, output_tokens, thought_tokens
+                request,
+                response_text,
+                thinking_text,
+                prompt_tokens,
+                output_tokens,
+                thought_tokens,
+                signature,
             )
 
         parts = []
         if thinking_text:
             parts.append({"text": thinking_text, "thought": True})
-        parts.append({"text": response_text, "thoughtSignature": self.GEMINI_SIGNATURE})
+        parts.append({"text": response_text, **signature})
 
         return web.json_response(
             {

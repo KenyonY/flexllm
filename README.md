@@ -284,7 +284,8 @@ unchanged by the OpenAI-compatible client.
 
 With `return_usage=True`, tool-call results also carry `assistant_message`, the
 provider-native continuation payload. Replay it unchanged before the tool result;
-this preserves DeepSeek `reasoning_content` and Claude signed thinking blocks.
+this preserves DeepSeek `reasoning_content`, Claude signed thinking blocks and
+Gemini 3 `thoughtSignature` parts (Gemini rejects unsigned current-turn function calls).
 
 ### Multimodal Preprocessing
 

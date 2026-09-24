@@ -696,8 +696,9 @@ Fable/Mythos 5 的 adaptive thinking 始终开启，不能用 `thinking=False`�
 控制开销。
 
 工具回合请把 `return_usage=True` 返回的 `result.assistant_message` 原样放入下一轮消息，
-再追加工具结果。该字段保留 DeepSeek 的 `reasoning_content` 以及 Claude 带签名的
-thinking blocks；用 `content + tool_calls` 自行重建会丢失必要的 provider 状态。
+再追加工具结果。该字段保留 DeepSeek 的 `reasoning_content`、Claude 带签名的
+thinking blocks 以及 Gemini 3 带 `thoughtSignature` 的原生 parts；用 `content + tool_calls`
+自行重建会丢失必要的 provider 状态（Gemini 3 会退回官方占位签名，能跑通但模型看不到之前的推理）。
 
 ### Gemini
 
@@ -706,15 +707,19 @@ from flexllm import GeminiClient
 
 client = GeminiClient(
     api_key="your-key",
-    model="gemini-2.5-flash",
+    model="gemini-3-flash-preview",
 )
 
 # 思考级别控制
 result = await client.complete(
     messages,
-    thinking="high",  # "minimal", "low", "medium", "high"
+    thinking="high",  # False / True / "minimal" / "low" / "medium" / "high" / int 预算
 )
 ```
+
+Gemini 3 发 `thinkingLevel`；Gemini 2.x 不支持级别，自动换算成 `thinkingBudget`。
+`thinking=False` 发 `thinkingBudget=0`，Pro 系列不能关闭思考，API 会拒绝。工具调用、
+多模态工具结果与代际差异见 [API 参考](api.md#geminiclient)。
 
 ---
 

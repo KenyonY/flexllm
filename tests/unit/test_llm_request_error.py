@@ -54,6 +54,8 @@ async def test_non_stream_error_preserves_decoded_body(kind):
     assert raised.value.status_code == 403
     assert raised.value.response_data == BLOCK
     assert "LLM 请求失败" in str(raised.value)
+    # 原因必须出现在异常文本里，而不只是 "HTTP 403: HTTP 403"
+    assert "blocked" in str(raised.value)
 
 
 @pytest.mark.parametrize("kind", ["openai", "claude"])

@@ -22,7 +22,21 @@ from .base import (
     LLMTimeoutError,
     _decode_error_body,
 )
-from .message_images import has_non_text_parts
+from .message_images import has_non_text_parts, move_tool_images_to_user
+
+# Gemini 响应的标准信封字段；之外的顶层字段才是带外信息（见 ChatCompletionResult.extra）
+_GEMINI_ENVELOPE_KEYS = frozenset(
+    {"candidates", "usageMetadata", "modelVersion", "responseId", "promptFeedback", "createTime"}
+)
+_THINKING_LEVELS = ("minimal", "low", "medium", "high")
+
+
+def _is_gemini_2(model: str) -> bool:
+    """Gemini 2.x 与 3 的协议差异（thinkingLevel、多模态 functionResponse）按主版本分派。
+    认不出版本的名字（自定义部署、mock）按当前代处理。"""
+    match = re.search(r"gemini-(\d+)", model or "")
+    return match is not None and int(match.group(1)) < 3
+
 
 # 注入的 functionCall（从统一 tool_calls 重建、没有模型签发的签名）用的占位签名。
 # Gemini 3 对当前轮缺签名的 functionCall 直接 400；这个值是官方文档给出的跳过校验方式，
@@ -182,7 +196,12 @@ class GeminiClient(LLMClientBase):
                 Gemini 原生格式原样透传
             tool_choice: OpenAI 语义（"auto"/"none"/"required"/指定函数）转为 toolConfig
         """
-        contents, system_obj = self._convert_messages_to_contents(self._vision_messages(messages))
+        messages = self._vision_messages(messages)
+        if _is_gemini_2(model):
+            # 2.x 不支持多模态 functionResponse（400），而图片与 functionResponse 同一条消息时
+            # 模型看不见它（实测）；只有单独一条紧随其后的 user 消息能被看到
+            messages = move_tool_images_to_user(messages)
+        contents, system_obj = self._convert_messages_to_contents(messages)
         body = {"contents": contents}
 
         if system_obj:
@@ -228,7 +247,12 @@ class GeminiClient(LLMClientBase):
             thinking_config["includeThoughts"] = True
         elif isinstance(thinking, str):
             level = "high" if thinking in ("xhigh", "max", "ultra") else thinking
-            if model.startswith("gemini-2"):
+            if level not in _THINKING_LEVELS:
+                raise ValueError(
+                    f"Gemini 不支持的 thinking 级别: {thinking!r}，"
+                    "可选 minimal/low/medium/high/xhigh/max/ultra、bool 或 int 预算"
+                )
+            if _is_gemini_2(model):
                 # 2.5 不认 thinkingLevel（实测 400），按级别换算成预算
                 thinking_config["thinkingBudget"] = self._GEMINI_2_BUDGETS[level]
             else:
@@ -321,7 +345,6 @@ class GeminiClient(LLMClientBase):
         "PROHIBITED_CONTENT": "content_filter",
         "BLOCKLIST": "content_filter",
         "SPII": "content_filter",
-        "MALFORMED_FUNCTION_CALL": "tool_calls",
     }
 
     def _extract_finish_reason(self, response_data: dict) -> str | None:
@@ -352,11 +375,21 @@ class GeminiClient(LLMClientBase):
         return candidates[0].get("content", {}).get("parts", [])
 
     @staticmethod
-    def _needs_continuation(parts: list[dict]) -> bool:
-        """parts 里有下一轮必须原样回传的状态（签名、思考、函数调用）"""
+    def _needs_continuation(parts: list) -> bool:
+        """parts 里有下一轮必须原样回传的状态：签名或函数调用。
+
+        提取（是否产出 assistant_message）与回传（是否按原生 parts 透传）共用这一个判定，
+        两边不一致会让原生 parts 被当成 OpenAI content 转换——thought part 丢掉 thought
+        标记，思考摘要被当成说过的话发回去。纯思考摘要不是续接状态，官方也不要求回传。
+        """
         return any(
-            "functionCall" in p or "thoughtSignature" in p or p.get("thought") for p in parts
+            isinstance(p, dict) and ("functionCall" in p or "thoughtSignature" in p) for p in parts
         )
+
+    def _extract_extra(self, data: dict) -> dict | None:
+        """Gemini 的信封与 OpenAI 不同，不能用基类的字段名判定，否则整个响应都成了 extra"""
+        extra = {k: v for k, v in data.items() if k not in _GEMINI_ENVELOPE_KEYS}
+        return extra or None
 
     @staticmethod
     def _tool_call_from_part(fc: dict, fallback_id: str) -> dict:
@@ -725,14 +758,13 @@ class GeminiClient(LLMClientBase):
                 if isinstance(content, str):
                     system_texts.append(content)
                 elif isinstance(content, list):
-                    texts = [p.get("text", "") for p in content if p.get("type") == "text"]
-                    system_texts.append("\n".join(texts))
+                    system_texts.append("\n".join(self._texts_of(content)))
                 continue
 
             if role == "tool":
                 part = self._convert_tool_result(msg, tool_names)
                 last = contents[-1] if contents else None
-                if last and last["role"] == "user" and "functionResponse" in last["parts"][-1]:
+                if last and last["role"] == "user" and "functionResponse" in last["parts"][0]:
                     last["parts"].append(part)
                 else:
                     contents.append({"role": "user", "parts": [part]})
@@ -757,26 +789,30 @@ class GeminiClient(LLMClientBase):
         return contents, system_obj
 
     @staticmethod
-    def _is_native_parts(content: Any) -> bool:
-        """content 是 flexllm 从 Gemini 响应保留下来的原生 parts（见 _extract_assistant_message）"""
-        return isinstance(content, list) and any(
-            isinstance(p, dict) and ("functionCall" in p or "thoughtSignature" in p)
+    def _texts_of(content: list) -> list[str]:
+        return [
+            p if isinstance(p, str) else p.get("text", "")
             for p in content
-        )
+            if isinstance(p, str) or p.get("type", "text") == "text"
+        ]
 
     def _convert_assistant_parts(self, msg: dict) -> list[dict]:
         content = msg.get("content")
-        if self._is_native_parts(content):
+        # flexllm 保留下来的原生 parts（见 _extract_assistant_message）原样回传
+        if isinstance(content, list) and self._needs_continuation(content):
             return deepcopy(content)
 
         parts = self._convert_content_to_parts(content)
         for i, tc in enumerate(msg.get("tool_calls") or []):
             func = tc.get("function", {})
             arguments = func.get("arguments") or "{}"
-            call = {
-                "name": func.get("name", ""),
-                "args": json.loads(arguments) if isinstance(arguments, str) else arguments,
-            }
+            if isinstance(arguments, str):
+                try:
+                    arguments = json.loads(arguments)
+                except json.JSONDecodeError:
+                    # 与 Claude 一致：历史里坏掉的参数降级为空对象，不让整段对话发不出去
+                    arguments = {}
+            call = {"name": func.get("name", ""), "args": arguments}
             if tc.get("id"):
                 call["id"] = tc["id"]
             part = {"functionCall": call}
@@ -787,6 +823,8 @@ class GeminiClient(LLMClientBase):
         return parts
 
     def _convert_tool_result(self, msg: dict, tool_names: dict[str, str]) -> dict:
+        """一条 tool 消息 → functionResponse；媒体放 functionResponse.parts（Gemini 3 的
+        多模态函数结果。2.x 的图片已在 _build_request_body 里挪成单独的 user 消息）"""
         call_id = msg.get("tool_call_id")
         name = msg.get("name") or tool_names.get(call_id)
         if not name:
@@ -798,14 +836,12 @@ class GeminiClient(LLMClientBase):
         response = {"name": name}
         if call_id:
             response["id"] = call_id
-        if has_non_text_parts(content):
-            # Gemini 3 支持工具结果直接带图：媒体放 functionResponse.parts
-            texts = [p if isinstance(p, str) else p.get("text", "") for p in content]
-            media = [part for part in self._convert_content_to_parts(content) if "text" not in part]
-            response["response"] = {"result": "".join(t for t in texts if t)}
-            response["parts"] = media
-        elif isinstance(content, list):
-            response["response"] = {"result": "".join(p.get("text", "") for p in content)}
+        if isinstance(content, list):
+            response["response"] = {"result": "".join(self._texts_of(content))}
+            if has_non_text_parts(content):
+                response["parts"] = [
+                    p for p in self._convert_content_to_parts(content) if "text" not in p
+                ]
         else:
             # response 必须是对象（protobuf Struct），纯字符串会被 400
             response["response"] = {"result": content or ""}

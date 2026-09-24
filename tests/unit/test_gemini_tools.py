@@ -13,6 +13,7 @@ import pytest
 
 from flexllm import GeminiClient
 from flexllm.clients.gemini import _SKIP_SIGNATURE
+from flexllm.clients.message_images import TOOL_IMAGES_HEADER
 
 from .test_extra_passthrough import ScriptedServer, _sse
 
@@ -280,12 +281,12 @@ class TestAgainstMockServer:
             s.bind(("127.0.0.1", 0))
             return s.getsockname()[1]
 
-    async def _loop(self, mode):
+    async def _loop(self, mode, model="mock-model"):
         from flexllm.mock import MockLLMServer, MockServerConfig
 
         cfg = MockServerConfig(port=self._port(), delay_min=0, delay_max=0, thinking=True)
         with MockLLMServer(cfg) as server:
-            client = GeminiClient(base_url=server.gemini_url, api_key="k", model="mock-model")
+            client = GeminiClient(base_url=server.gemini_url, api_key="k", model=model)
             msgs = [{"role": "user", "content": "东京天气？"}]
             results = []
             for _ in range(2):
@@ -330,9 +331,11 @@ class TestAgainstMockServer:
             await client.aclose()
         return results
 
+    @pytest.mark.parametrize("model", ["mock-model", "gemini-2.5-flash"])
     @pytest.mark.parametrize("mode", ["complete", "stream", "openai_history"])
-    async def test_tool_loop_completes(self, mode):
-        first, second = await self._loop(mode)
+    async def test_tool_loop_completes(self, mode, model):
+        """Gemini 3 与 2.x 协议不同（签名、多模态 functionResponse），两代都要跑通"""
+        first, second = await self._loop(mode, model)
         assert first.finish_reason == "tool_calls"
         assert first.tool_calls[0].function["name"] == "get_weather"
         assert first.usage["completion_tokens_details"]["reasoning_tokens"] > 0
@@ -373,3 +376,105 @@ class TestGenerationConfig:
         gen = self._gen(response_format=rf)
         assert gen["responseJsonSchema"] == schema
         assert "responseSchema" not in gen
+
+
+class TestGeminiGenerations:
+    def test_gemini_2_tool_images_move_to_a_following_user_message(self):
+        """2.x：多模态 functionResponse 会 400，同消息里的图片模型看不见（均实测）"""
+        msgs = [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": [
+                    {"type": "text", "text": "看图"},
+                    {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAA"}},
+                ],
+            },
+        ]
+        body = _client()._build_request_body(msgs, "models/gemini-2.5-flash")
+        assert body["contents"][2] == {
+            "role": "user",
+            "parts": [
+                {"functionResponse": {"name": "f", "id": "c1", "response": {"result": "看图"}}}
+            ],
+        }
+        assert body["contents"][3] == {
+            "role": "user",
+            "parts": [
+                {"text": TOOL_IMAGES_HEADER},
+                {"inline_data": {"mime_type": "image/png", "data": "AAA"}},
+            ],
+        }
+
+    def test_thought_summary_alone_is_not_continuation_state(self):
+        """2.5 的文本回答不带签名：思考摘要不必回传，不能产出 assistant_message"""
+        data = _response([{"text": "想", "thought": True}, {"text": "答"}])
+        assert _client()._extract_assistant_message(data) is None
+
+    def test_native_parts_keep_thought_flag_on_round_trip(self):
+        parts = [{"text": "想", "thought": True}, {"functionCall": {"name": "f", "args": {}}}]
+        message = _client()._extract_assistant_message(_response(parts))
+        contents, _ = _client()._convert_messages_to_contents(
+            [{"role": "user", "content": "q"}, message]
+        )
+        assert contents[1]["parts"] == parts
+
+    def test_prefixed_gemini_2_model_name(self):
+        body = _client()._build_request_body(
+            [{"role": "user", "content": "q"}], "models/gemini-2.5-flash", thinking="low"
+        )
+        assert body["generationConfig"]["thinkingConfig"]["thinkingBudget"] == 2048
+
+    def test_unknown_thinking_level_raises(self):
+        with pytest.raises(ValueError, match="thinking"):
+            _client()._build_request_body([{"role": "user", "content": "q"}], "m", thinking="auto")
+
+
+class TestRobustness:
+    def test_envelope_fields_are_not_extra(self):
+        data = {**_response([{"text": "hi"}]), "modelVersion": "v", "responseId": "r"}
+        assert _client()._extract_extra(data) is None
+        assert _client()._extract_extra({**data, "x_gateway": 1}) == {"x_gateway": 1}
+
+    def test_malformed_function_call_is_not_reported_as_tool_calls(self):
+        data = _response([], finish="MALFORMED_FUNCTION_CALL")
+        assert _client()._extract_finish_reason(data) == "malformed_function_call"
+
+    def test_broken_history_arguments_degrade_to_empty_object(self):
+        msgs = [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{bad"}}
+                ],
+            },
+        ]
+        contents, _ = _client()._convert_messages_to_contents(msgs)
+        assert contents[1]["parts"][0]["functionCall"]["args"] == {}
+
+    def test_plain_string_items_in_list_content(self):
+        msgs = [
+            {"role": "system", "content": ["规则一", {"type": "text", "text": "规则二"}]},
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {"id": "c", "type": "function", "function": {"name": "f", "arguments": "{}"}}
+                ],
+            },
+            {"role": "tool", "tool_call_id": "c", "content": ["a", "b"]},
+        ]
+        contents, system = _client()._convert_messages_to_contents(msgs)
+        assert system == {"parts": [{"text": "规则一\n规则二"}]}
+        assert contents[-1]["parts"][0]["functionResponse"]["response"] == {"result": "ab"}

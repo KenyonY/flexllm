@@ -869,6 +869,37 @@ class TestGeminiProtocolFidelity:
         )
         assert status == 200
 
+    async def test_gemini_2_rejects_multimodal_function_response(self):
+        port = _port()
+        body = {
+            "contents": [
+                {"role": "user", "parts": [{"text": "截图"}]},
+                {"role": "model", "parts": [self.CALL]},
+                {
+                    "role": "user",
+                    "parts": [
+                        {
+                            "functionResponse": {
+                                "name": "get_weather",
+                                "response": {"result": ""},
+                                "parts": [
+                                    {"inline_data": {"mime_type": "image/png", "data": "AA=="}}
+                                ],
+                            }
+                        }
+                    ],
+                },
+            ]
+        }
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                url = f"{server.gemini_url}/models/gemini-2.5-flash:generateContent?key=t"
+                async with session.post(url, json=body) as resp:
+                    data = await resp.json()
+        # 2.x 不要求签名（这里的 functionCall 没签名也不报那个错），但拒绝多模态结果
+        assert resp.status == 400
+        assert "Multimodal function responses" in data["error"]["message"]
+
     async def test_thought_tokens_are_reported_separately(self):
         status, data = await self._post(
             {
