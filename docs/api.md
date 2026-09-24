@@ -531,6 +531,20 @@ with MockLLMServer(config) as server:
 | Gemini | `POST /models/{model}:generateContent` | `server.gemini_url` |
 | Gemini 流式 | `POST /models/{model}:streamGenerateContent` | `server.gemini_url` |
 
+### Gemini 协议还原
+
+Gemini 端点按真实 API（Gemini 3，实测）还原协议，客户端的协议 bug 在 mock 上就会暴露：
+
+- 响应：`functionCall` 带 `id`，第一个 functionCall part 带 `thoughtSignature`；文本回答的签名在
+  文本 part 上（流式是末尾带签名的空文本 chunk，附 `finishReason`）；开启思考时工具调用前也有
+  thought part；`candidatesTokenCount` 不含思考，思考单列 `thoughtsTokenCount`
+- 与真实 API 一样返回 400 的请求：
+  - `tools` 里有未知字段（如 OpenAI 格式的 `type` / `function`）
+  - `functionDeclarations[].parameters` 含 `additionalProperties`（应改用 `parametersJsonSchema`）
+  - `functionResponse.response` 不是对象
+  - 当前轮（最后一条用户文本之后）的 functionCall 缺 `thoughtSignature`，或签名不是合法 base64
+    （标准与 URL-safe 字母表都接受，官方占位签名 `skip_thought_signature_validator` 可通过）
+
 ### 思考内容触发方式
 
 通过 `MockServerConfig(thinking=True)` 全局启用，或通过请求参数动态触发：

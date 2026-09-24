@@ -13,6 +13,10 @@
 - 支持流式和非流式响应
 - 可选的思考/推理内容返回
 - Tool Call 支持：请求含 tools 时自动返回 tool_call 响应（OpenAI tool_calls / Claude tool_use / Gemini functionCall）
+- Gemini 端点按真实 API（Gemini 3）的协议行为还原：functionCall 带 id 与 thoughtSignature，
+  且像真实 API 一样拒绝非法请求（OpenAI 格式的 tools、parameters 里的 additionalProperties、
+  非对象的 functionResponse.response、当前轮缺 thoughtSignature 的 functionCall），
+  usage 的 candidatesTokenCount 不含思考 token（单列 thoughtsTokenCount）
 
 用法:
     # CLI
@@ -43,6 +47,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import multiprocessing
 import random
@@ -561,7 +566,7 @@ class MockLLMServer:
                 return "mock_tool", {}
             func = random.choice(all_funcs)
             name = func.get("name", "mock_tool")
-            params = func.get("parameters", {})
+            params = func.get("parameters") or func.get("parametersJsonSchema") or {}
         else:
             return "mock_tool", {}
 
@@ -1313,6 +1318,97 @@ class MockLLMServer:
 
     # ── Gemini 格式 ──
 
+    # 签发给客户端的 thoughtSignature。真实 API 的签名是不透明的 base64 字节串，
+    # 回传时只校验存在性和 base64 合法性，这里同样如此
+    GEMINI_SIGNATURE = base64.b64encode(b"flexllm-mock-thought-signature").decode()
+    _GEMINI_TOOL_KEYS = frozenset(
+        {
+            "functionDeclarations",
+            "googleSearch",
+            "googleSearchRetrieval",
+            "codeExecution",
+            "urlContext",
+            "retrieval",
+            "googleMaps",
+            "computerUse",
+            "fileSearch",
+        }
+    )
+
+    @staticmethod
+    def _gemini_error(message: str, code: int = 400, status: str = "INVALID_ARGUMENT"):
+        return web.json_response(
+            {"error": {"code": code, "message": message, "status": status}}, status=code
+        )
+
+    @staticmethod
+    def _gemini_usage(prompt_tokens: int, output_tokens: int, thought_tokens: int = 0) -> dict:
+        """与真实 API 一致：candidatesTokenCount 不含思考，totalTokenCount 含"""
+        usage = {
+            "promptTokenCount": prompt_tokens,
+            "candidatesTokenCount": output_tokens,
+            "totalTokenCount": prompt_tokens + output_tokens + thought_tokens,
+        }
+        if thought_tokens:
+            usage["thoughtsTokenCount"] = thought_tokens
+        return usage
+
+    def _validate_gemini_request(self, data: dict) -> str | None:
+        """还原真实 API 会 400 的几类请求（错误文案取自实测），合法返回 None"""
+        for i, tool in enumerate(data.get("tools") or []):
+            unknown = [k for k in tool if k not in self._GEMINI_TOOL_KEYS]
+            if unknown:
+                return "\n".join(
+                    f"Invalid JSON payload received. Unknown name \"{k}\" at 'tools[{i}]': "
+                    "Cannot find field."
+                    for k in unknown
+                )
+            for j, decl in enumerate(tool.get("functionDeclarations", [])):
+                if "additionalProperties" in json.dumps(decl.get("parameters", {})):
+                    return (
+                        'Invalid JSON payload received. Unknown name "additionalProperties" at '
+                        f"'tools[{i}].function_declarations[{j}].parameters': Cannot find field."
+                    )
+
+        contents = data["contents"]
+        # "当前轮"从最后一条用户文本消息开始；只有当前轮的 functionCall 要求签名
+        turn_start = 0
+        for i, content in enumerate(contents):
+            parts = content.get("parts", [])
+            if content.get("role") != "model" and not any("functionResponse" in p for p in parts):
+                turn_start = i
+        for i, content in enumerate(contents):
+            for j, part in enumerate(content.get("parts", [])):
+                if "functionResponse" in part:
+                    if not isinstance(part["functionResponse"].get("response"), dict):
+                        return (
+                            f"Invalid value at 'contents[{i}].parts[{j}].function_response.response' "
+                            "(type.googleapis.com/google.protobuf.Struct)"
+                        )
+                signature = part.get("thoughtSignature")
+                if signature is not None:
+                    try:
+                        # protobuf 的 bytes 字段标准/URL-safe 两种字母表都接受
+                        # （官方占位签名 skip_thought_signature_validator 就是后者）
+                        base64.b64decode(
+                            signature.replace("-", "+").replace("_", "/"), validate=True
+                        )
+                    except ValueError:
+                        return (
+                            f"Invalid value at 'contents[{i}].parts[{j}].thought_signature' "
+                            f'(TYPE_BYTES), Base64 decoding failed for "{signature}"'
+                        )
+            calls = [p for p in content.get("parts", []) if "functionCall" in p]
+            if i > turn_start and calls and "thoughtSignature" not in calls[0]:
+                name = calls[0]["functionCall"].get("name", "")
+                return (
+                    "Function call is missing a thought_signature in functionCall parts. "
+                    "This is required for tools to work correctly, and missing thought_signature "
+                    "may lead to degraded model performance. Additional data, function call "
+                    f"`default_api:{name}` , position {i + 1}."
+                )
+        return None
+
     async def _gemini_stream_response(
         self,
         request: web.Request,
@@ -1320,8 +1416,13 @@ class MockLLMServer:
         thinking_text: str | None,
         prompt_tokens: int,
         output_tokens: int,
+        thought_tokens: int = 0,
     ) -> web.StreamResponse:
-        """生成 Gemini 格式的流式响应"""
+        """生成 Gemini 格式的流式响应
+
+        与真实 API 一致：最后一个 chunk 是带 thoughtSignature 的空文本 part，
+        附 finishReason 与 usage。
+        """
         resp = web.StreamResponse(
             status=200,
             headers={
@@ -1366,15 +1467,21 @@ class MockLLMServer:
                     }
                 ],
             }
-            # 最后一个 chunk 附带 usage
-            if i == len(content_tokens) - 1:
-                chunk["usageMetadata"] = {
-                    "promptTokenCount": prompt_tokens,
-                    "candidatesTokenCount": output_tokens,
-                    "totalTokenCount": prompt_tokens + output_tokens,
-                }
             await resp.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8"))
 
+        final = {
+            "candidates": [
+                {
+                    "content": {
+                        "parts": [{"text": "", "thoughtSignature": self.GEMINI_SIGNATURE}],
+                        "role": "model",
+                    },
+                    "finishReason": "STOP",
+                }
+            ],
+            "usageMetadata": self._gemini_usage(prompt_tokens, output_tokens, thought_tokens),
+        }
+        await resp.write(f"data: {json.dumps(final, ensure_ascii=False)}\n\n".encode("utf-8"))
         await resp.write_eof()
         return resp
 
@@ -1413,15 +1520,14 @@ class MockLLMServer:
                 },
                 status=400,
             )
+        if error := self._validate_gemini_request(data):
+            return self._gemini_error(error)
         include_thinking = self._should_include_thinking(data)
 
         await asyncio.sleep(self._get_delay())
 
         if self.config.error_rate > 0 and random.random() < self.config.error_rate:
-            return web.json_response(
-                {"error": {"code": 500, "message": "Mock error", "status": "INTERNAL"}},
-                status=500,
-            )
+            return self._gemini_error("Mock error", code=500, status="INTERNAL")
 
         prompt_tokens = self._count_gemini_prompt_tokens(contents)
 
@@ -1431,6 +1537,13 @@ class MockLLMServer:
             tool_name, tool_args = self._pick_tool(tools, "gemini")
             args_str = json.dumps(tool_args, ensure_ascii=False)
             output_tokens = self._estimate_tokens(args_str)
+            # 真实 API 在工具调用前同样会思考：thought part 在 functionCall 之前
+            thought_parts = []
+            thought_tokens = 0
+            if include_thinking:
+                thinking_text = self._generate_thinking_text()
+                thought_parts = [{"text": thinking_text, "thought": True}]
+                thought_tokens = self._estimate_tokens(thinking_text)
             self._log_request(
                 "gemini",
                 data,
@@ -1438,7 +1551,15 @@ class MockLLMServer:
                 {"prompt_tokens": prompt_tokens, "completion_tokens": output_tokens},
             )
 
-            func_call_part = {"functionCall": {"name": tool_name, "args": tool_args}}
+            # 与 Gemini 3 一致：functionCall 带 id，第一个 functionCall part 带签名
+            func_call_part = {
+                "functionCall": {
+                    "name": tool_name,
+                    "args": tool_args,
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                },
+                "thoughtSignature": self.GEMINI_SIGNATURE,
+            }
 
             if is_stream:
                 resp = web.StreamResponse(
@@ -1446,22 +1567,30 @@ class MockLLMServer:
                     headers={"Content-Type": "text/event-stream", "Cache-Control": "no-cache"},
                 )
                 await resp.prepare(request)
-                chunk = {
-                    "candidates": [
-                        {
-                            "content": {"parts": [func_call_part], "role": "model"},
-                            "finishReason": "STOP",
-                        }
-                    ],
-                    "usageMetadata": {
-                        "promptTokenCount": prompt_tokens,
-                        "candidatesTokenCount": output_tokens,
-                        "totalTokenCount": prompt_tokens + output_tokens,
+                # 真实 API：functionCall 一个 chunk，finishReason 在随后的空文本 chunk 上
+                usage = self._gemini_usage(prompt_tokens, output_tokens, thought_tokens)
+                chunks = [
+                    {"candidates": [{"content": {"parts": [part], "role": "model"}}]}
+                    for part in thought_parts
+                ] + [
+                    {
+                        "candidates": [{"content": {"parts": [func_call_part], "role": "model"}}],
+                        "usageMetadata": usage,
                     },
-                }
-                await resp.write(
-                    f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
-                )
+                    {
+                        "candidates": [
+                            {
+                                "content": {"parts": [{"text": ""}], "role": "model"},
+                                "finishReason": "STOP",
+                            }
+                        ],
+                        "usageMetadata": usage,
+                    },
+                ]
+                for chunk in chunks:
+                    await resp.write(
+                        f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8")
+                    )
                 await resp.write_eof()
                 return resp
 
@@ -1469,16 +1598,17 @@ class MockLLMServer:
                 {
                     "candidates": [
                         {
-                            "content": {"parts": [func_call_part], "role": "model"},
+                            "content": {
+                                "parts": [*thought_parts, func_call_part],
+                                "role": "model",
+                            },
                             "finishReason": "STOP",
                             "index": 0,
                         }
                     ],
-                    "usageMetadata": {
-                        "promptTokenCount": prompt_tokens,
-                        "candidatesTokenCount": output_tokens,
-                        "totalTokenCount": prompt_tokens + output_tokens,
-                    },
+                    "usageMetadata": self._gemini_usage(
+                        prompt_tokens, output_tokens, thought_tokens
+                    ),
                 }
             )
 
@@ -1494,25 +1624,24 @@ class MockLLMServer:
                 gemini_rf = {"type": "json_object"}
         response_text = self._generate_response_text(user_text, gemini_rf)
         thinking_text = self._generate_thinking_text() if include_thinking else None
-        completion_tokens = self._estimate_tokens(response_text)
-        if thinking_text:
-            completion_tokens += self._estimate_tokens(thinking_text)
+        output_tokens = self._estimate_tokens(response_text)
+        thought_tokens = self._estimate_tokens(thinking_text) if thinking_text else 0
         self._log_request(
             "gemini",
             data,
             response_text,
-            {"prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens},
+            {"prompt_tokens": prompt_tokens, "completion_tokens": output_tokens + thought_tokens},
         )
 
         if is_stream:
             return await self._gemini_stream_response(
-                request, response_text, thinking_text, prompt_tokens, completion_tokens
+                request, response_text, thinking_text, prompt_tokens, output_tokens, thought_tokens
             )
 
         parts = []
         if thinking_text:
             parts.append({"text": thinking_text, "thought": True})
-        parts.append({"text": response_text})
+        parts.append({"text": response_text, "thoughtSignature": self.GEMINI_SIGNATURE})
 
         return web.json_response(
             {
@@ -1523,11 +1652,7 @@ class MockLLMServer:
                         "index": 0,
                     }
                 ],
-                "usageMetadata": {
-                    "promptTokenCount": prompt_tokens,
-                    "candidatesTokenCount": completion_tokens,
-                    "totalTokenCount": prompt_tokens + completion_tokens,
-                },
+                "usageMetadata": self._gemini_usage(prompt_tokens, output_tokens, thought_tokens),
             }
         )
 

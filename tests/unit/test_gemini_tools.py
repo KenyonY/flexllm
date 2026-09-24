@@ -264,3 +264,77 @@ class TestStream:
             {"text": "a", "thought": True},
             {"text": "12", "thoughtSignature": "S"},
         ]
+
+
+class TestAgainstMockServer:
+    """对着按真实协议还原的 mock 跑完整工具循环：签名丢失、tools 格式、
+    functionResponse 形态任何一处出错，mock 都会像真实 API 一样 400。"""
+
+    TOOLS = [WEATHER]
+
+    @staticmethod
+    def _port():
+        import socket
+
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            return s.getsockname()[1]
+
+    async def _loop(self, mode):
+        from flexllm.mock import MockLLMServer, MockServerConfig
+
+        cfg = MockServerConfig(port=self._port(), delay_min=0, delay_max=0, thinking=True)
+        with MockLLMServer(cfg) as server:
+            client = GeminiClient(base_url=server.gemini_url, api_key="k", model="mock-model")
+            msgs = [{"role": "user", "content": "东京天气？"}]
+            results = []
+            for _ in range(2):
+                if mode == "stream":
+                    async for event in client.complete_stream(
+                        msgs, tools=self.TOOLS, thinking=True
+                    ):
+                        pass
+                    result = event["result"]
+                else:
+                    result = await client.complete(msgs, tools=self.TOOLS, thinking=True)
+                results.append(result)
+                if not result.tool_calls:
+                    break
+                if mode == "openai_history":
+                    msgs.append(
+                        {
+                            "role": "assistant",
+                            "content": result.content,
+                            "tool_calls": [
+                                {"id": c.id, "type": c.type, "function": c.function}
+                                for c in result.tool_calls
+                            ],
+                        }
+                    )
+                else:
+                    msgs.append(result.assistant_message)
+                for call in result.tool_calls:
+                    msgs.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call.id,
+                            "content": [
+                                {"type": "text", "text": "晴"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+                                },
+                            ],
+                        }
+                    )
+            await client.aclose()
+        return results
+
+    @pytest.mark.parametrize("mode", ["complete", "stream", "openai_history"])
+    async def test_tool_loop_completes(self, mode):
+        first, second = await self._loop(mode)
+        assert first.finish_reason == "tool_calls"
+        assert first.tool_calls[0].function["name"] == "get_weather"
+        assert first.usage["completion_tokens_details"]["reasoning_tokens"] > 0
+        assert second.finish_reason == "stop"
+        assert second.content

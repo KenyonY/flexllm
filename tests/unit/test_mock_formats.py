@@ -715,7 +715,8 @@ class TestGeminiFunctionCall:
                                         "functionCall": {
                                             "name": "get_weather",
                                             "args": {"location": "北京"},
-                                        }
+                                        },
+                                        "thoughtSignature": MockLLMServer.GEMINI_SIGNATURE,
                                     }
                                 ],
                             },
@@ -767,6 +768,129 @@ class TestGeminiFunctionCall:
                     assert func_call is not None
                     assert func_call["name"] == "get_weather"
                     assert "location" in func_call["args"]
+
+
+class TestGeminiProtocolFidelity:
+    """mock 必须像真实 Gemini 3 一样拒绝非法请求，客户端的协议 bug 才能在测试里暴露"""
+
+    CALL = {"functionCall": {"name": "get_weather", "args": {"location": "北京"}}}
+    RESULT = {"functionResponse": {"name": "get_weather", "response": {"result": "晴"}}}
+
+    async def _post(self, body, stream=False):
+        port = _port()
+        action = "streamGenerateContent?key=t&alt=sse" if stream else "generateContent?key=t"
+        with MockLLMServer(MockServerConfig(port=port, delay_min=0, delay_max=0)) as server:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{server.gemini_url}/models/mock-model:{action}", json=body
+                ) as resp:
+                    if stream and resp.status == 200:
+                        text = await resp.text()
+                        return 200, [
+                            json.loads(line[6:])
+                            for line in text.splitlines()
+                            if line.startswith("data: ")
+                        ]
+                    return resp.status, await resp.json()
+
+    def _turn(self, call_part, result_part=None):
+        return {
+            "contents": [
+                {"role": "user", "parts": [{"text": "天气"}]},
+                {"role": "model", "parts": [call_part]},
+                {"role": "user", "parts": [result_part or self.RESULT]},
+            ]
+        }
+
+    async def test_function_call_carries_id_and_signature(self):
+        status, data = await self._post(
+            {
+                "contents": [{"role": "user", "parts": [{"text": "天气"}]}],
+                "tools": SAMPLE_TOOLS_GEMINI,
+            }
+        )
+        part = data["candidates"][0]["content"]["parts"][0]
+        assert status == 200
+        assert part["functionCall"]["id"]
+        assert part["thoughtSignature"] == MockLLMServer.GEMINI_SIGNATURE
+
+    async def test_unsigned_function_call_in_current_turn_is_rejected(self):
+        status, data = await self._post(self._turn(self.CALL))
+        assert status == 400
+        assert "thought_signature" in data["error"]["message"]
+
+    async def test_unsigned_call_in_earlier_turn_is_accepted(self):
+        body = self._turn(self.CALL)
+        body["contents"] += [
+            {"role": "model", "parts": [{"text": "晴"}]},
+            {"role": "user", "parts": [{"text": "谢谢"}]},
+        ]
+        status, _ = await self._post(body)
+        assert status == 200
+
+    async def test_invalid_signature_is_rejected(self):
+        status, data = await self._post(self._turn({**self.CALL, "thoughtSignature": "bogus!"}))
+        assert status == 400
+        assert "Base64 decoding failed" in data["error"]["message"]
+
+    async def test_non_object_function_response_is_rejected(self):
+        signed = {**self.CALL, "thoughtSignature": MockLLMServer.GEMINI_SIGNATURE}
+        bad = {"functionResponse": {"name": "get_weather", "response": "晴"}}
+        status, data = await self._post(self._turn(signed, bad))
+        assert status == 400
+        assert "function_response.response" in data["error"]["message"]
+
+    async def test_openai_format_tools_are_rejected(self):
+        tools = [{"type": "function", "function": {"name": "f", "parameters": {"type": "object"}}}]
+        status, data = await self._post(
+            {"contents": [{"role": "user", "parts": [{"text": "hi"}]}], "tools": tools}
+        )
+        assert status == 400
+        assert 'Unknown name "type"' in data["error"]["message"]
+
+    async def test_additional_properties_in_parameters_is_rejected(self):
+        decl = {
+            "name": "f",
+            "parameters": {"type": "object", "additionalProperties": False},
+        }
+        status, _ = await self._post(
+            {
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "tools": [{"functionDeclarations": [decl]}],
+            }
+        )
+        assert status == 400
+        decl["parametersJsonSchema"] = decl.pop("parameters")
+        status, _ = await self._post(
+            {
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "tools": [{"functionDeclarations": [decl]}],
+            }
+        )
+        assert status == 200
+
+    async def test_thought_tokens_are_reported_separately(self):
+        status, data = await self._post(
+            {
+                "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+                "generationConfig": {"thinkingConfig": {"includeThoughts": True}},
+            }
+        )
+        usage = data["usageMetadata"]
+        assert usage["thoughtsTokenCount"] > 0
+        assert usage["totalTokenCount"] == (
+            usage["promptTokenCount"] + usage["candidatesTokenCount"] + usage["thoughtsTokenCount"]
+        )
+
+    async def test_stream_ends_with_signed_empty_text_and_finish_reason(self):
+        status, chunks = await self._post(
+            {"contents": [{"role": "user", "parts": [{"text": "hi"}]}]}, stream=True
+        )
+        last = chunks[-1]["candidates"][0]
+        assert last["finishReason"] == "STOP"
+        assert last["content"]["parts"] == [
+            {"text": "", "thoughtSignature": MockLLMServer.GEMINI_SIGNATURE}
+        ]
 
 
 class TestToolCallHelpers:
