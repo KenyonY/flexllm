@@ -1578,6 +1578,8 @@ class LLMClientPool(CompletionMixin):
         """
         流式聊天完成（支持故障转移）
 
+        故障转移只发生在首个 chunk 之前；流已开始输出后失败会直接抛出异常。
+
         Args:
             messages: 消息列表
             model: 模型名称
@@ -1617,6 +1619,9 @@ class LLMClientPool(CompletionMixin):
                 break  # 健康的 endpoint 都已尝试过
 
             tried_providers.append(provider)
+            # 已经交给调用方的 chunk 收不回来：此后失败只能抛出，换 endpoint 从头再流
+            # 会让调用方收到重复/拼接错乱的输出。fallback 只在首个 chunk 之前发生。
+            yielded = False
 
             try:
                 async for chunk in client.chat_completions_stream(
@@ -1627,6 +1632,7 @@ class LLMClientPool(CompletionMixin):
                     timeout=timeout,
                     **kwargs,
                 ):
+                    yielded = True
                     yield chunk
                 self._router.mark_success(provider)
                 return
@@ -1636,7 +1642,7 @@ class LLMClientPool(CompletionMixin):
                 self._router.mark_failed(provider)
                 logger.warning(f"Endpoint {provider.base_url} 流式调用失败: {e}")
 
-                if not self._fallback:
+                if yielded or not self._fallback:
                     raise
             finally:
                 self._router.release(provider)

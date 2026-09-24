@@ -862,3 +862,47 @@ class TestCapacityAwareSelection:
 
         assert chunks == ["a", "b"]
         assert all(p.in_flight == 0 for p in pool._router._providers)
+
+    async def test_stream_falls_back_before_first_chunk(self):
+        """首个 chunk 之前失败：换 endpoint，调用方只看到一份完整输出"""
+        pool = self._make_pool(slow_limit=10, fast_limit=10)
+
+        calls = []
+
+        async def fail_first_call(**kwargs):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("connect refused")
+            yield "a"
+            yield "b"
+
+        pool._clients[0].chat_completions_stream = fail_first_call
+        pool._clients[1].chat_completions_stream = fail_first_call
+
+        chunks = [c async for c in pool.chat_completions_stream("hi")]
+
+        assert chunks == ["a", "b"]
+        assert len(calls) == 2
+        assert all(p.in_flight == 0 for p in pool._router._providers)
+
+    async def test_stream_does_not_fall_back_after_output_started(self):
+        """已输出部分内容后失败：必须抛出，不能换 endpoint 从头再流一遍"""
+        pool = self._make_pool(slow_limit=10, fast_limit=10)
+        calls = []
+
+        async def partial_then_fail(**kwargs):
+            calls.append(1)
+            yield "a"
+            raise RuntimeError("connection reset")
+
+        pool._clients[0].chat_completions_stream = partial_then_fail
+        pool._clients[1].chat_completions_stream = partial_then_fail
+
+        chunks = []
+        with pytest.raises(RuntimeError, match="connection reset"):
+            async for chunk in pool.chat_completions_stream("hi"):
+                chunks.append(chunk)
+
+        assert chunks == ["a"]
+        assert len(calls) == 1
+        assert all(p.in_flight == 0 for p in pool._router._providers)
