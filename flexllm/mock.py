@@ -1364,8 +1364,8 @@ class MockLLMServer:
 
     @staticmethod
     def _is_gemini_2(model: str) -> bool:
-        """URL 里的模型名是 Gemini 2.x：不签发 id/签名、不要求签名、不支持多模态
-        functionResponse。其余名字（含 mock-model）按 Gemini 3 行为处理。"""
+        """URL 里的模型名是 Gemini 2.x：functionCall 无 id、文本不带签名、不强制回传签名、
+        不支持多模态 functionResponse。其余名字（含 mock-model）按 Gemini 3 行为处理。"""
         match = re.search(r"gemini-(\d+)", model)
         return match is not None and int(match.group(1)) < 3
 
@@ -1580,11 +1580,11 @@ class MockLLMServer:
                 {"prompt_tokens": prompt_tokens, "completion_tokens": output_tokens},
             )
 
-            # 与 Gemini 3 一致：functionCall 带 id，第一个 functionCall part 带签名；2.x 都没有
+            # 第一个 functionCall part 带签名（2.x 也签发，只是不强制回传）；只有 Gemini 3 带 id
             func_call = {"name": tool_name, "args": tool_args}
             if not legacy:
                 func_call["id"] = f"call_{uuid.uuid4().hex[:8]}"
-            func_call_part = {"functionCall": func_call, **signature}
+            func_call_part = {"functionCall": func_call, "thoughtSignature": self.GEMINI_SIGNATURE}
 
             if is_stream:
                 resp = web.StreamResponse(

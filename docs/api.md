@@ -320,7 +320,8 @@ client = GeminiClient(
   同消息时模型看不见，实测）。
 - Gemini 3 的纯文本回答也带签名，所以 `assistant_message` 通常不为 `None`，不要拿它判断
   "有没有工具调用"，用 `tool_calls`。只有思考摘要、没有签名的回答（Gemini 2.x）不产出它。
-- 工具调用时 `finish_reason` 为 `"tool_calls"`（Gemini 原始值是 `STOP`）。
+- 工具调用时 `finish_reason` 为 `"tool_calls"`（Gemini 原始值是 `STOP`）。没有对应 OpenAI 值的
+  停止原因转小写透出，如模型生成了非法调用时为 `"malformed_function_call"`（此时没有 tool_calls）。
 - `usage.completion_tokens` 包含思考 token（`completion_tokens_details.reasoning_tokens`），
   Gemini 的 `candidatesTokenCount` 不含它，但它按输出计费。
 - 外部图片/音视频 URL 会自动下载转 base64（Gemini 不拉取外链），无需手动 `preprocess_msg=True`。
