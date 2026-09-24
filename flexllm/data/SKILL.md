@@ -44,14 +44,14 @@ async with LLMClient(model="gpt-4", base_url="...", api_key="...") as client:
     results = await client.chat_completions_batch(
         messages_list, output_jsonl="out.jsonl", track_cost=True,
     )
-    async for chunk in client.chat_completions_stream(messages): ...
+    async for event in client.complete_stream(messages): ...  # dict 事件，最后一条 type=result 带 ChatCompletionResult
 ```
 
 - **多 provider**：`provider="gemini"|"claude"`，或由 `base_url` 自动识别
 - **多 endpoint 负载均衡**：传 `endpoints=[{...}, {...}]` + `fallback=True`（`LLMClientPool`，`distribute=True` 可把 batch 分散到多 endpoint）
 - **响应缓存**：`cache=ResponseCacheConfig(enabled=True, ttl=3600)`（LMDB 后端，多进程安全，默认目录 `~/.flexllm/cache/response`）；图片缓存另开关 `cache_image=True`（目录 `~/.flexllm/cache/image_cache`）
 - **代理**：客户端级 `proxy="http://gateway:8080"`（也支持 socks5），LLM 请求与多模态图片/媒体 URL 下载都走它；不传则遵循环境变量
-- 核心方法：`chat_completions` / `chat_completions_sync` / `chat_completions_batch` / `chat_completions_stream`
+- 核心方法：`chat_completions` / `chat_completions_sync` / `chat_completions_batch` / `complete_stream`（流式：增量事件 + 结尾汇总结果）
 - **语音**：`transcribe` / `transcribe_batch` / `speech` / `speech_batch`（各有 `_sync` 版本），返回 `TranscriptionResult`，配 `segments_to_srt` / `segments_to_vtt` 生成字幕
 - 关键参数：`return_usage` / `thinking`（跨厂商统一：DeepSeek-R1/Qwen3/Claude/Gemini，取值 `True|False|"minimal"|"low"|"medium"|"high"`）/ `response_format` / `return_raw`
 - 其余 kwargs 原样透传给 API（如 `tools`）；响应中的 `tool_calls` 会解析进 `ChatCompletionResult.tool_calls`（注意：缓存不存储 tool_calls）

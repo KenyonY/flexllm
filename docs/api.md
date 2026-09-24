@@ -135,6 +135,38 @@ async def chat_completions_batch(
 唯一的行为差异：`chat_completions_or_raise` 失败时抛的是 `LLMHTTPError` 等子类而非
 `LLMRequestError` 基类，`except LLMRequestError` 照常捕获。
 
+#### complete_stream（推荐流式接口）
+
+```python
+async for event in client.complete_stream(messages, model=None, **kwargs):
+    ...
+```
+
+事件恒为 dict，不受任何开关影响（思考内容只走 `thinking` 事件，不会以 `<think>` 混进正文）：
+
+| type | 字段 | 说明 |
+|---|---|---|
+| `thinking` | `content` | 思考片段 |
+| `content` | `content` | 正文片段 |
+| `tool_call_delta` | `tool_calls` | 工具调用增量（OpenAI 形态，按 `index` 合并） |
+| `extra` | `extra` | 网关带外字段 |
+| `result` | `result` | **最后一条，成功时恰好一次**：`ChatCompletionResult`，与 `complete()` 同构 |
+
+`result` 里 `content` / `reasoning_content` / `tool_calls` 已累加好，`finish_reason` / `usage` /
+`assistant_message`（下一轮需原样回传的续接状态，如 Claude 带签名的 thinking block）也都在上面，
+调用方不需要自己拼。失败抛 typed error，与 `complete()` 相同。
+
+```python
+async for event in client.complete_stream(messages, tools=tools):
+    if event["type"] == "content":
+        print(event["content"], end="", flush=True)
+    elif event["type"] == "result":
+        result = event["result"]   # result.tool_calls / result.assistant_message ...
+```
+
+多 endpoint（pool）时，故障转移**只发生在首个事件之前**：流已开始输出后失败直接抛异常——
+已送出的内容收不回来，换 endpoint 从头再流只会产生重复输出。
+
 #### chat_completions_stream
 
 ```python
@@ -156,6 +188,8 @@ async def chat_completions_stream(
 | `assistant_message` | `message` | 工具回合结束时可原样放入下一轮的 provider 续接消息；仅在存在思考或工具状态时发送 |
 | `finish` | `reason` | 模型停止原因，OpenAI 语义：`stop` / `length`（被 max_tokens 截断）/ `tool_calls` / `content_filter` / …；provider 不给时为 `None`。**流末尾必发一次** |
 | `usage` | `usage` | token 用量，最后一条（provider 给了才有） |
+
+新代码用 `complete_stream()`：它事件形状固定，并在结尾给出汇总好的结果。
 
 流式的 `timeout` 是**空闲超时**（两个 chunk 之间的最长间隔），不限制整条流的总时长——
 长思考模型一轮可能持续数分钟，只要还在吐 token 就不算卡死。

@@ -33,7 +33,7 @@ from .batch_helpers import (
     resume_from_jsonl,
     validate_batch_params,
 )
-from .completion import CompletionMixin, warn_legacy_response
+from .completion import CompletionMixin, merge_tool_call_delta, warn_legacy_response
 from .message_images import omit_images
 
 if TYPE_CHECKING:
@@ -1653,26 +1653,7 @@ class LLMClientBase(CompletionMixin, ABC):
                                 if tool_call_deltas:
                                     if return_usage:
                                         for tc_delta in tool_call_deltas:
-                                            idx = tc_delta.get("index", 0)
-                                            current = _tool_calls.setdefault(
-                                                idx,
-                                                {
-                                                    "id": "",
-                                                    "type": "function",
-                                                    "function": {"name": "", "arguments": ""},
-                                                },
-                                            )
-                                            if tc_delta.get("id"):
-                                                current["id"] = tc_delta["id"]
-                                            if tc_delta.get("type"):
-                                                current["type"] = tc_delta["type"]
-                                            function = tc_delta.get("function", {})
-                                            if function.get("name"):
-                                                current["function"]["name"] = function["name"]
-                                            if "arguments" in function:
-                                                current["function"]["arguments"] += function[
-                                                    "arguments"
-                                                ]
+                                            merge_tool_call_delta(_tool_calls, tc_delta)
                                         yield {
                                             "type": "tool_call_delta",
                                             "tool_calls": tool_call_deltas,

@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import time
 import warnings
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -53,6 +54,27 @@ def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error
     )
 
 
+def merge_tool_call_delta(tool_calls: dict[int, dict], delta: dict) -> None:
+    """把一条 OpenAI 形态的流式 tool_call 增量按 index 合并进 tool_calls。
+
+    id/type/name 首次出现即定值，arguments 逐段拼接。provider 各自的流式实现都产出
+    这种形态（Gemini/Claude 已转换），所以累加只有这一份。
+    """
+    current = tool_calls.setdefault(
+        delta.get("index", 0),
+        {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+    )
+    if delta.get("id"):
+        current["id"] = delta["id"]
+    if delta.get("type"):
+        current["type"] = delta["type"]
+    function = delta.get("function", {})
+    if function.get("name"):
+        current["function"]["name"] = function["name"]
+    if "arguments" in function:
+        current["function"]["arguments"] += function["arguments"]
+
+
 class CompletionMixin:
     """New entry points always return structured results or raise typed errors."""
 
@@ -81,6 +103,70 @@ class CompletionMixin:
     def complete_sync(self, messages, model=None, **kwargs) -> "ChatCompletionResult":
         """Synchronous counterpart of complete()."""
         return asyncio.run(self.complete(messages, model=model, **kwargs))
+
+    async def complete_stream(self, messages, model=None, **kwargs):
+        """流式完成：边生成边产出增量事件，结尾给出与 complete() 同构的完整结果。
+
+        事件恒为 dict（不受任何开关影响，思考内容不会混进正文）：
+            {"type": "content", "content": str}
+            {"type": "thinking", "content": str}
+            {"type": "tool_call_delta", "tool_calls": [...]}  OpenAI 形态的原始增量
+            {"type": "extra", "extra": dict}                  网关带外字段
+            {"type": "result", "result": ChatCompletionResult} 最后一条，成功时恰好一次
+
+        result 里 content/reasoning_content/tool_calls 已累加好，finish_reason/usage/
+        assistant_message（下一轮需原样回传的续接状态）也都在上面，调用方无需自己拼。
+        失败抛 typed error，与 complete() 相同；多 endpoint 时只在首个事件前故障转移。
+        """
+        from .base import ChatCompletionResult, ToolCall
+
+        self._validate_completion_options(kwargs)
+        content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        tool_calls: dict[int, dict] = {}
+        extra: dict = {}
+        assistant_message = finish_reason = usage = None
+        start = time.perf_counter()
+
+        async for event in self.chat_completions_stream(
+            messages, model=model, return_usage=True, **kwargs
+        ):
+            kind = event["type"]
+            # 汇总类事件只进 result，不单独产出
+            if kind == "assistant_message":
+                assistant_message = event["message"]
+                continue
+            if kind == "finish":
+                finish_reason = event["reason"]
+                continue
+            if kind == "usage":
+                usage = event["usage"]
+                continue
+
+            if kind == "content":
+                content_parts.append(event["content"])
+            elif kind == "thinking":
+                thinking_parts.append(event["content"])
+            elif kind == "tool_call_delta":
+                for delta in event["tool_calls"]:
+                    merge_tool_call_delta(tool_calls, delta)
+            elif kind == "extra":
+                extra.update(event["extra"])
+            yield event
+
+        yield {
+            "type": "result",
+            "result": ChatCompletionResult(
+                content="".join(content_parts) or None,
+                usage=usage,
+                reasoning_content="".join(thinking_parts) or None,
+                tool_calls=[ToolCall(**tc) for _, tc in sorted(tool_calls.items())] or None,
+                finish_reason=finish_reason,
+                extra=extra or None,
+                assistant_message=assistant_message,
+                latency=time.perf_counter() - start,
+            ),
+        }
 
     async def complete_batch(self, messages_list, model=None, **kwargs) -> "BatchResult":
         """批量完成：等长同构的 BatchResult，单条失败不抛异常。

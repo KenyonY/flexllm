@@ -192,9 +192,10 @@ results = await client.complete_batch(
     track_cost=True,
 )
 
-# Streaming with failover
-async for chunk in client.chat_completions_stream(messages):
-    print(chunk, end="", flush=True)
+# Streaming with failover (only before the first event; a started stream never restarts)
+async for event in client.complete_stream(messages):
+    if event["type"] == "content":
+        print(event["content"], end="", flush=True)
 ```
 
 **Highlights:**
@@ -243,9 +244,12 @@ results = await client.complete_batch(
 ### Streaming
 
 ```python
-# Token-by-token streaming
-async for chunk in client.chat_completions_stream(messages):
-    print(chunk, end="", flush=True)
+# Token-by-token streaming: dict events, then one final "result"
+async for event in client.complete_stream(messages):
+    if event["type"] == "content":
+        print(event["content"], end="", flush=True)
+    elif event["type"] == "result":
+        result = event["result"]  # ChatCompletionResult, same shape as complete()
 
 # Batch streaming - process results as they complete
 async for result in client.iter_chat_completions_batch(messages_list):
@@ -547,7 +551,7 @@ LLMClient(
 | `complete_batch(messages_list)`              | Batch async with checkpoint → `BatchResult`     |
 | `complete_batch_sync(messages_list)`         | Batch sync                                      |
 | `iter_chat_completions_batch(messages_list)` | Streaming batch results                         |
-| `chat_completions_stream(messages)`          | Token-by-token streaming                        |
+| `complete_stream(messages)`                  | Streaming events + final `ChatCompletionResult` |
 
 `chat_completions*` 是上一代接口，形状不变但已弃用（0.18.0 移除）。
 

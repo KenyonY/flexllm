@@ -309,7 +309,7 @@ pool = LLMClientPool(
 
 - **批量调用**（`distribute=True`）：worker 模型——每个 endpoint 的 worker 数等于其并发上限，所有 worker 从共享队列抢任务，快 endpoint 周转快自然多拿任务。这条路径不经过上面的选路器，work-stealing 本身已经按实际速度分配吞吐。
 
-- **流式调用**（`chat_completions_stream`）：容量感知选路，但不采集延迟样本——流的总耗时受调用方消费 chunk 的速度影响，不能代表 endpoint 的服务能力。
+- **流式调用**（`complete_stream` / `chat_completions_stream`）：容量感知选路，但不采集延迟样本——流的总耗时受调用方消费 chunk 的速度影响，不能代表 endpoint 的服务能力。故障转移只发生在首个 chunk 之前，流已开始输出后失败直接抛异常（已送出的内容收不回来）。
 
 延迟感知的行为细节：
 
@@ -367,8 +367,9 @@ from flexllm import LLMClient
 
 async with LLMClient.from_config(model="qwen-pool") as client:
     response = await client.complete("你好")
-    async for chunk in client.chat_completions_stream("你好"):
-        print(chunk, end="", flush=True)
+    async for event in client.complete_stream("你好"):
+        if event["type"] == "content":
+            print(event["content"], end="", flush=True)
 ```
 
 - `endpoints` 必须是非空列表，每个条目必须有 `base_url`；模型顶层的 `base_url`

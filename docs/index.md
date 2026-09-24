@@ -41,7 +41,7 @@ LLMClient (统一入口，LLMClientPool 的别名)
 | 单条同步 | `complete_sync()` | 同上 |
 | 批量异步 | `complete_batch()` | `BatchResult`，失败项带 `.error`，不抛异常 |
 | 批量同步 | `complete_batch_sync()` | 同上 |
-| 流式输出 | `chat_completions_stream()` | 逐 token 迭代 |
+| 流式输出 | `complete_stream()` | 增量事件 dict，结尾一条 `result`（`ChatCompletionResult`） |
 
 `chat_completions*` 是上一代接口，返回形状不变但已弃用，0.18.0 移除。
 
