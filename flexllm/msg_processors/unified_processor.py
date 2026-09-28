@@ -1143,8 +1143,8 @@ async def process_content_recursive(
             if video_fps and isinstance(item, dict) and item.get("type") == "video_url":
                 url = item.get("video_url", {}).get("url", "")
                 local = _local_media_path(url) if url else None
-                # 本地文件不存在时不切帧，交给下面的默认处理按 missing_local_media 降级
-                if url and (local is None or os.path.isfile(local)):
+                # 本地文件不可读时不切帧，交给下面的默认处理按 missing_local_media 降级
+                if url and (local is None or (os.path.isfile(local) and os.access(local, os.R_OK))):
                     try:
                         frame_parts = await _extract_video_frames(url, session, processor, **kwargs)
                         if frame_parts:
