@@ -399,7 +399,19 @@ class TestOpenAIClientAudioConversion:
 
 
 PH = "placeholder"
-TEST_IMAGE = os.path.join(os.path.dirname(__file__), "..", "e2e", "media_test", "test_image.png")
+
+
+@pytest.fixture(scope="module")
+def test_image(tmp_path_factory) -> str:
+    """现场生成的真实 PNG（单测不能依赖 tests/e2e 下被 gitignore 的生成素材）"""
+    import cv2
+    import numpy as np
+
+    path = tmp_path_factory.mktemp("media") / "test_image.png"
+    img = np.zeros((32, 48, 3), np.uint8)
+    img[:, :24] = (255, 0, 0)
+    assert cv2.imwrite(str(path), img)
+    return str(path)
 
 
 def _missing_media_messages(missing) -> list[dict]:
@@ -493,9 +505,9 @@ class TestLocalMediaUnavailable:
         assert content == [{"type": "text", "text": f"[video unavailable: {path}: {ENOENT}]"}]
 
     @pytest.mark.parametrize("extra", [{"video_fps": 1.0}, {"target_sample_rate": 16000}])
-    async def test_good_image_encodes_with_video_or_audio_kwargs(self, extra):
+    async def test_good_image_encodes_with_video_or_audio_kwargs(self, extra, test_image):
         """回归：视频/音频参数不能传进图片处理器（曾因 TypeError 让好图片编码失败）"""
-        content = [{"type": "image_url", "image_url": {"url": TEST_IMAGE}}]
+        content = [{"type": "image_url", "image_url": {"url": test_image}}]
         await process_content_recursive(content, missing_local_media=PH, **extra)
         assert content[0]["image_url"]["url"].startswith("data:image/")
 
@@ -583,9 +595,9 @@ class TestFileUriDecoding:
         await process_content_recursive(content, missing_local_media="placeholder", video_fps=1.0)
         assert content == [{"type": "text", "text": f"[video unavailable: {missing}: {ENOENT}]"}]
 
-    async def test_encoded_image_and_input_audio(self, tmp_path):
+    async def test_encoded_image_and_input_audio(self, tmp_path, test_image):
         img = tmp_path / "图 片 .png"
-        img.write_bytes(open(TEST_IMAGE, "rb").read())
+        img.write_bytes(open(test_image, "rb").read())
         wav = tmp_path / "声 音.wav"
         wav.write_bytes(b"fake wav")
         parts = [
@@ -601,12 +613,12 @@ class TestSkipUnsupportedParts:
     """模型不接收的块在预处理阶段就跳过：不读文件、不编码，发送前再替换为占位"""
 
     @pytest.fixture
-    def files(self, tmp_path):
+    def files(self, tmp_path, test_image):
         paths = {}
         for name in ("v.mp4", "a.wav"):
             paths[name] = tmp_path / name
             paths[name].write_bytes(b"fake")
-        paths["i.png"] = TEST_IMAGE
+        paths["i.png"] = test_image
         return paths
 
     def _messages(self, files):
