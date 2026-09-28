@@ -57,8 +57,10 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         >>> print("答案:", parsed["answer"])
 
     thinking 参数值:
-        - False: 禁用思考（Ollama: think=False, vLLM/Qwen3: /no_think）
-        - True: 启用思考（Ollama: think=True）
+        - False: 禁用思考（官方 OpenAI: reasoning_effort="none"；vLLM: enable_thinking=False）
+        - True: 启用思考（vLLM: enable_thinking=True）
+        - str: 推理强度，作为 reasoning_effort 发送，可用档位由模型与部署决定
+        - dict: 透传 provider 原生 thinking 配置（如 DeepSeek / GLM）
         - None: 使用模型默认行为
     """
 
@@ -149,7 +151,7 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         model: str,
         stream: bool = False,
         max_tokens: int = None,
-        thinking: bool | dict | None = None,
+        thinking: bool | str | dict | None = None,
         **kwargs,
     ) -> dict:
         """
@@ -157,15 +159,18 @@ class OpenAIClient(AudioMixin, LLMClientBase):
 
         Args:
             thinking: 统一的思考控制参数
-                - False: 禁用思考（Ollama: think=False, vLLM: enable_thinking=False）
+                - False: 禁用思考（官方 OpenAI: reasoning_effort="none"；
+                  其他端点: think=False, vLLM enable_thinking=False）
                 - True: 启用思考（Ollama: think=True, vLLM: enable_thinking=True）
+                - str: 推理强度，原样作为 reasoning_effort 发送（如 "low"/"medium"/"xhigh"），
+                  可用档位由模型与部署决定，不支持时后端会报错
                 - dict: 透传 provider 原生 thinking 配置（如 DeepSeek / GLM）
                 - None: 使用模型默认行为
 
         Note:
             think / chat_template_kwargs 是 Ollama / vLLM 的非标准扩展字段，
             官方 OpenAI 端点（api.openai.com）严格校验请求体会返回 400，
-            因此对官方端点不注入这两个字段；其他端点维持现状。
+            因此对官方端点不注入这两个字段。
         """
         # Chat Completions 的 tool 消息只收文本：图片挪到整串 tool 消息之后的 user 消息。
         # 先挪再降级，vision=False 时 tool content 同样是字符串
@@ -183,6 +188,13 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         is_official_openai = bool(self._base_url) and "api.openai.com" in self._base_url
         if isinstance(thinking, dict):
             body["thinking"] = thinking
+        elif isinstance(thinking, str):
+            # 强度档位走标准字段 reasoning_effort（OpenAI / vLLM / Ollama 均认）。
+            # 各模型、各部署可用的档位不同，取值交给后端校验，不在这里维护型号表
+            body["reasoning_effort"] = thinking
+        elif thinking is False and is_official_openai:
+            # 官方端点只认 reasoning_effort；关不掉推理的型号会 400，而不是静默照常推理计费
+            body["reasoning_effort"] = "none"
         elif thinking is not None and not is_official_openai:
             body["think"] = thinking  # Ollama
             body["chat_template_kwargs"] = {"enable_thinking": thinking}  # vLLM

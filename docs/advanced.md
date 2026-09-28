@@ -680,6 +680,11 @@ print("思考过程:", parsed["thought"])
 print("最终答案:", parsed["answer"])
 ```
 
+统一的 `thinking` 在 OpenAI 兼容协议上的翻译：强度字符串（`"low"`/`"xhigh"` 等）原样作为
+`reasoning_effort` 发送；`thinking=False` 在官方 OpenAI 端点发 `reasoning_effort="none"`，
+其他端点发 `chat_template_kwargs.enable_thinking=False`。flexllm 不维护"型号 → 可用档位"表：
+同一模型在不同部署下可用档位都可能不同，交给后端校验，不支持时明确报错而不是静默降档。
+
 ### Claude
 
 ```python

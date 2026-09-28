@@ -219,8 +219,11 @@ client = OpenAIClient(
 
 **额外参数：**
 - `thinking`: 思考模式控制
-  - `False`: 禁用思考
+  - `False`: 禁用思考（官方 OpenAI 端点发 `reasoning_effort="none"`，关不掉推理的型号会 400；
+    vLLM 发 `chat_template_kwargs.enable_thinking=False`）
   - `True`: 启用思考
+  - `str`: 推理强度，原样作为 `reasoning_effort` 发送。可用档位由模型与部署决定
+    （如 vLLM 上的 Qwen3.8 只收 `low`/`medium`/`xhigh`），不支持时后端报错并列出可选值
   - `dict`: 透传 provider 原生 `thinking` 配置
   - `None`: 使用模型默认行为
 

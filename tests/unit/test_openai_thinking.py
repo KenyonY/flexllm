@@ -90,3 +90,31 @@ def test_stream_continuation_uses_deepseek_reasoning_content_field():
         "deepseek-v4",
     )
     assert body["messages"][0]["reasoning_content"] == "reasoning"
+
+
+@pytest.mark.parametrize("base_url", ["http://localhost:8000/v1", "https://api.openai.com/v1"])
+def test_effort_string_becomes_reasoning_effort(base_url):
+    """强度档位走标准字段，不再塞进布尔开关 enable_thinking；取值交给后端校验"""
+    client = OpenAIClient(base_url=base_url, api_key="k")
+    body = client._build_request_body([{"role": "user", "content": "Hi"}], "m", thinking="xhigh")
+    assert body["reasoning_effort"] == "xhigh"
+    assert "think" not in body
+    assert "chat_template_kwargs" not in body
+
+
+def test_official_openai_disables_reasoning_with_none():
+    """官方端点只认 reasoning_effort；关不掉的型号由 API 报错，而不是静默照常推理"""
+    client = OpenAIClient(base_url="https://api.openai.com/v1", api_key="k")
+    body = client._build_request_body(
+        [{"role": "user", "content": "Hi"}], "gpt-5.5", thinking=False
+    )
+    assert body["reasoning_effort"] == "none"
+    assert "think" not in body and "chat_template_kwargs" not in body
+
+
+def test_explicit_reasoning_effort_kwarg_wins():
+    client = OpenAIClient(base_url="https://api.openai.com/v1", api_key="k")
+    body = client._build_request_body(
+        [{"role": "user", "content": "Hi"}], "gpt-5.5", thinking=False, reasoning_effort="low"
+    )
+    assert body["reasoning_effort"] == "low"
