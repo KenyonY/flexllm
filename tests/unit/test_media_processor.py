@@ -667,3 +667,21 @@ def _claude_client(**kw):
     from flexllm import ClaudeClient
 
     return ClaudeClient(api_key="k", model="claude-sonnet-5", **kw)
+
+
+@pytest.mark.parametrize(
+    "t,kind", [("video_url", "video"), ("image_url", "image"), ("input_audio", "audio")]
+)
+async def test_skipped_missing_file_keeps_unavailable_placeholder(tmp_path, t, kind):
+    """跳过编码不能丢掉"文件缺失"的信息：placeholder 模式占位仍写明路径与原因"""
+    missing = str(tmp_path / "gone")
+    key = "data" if t == "input_audio" else "url"
+    content = {"type": t, t: {key: missing}}
+    await process_content_recursive(
+        content, missing_local_media="placeholder", skip_part_types=frozenset({t})
+    )
+    assert content == {"type": "text", "text": f"[{kind} unavailable: {missing}: {ENOENT}]"}
+    # passthrough 下原样保留，由发送前的 omit 统一替换
+    content = {"type": t, t: {key: missing}}
+    await process_content_recursive(content, skip_part_types=frozenset({t}))
+    assert content == {"type": t, t: {key: missing}}

@@ -843,6 +843,37 @@ def _local_media_failed(part: dict, kind: str, path: str, error: Exception, mode
     part.update({"type": "text", "text": text})
 
 
+_SKIPPED_PART_KIND = {
+    "image_url": "image",
+    "video_url": "video",
+    "audio_url": "audio",
+    "input_audio": "audio",
+}
+
+
+def _mark_unreadable_skipped(part: dict, item_type: str) -> None:
+    """被跳过的块在 placeholder 模式下仍检查本地文件是否可读（只 open 不读内容）。
+
+    保持"文件缺失时占位写明路径与原因"的行为，不因跳过编码而丢失这条信息。
+    """
+    kind = _SKIPPED_PART_KIND.get(item_type)
+    if kind is None:
+        return
+    body = part.get(item_type) or {}
+    source = body.get("data" if item_type == "input_audio" else "url", "")
+    if not isinstance(source, str) or not source or source.startswith("data:"):
+        return
+    if item_type == "input_audio" and not _is_source_needs_conversion(source):
+        return
+    local = _local_media_path(source)
+    if local is None:
+        return
+    try:
+        _check_readable(local)
+    except OSError as e:
+        _local_media_failed(part, kind, local, e, "placeholder")
+
+
 async def _get_raw_bytes(source: str, session: aiohttp.ClientSession | None = None) -> bytes:
     """从文件路径、URL 或 data URI 获取原始字节"""
     if source.startswith("data:"):
@@ -1029,6 +1060,8 @@ async def process_content_recursive(
         item_type = content.get("type")
 
         if item_type in skip_part_types:
+            if missing_local_media == "placeholder":
+                _mark_unreadable_skipped(content, item_type)
             return
 
         if item_type == "image_url":
