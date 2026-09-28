@@ -35,7 +35,7 @@ result = await client.complete(processed)
 | `audio_url` | `audio_url.url` | 原始字节 base64 | `data:audio/...;base64,...` |
 | `input_audio` | `input_audio.data` | 原始字节 base64 | 纯 base64（无 data: 前缀，OpenAI 格式） |
 
-**支持的来源：** 本地路径、`file://` URI、HTTP/HTTPS URL、`data:` URI（直接透传）。
+**支持的来源：** 本地路径、`file://` URI、HTTP/HTTPS URL、`data:` URI（直接透传）。`file://` 按标准做百分号解码，`Path.as_uri()` 生成的带空格/中文路径可直接使用。
 
 **本地文件读取失败**：由客户端参数 `missing_local_media`（或配置项）决定，HTTP(S) URL 失败时始终保留原 URL：
 - `"passthrough"`（默认）：原样发送路径，交给后端读取——后端可能读得到（如 vLLM 开了

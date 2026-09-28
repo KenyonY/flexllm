@@ -541,3 +541,57 @@ class TestLocalMediaUnavailable:
         assert FlexLLMConfig(path).get_model_params("m") == {"temperature": 0.1}
         client = LLMClient.from_config(str(path))
         assert client.client._missing_local_media == PH
+
+
+class TestFileUriDecoding:
+    """file:// 按标准百分号解码：Path.as_uri() 生成的带空格/中文路径要能读到"""
+
+    @pytest.fixture
+    def media(self, tmp_path):
+        d = tmp_path / "目录 a"
+        d.mkdir()
+        f = d / "视频 1.mp4"
+        f.write_bytes(b"fake video")
+        return f
+
+    def test_round_trips_path_as_uri(self, media):
+        from flexllm.msg_processors.image_processor import file_uri_to_path
+
+        assert media.as_uri() != f"file://{media}"  # 确实被编码过
+        assert file_uri_to_path(media.as_uri()) == str(media)
+        assert file_uri_to_path(f"file://localhost{media}") == str(media)
+
+    def test_legacy_forms_still_work(self, tmp_path, monkeypatch):
+        """直接拼原始路径的旧写法：原样空格、相对路径、文件名本身含 %xx"""
+        from flexllm.msg_processors.image_processor import file_uri_to_path
+
+        literal = tmp_path / "50%41off.png"
+        literal.write_bytes(b"x")
+        assert file_uri_to_path(f"file://{literal}") == str(literal)
+        assert file_uri_to_path("file:///tmp/a b.png") == "/tmp/a b.png"
+        monkeypatch.chdir(tmp_path)
+        assert file_uri_to_path("file://imgs/a.png") == "imgs/a.png"
+
+    async def test_encoded_uri_is_read(self, media):
+        content = {"type": "video_url", "video_url": {"url": media.as_uri()}}
+        await process_content_recursive(content, missing_local_media="placeholder")
+        assert content["video_url"]["url"].startswith("data:video/mp4;base64,")
+
+    async def test_encoded_uri_frames_and_placeholder_use_decoded_path(self, media):
+        missing = media.with_name("没有 了.mp4")
+        content = [{"type": "video_url", "video_url": {"url": missing.as_uri()}}]
+        await process_content_recursive(content, missing_local_media="placeholder", video_fps=1.0)
+        assert content == [{"type": "text", "text": f"[video unavailable: {missing}: {ENOENT}]"}]
+
+    async def test_encoded_image_and_input_audio(self, tmp_path):
+        img = tmp_path / "图 片 .png"
+        img.write_bytes(open(TEST_IMAGE, "rb").read())
+        wav = tmp_path / "声 音.wav"
+        wav.write_bytes(b"fake wav")
+        parts = [
+            {"type": "image_url", "image_url": {"url": img.as_uri()}},
+            {"type": "input_audio", "input_audio": {"data": wav.as_uri(), "format": "wav"}},
+        ]
+        await process_content_recursive(parts, missing_local_media="placeholder")
+        assert parts[0]["image_url"]["url"].startswith("data:image/")
+        assert base64.b64decode(parts[1]["input_audio"]["data"]) == b"fake wav"

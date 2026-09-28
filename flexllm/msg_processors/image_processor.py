@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from io import BytesIO
 from mimetypes import guess_type
 from pathlib import Path
+from urllib.request import url2pathname
 
 import aiohttp
 import numpy as np
@@ -97,6 +98,22 @@ async def encode_base64_from_url(url, session: aiohttp.ClientSession, return_wit
         return base64_data
 
 
+def file_uri_to_path(uri: str) -> str:
+    """file:// URI → 本地路径，按标准做百分号解码（与 Path.as_uri() 互逆）。
+
+    只去掉 scheme 与可选的 localhost 主机，不走 urlparse：历史上有调用方直接拼
+    "file://相对路径"，urlparse 会把第一段当成主机名。解码后的路径不存在、而未解码的
+    原始路径存在时用原始路径——兼容直接拼接、文件名里恰好含 "%xx" 的旧写法。
+    """
+    raw = uri[len("file://") :]
+    if raw.startswith("localhost/"):
+        raw = raw[len("localhost") :]
+    path = url2pathname(raw)
+    if path != raw and not os.path.exists(path) and os.path.exists(raw):
+        return raw
+    return path
+
+
 async def encode_media_to_base64(source, session=None, return_with_mime=True) -> str:
     """通用媒体文件 base64 编码，直接读取原始字节，不经过 PIL/OpenCV。
 
@@ -119,7 +136,9 @@ async def encode_media_to_base64(source, session=None, return_with_mime=True) ->
         return source
 
     if isinstance(source, str) and source.startswith("file://"):
-        return await asyncio.to_thread(encode_base64_from_local_path, source[7:], return_with_mime)
+        return await asyncio.to_thread(
+            encode_base64_from_local_path, file_uri_to_path(source), return_with_mime
+        )
 
     if isinstance(source, str) and os.path.exists(source):
         return await asyncio.to_thread(encode_base64_from_local_path, source, return_with_mime)
@@ -177,7 +196,7 @@ async def encode_to_base64(
 
     if isinstance(file_source, str):
         if file_source.startswith("file://"):
-            file_path = file_source[7:]
+            file_path = file_uri_to_path(file_source)
             if not os.path.exists(file_path):
                 raise ValueError("Local file not found.")
             mime_type, _ = guess_type(file_path)
@@ -404,7 +423,7 @@ async def get_pil_image(
     if isinstance(image_source, str):
         # 处理本地文件路径
         if image_source.startswith("file://"):
-            file_path = image_source[7:]
+            file_path = file_uri_to_path(image_source)
             if not os.path.exists(file_path):
                 raise ValueError(f"本地文件不存在: {file_path}")
             image = Image.open(file_path)
@@ -538,7 +557,7 @@ def get_pil_image_sync(
     if isinstance(image_source, str):
         # 处理本地文件路径
         if image_source.startswith("file://"):
-            file_path = image_source[7:]
+            file_path = file_uri_to_path(image_source)
             if not os.path.exists(file_path):
                 raise ValueError(f"本地文件不存在: {file_path}")
             image = Image.open(file_path)

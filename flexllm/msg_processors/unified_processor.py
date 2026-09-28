@@ -36,7 +36,7 @@ except ImportError:
 
 from ..async_api.core import create_proxied_session, session_proxy_kwargs
 from .audio_processor import extract_audio_kwargs, preprocess_audio
-from .image_processor import DEFAULT_CACHE_DIR, ImageCacheConfig
+from .image_processor import DEFAULT_CACHE_DIR, ImageCacheConfig, file_uri_to_path
 
 try:
     from tqdm.asyncio import tqdm
@@ -521,7 +521,7 @@ class UnifiedImageProcessor:
             try:
                 # 判断是本地文件还是URL
                 if os.path.exists(source) or source.startswith("file://"):
-                    file_path = source[7:] if source.startswith("file://") else source
+                    file_path = file_uri_to_path(source) if source.startswith("file://") else source
 
                     # 在线程池中处理本地文件
                     executor = self._get_executor()
@@ -801,7 +801,7 @@ def _is_source_needs_conversion(value: str) -> bool:
 def _local_media_path(source: str) -> str | None:
     """本地来源（普通路径含相对路径、file:// URI）返回文件路径；URL、data: URI 返回 None。"""
     if source.startswith("file://"):
-        return source[7:]
+        return file_uri_to_path(source)
     if source.startswith("data:") or "://" in source:
         return None
     # 排除误放进来的 raw base64 数据
@@ -850,7 +850,7 @@ async def _get_raw_bytes(source: str, session: aiohttp.ClientSession | None = No
             return base64.b64decode(source.split(";base64,", 1)[1])
         raise ValueError("不支持的 data URI 格式")
 
-    path = source[7:] if source.startswith("file://") else source
+    path = file_uri_to_path(source) if source.startswith("file://") else source
     if os.path.exists(path):
         return await asyncio.to_thread(Path(path).read_bytes)
 
@@ -937,7 +937,7 @@ async def _extract_video_frames(
 
     try:
         if source.startswith("file://"):
-            video_path = source[7:]
+            video_path = file_uri_to_path(source)
         elif source.startswith("data:"):
             if ";base64," in source:
                 video_bytes = base64.b64decode(source.split(";base64,", 1)[1])
