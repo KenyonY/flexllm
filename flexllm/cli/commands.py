@@ -29,6 +29,12 @@ SKILL_TARGETS = {
 }
 
 
+THINKING_HELP = (
+    "思考模式 (true/false、minimal/low/medium/high/xhigh/max 或 budget_tokens 数值；"
+    "OpenAI 兼容端把档位作为 reasoning_effort 发送，可用档位由模型与部署决定)"
+)
+
+
 def get_skill_target_dir(target: str) -> tuple[Path, str]:
     """Return the user-level skill directory and display name for an agent."""
     try:
@@ -86,8 +92,7 @@ def register_commands(app):
             str | None,
             Option(
                 "--thinking",
-                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
-                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
+                help=THINKING_HELP,
             ),
         ] = None,
         schema: Annotated[
@@ -315,8 +320,7 @@ def register_commands(app):
             str | None,
             Option(
                 "--thinking",
-                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
-                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
+                help=THINKING_HELP,
             ),
         ] = None,
         schema: Annotated[
@@ -494,8 +498,7 @@ def register_commands(app):
             str | None,
             Option(
                 "--thinking",
-                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
-                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
+                help=THINKING_HELP,
             ),
         ] = None,
         title: Annotated[str, Option("--title", help="页面 Logo 文本")] = "flexllm",
@@ -627,8 +630,7 @@ def register_commands(app):
             str | None,
             Option(
                 "--thinking",
-                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
-                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
+                help=THINKING_HELP,
             ),
         ] = None,
         concurrency: Annotated[
@@ -809,8 +811,7 @@ def register_commands(app):
             str | None,
             Option(
                 "--thinking",
-                help="思考模式 (true/false/low/medium/high/minimal 或 budget_tokens 数值；"
-                "级别仅对 Claude/Gemini 生效，OpenAI 兼容端仅 true/false)",
+                help=THINKING_HELP,
             ),
         ] = None,
         cache: Annotated[
