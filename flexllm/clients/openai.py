@@ -162,7 +162,7 @@ class OpenAIClient(AudioMixin, LLMClientBase):
             thinking: 统一的思考控制参数
                 - False: 禁用思考（官方 OpenAI 与 Ollama(:11434): reasoning_effort="none"；
                   其他端点: think=False, vLLM enable_thinking=False）
-                - True: 启用思考（Ollama: think=True, vLLM: enable_thinking=True）
+                - True: 启用思考（vLLM: enable_thinking=True；Ollama /v1 不认此开关，按模型默认）
                 - str: 推理强度，原样作为 reasoning_effort 发送（如 "low"/"medium"/"xhigh"），
                   可用档位由模型与部署决定，不支持时后端会报错
                 - dict: 透传 provider 原生 thinking 配置（如 DeepSeek / GLM）
