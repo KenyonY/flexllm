@@ -190,7 +190,7 @@ class MllmFolderProcessor:
                         },
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"file://{processed_image_path}"},
+                            "image_url": {"url": Path(processed_image_path).as_uri()},
                         },
                     ],
                 }
