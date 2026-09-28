@@ -587,7 +587,8 @@ class UnifiedImageProcessor:
                 logger.warning(f"处理超时: {safe_repr_source(source)}")
                 return ""
             except Exception as e:
-                logger.error(
+                # 返回 "" 由调用方决定降级方式并记录
+                logger.warning(
                     f"处理失败: {safe_repr_source(source)}, 错误: {safe_repr_error(str(e))}"
                 )
                 return ""
@@ -821,7 +822,11 @@ def _mark_unavailable(part: dict, kind: str, path: str, error: Exception) -> Non
     远端后端永远读不到调用方机器上的本地路径，透传必然 400；而路径一旦进入会话历史，
     之后每轮都会失败。换成占位后请求照常发出，模型也能知道这里原本有个文件。
     """
-    reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+    # 非 OSError 的异常文本可能带对象 repr（内存地址），占位会进会话历史，必须稳定
+    if isinstance(error, OSError) and error.strerror:
+        reason = error.strerror
+    else:
+        reason = f"cannot decode {kind}"
     text = f"[{kind} unavailable: {os.path.abspath(path)}: {reason}]"
     logger.warning(f"本地{kind}不可用，已替换为占位文本: {text}")
     part.clear()
@@ -1015,7 +1020,7 @@ async def process_content_recursive(
                     if base64_data:
                         content["image_url"]["url"] = base64_data
                     elif local is not None:
-                        raise ValueError("cannot decode image")
+                        _mark_unavailable(content, "image", local, ValueError())
                     else:
                         # URL 处理失败时保留原 URL 交给后端（后端可能自己能拉取），
                         # 但必须让降级行为可见
@@ -1116,7 +1121,9 @@ async def process_content_recursive(
             # video_fps 存在时，将 video_url 切帧为 image_url 序列
             if video_fps and isinstance(item, dict) and item.get("type") == "video_url":
                 url = item.get("video_url", {}).get("url", "")
-                if url:
+                local = _local_media_path(url) if url else None
+                # 本地文件不存在时不切帧，交给下面的默认处理替换为占位
+                if url and (local is None or os.path.isfile(local)):
                     try:
                         frame_parts = await _extract_video_frames(url, session, processor, **kwargs)
                         if frame_parts:

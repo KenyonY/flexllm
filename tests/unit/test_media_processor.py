@@ -494,14 +494,22 @@ class TestLocalMediaUnavailable:
         f.write_bytes(b"not an image")
         content = {"type": "image_url", "image_url": {"url": str(f)}}
         await process_content_recursive(content)
-        assert content["type"] == "text"
-        assert content["text"].startswith(f"[image unavailable: {f}: ")
+        assert content == {"type": "text", "text": f"[image unavailable: {f}: cannot decode image]"}
 
-    async def test_video_frames_path_missing_file_becomes_placeholder(self, tmp_path):
-        content = [{"type": "video_url", "video_url": {"url": str(tmp_path / "d.mp4")}}]
+    async def test_undecodable_local_audio_reason_is_stable(self, tmp_path):
+        """非 OSError 的异常文本可能带内存地址，占位原因必须固定"""
+        f = tmp_path / "bad.wav"
+        f.write_bytes(b"not audio")
+        content = {"type": "audio_url", "audio_url": {"url": str(f)}}
+        await process_content_recursive(content, target_sample_rate=16000)
+        assert content == {"type": "text", "text": f"[audio unavailable: {f}: cannot decode audio]"}
+
+    @pytest.mark.parametrize("prefix", ["", "file://"])
+    async def test_video_frames_path_missing_file_becomes_placeholder(self, tmp_path, prefix):
+        path = tmp_path / "d.mp4"
+        content = [{"type": "video_url", "video_url": {"url": f"{prefix}{path}"}}]
         await process_content_recursive(content, video_fps=1.0)
-        assert content[0]["type"] == "text"
-        assert "video unavailable" in content[0]["text"]
+        assert content == [{"type": "text", "text": f"[video unavailable: {path}: {ENOENT}]"}]
 
     async def test_unreachable_http_url_is_kept(self):
         url = "http://127.0.0.1:1/x.mp4"
