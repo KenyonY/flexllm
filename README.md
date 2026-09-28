@@ -274,8 +274,9 @@ print("Answer:", parsed["answer"])
 
 Strength controls: on the OpenAI-compatible client `thinking="low"` is sent as
 `reasoning_effort="low"` (valid levels depend on the model and deployment; the backend
-rejects unsupported ones), and `thinking=False` on api.openai.com is sent as
-`reasoning_effort="none"`. Claude accepts that same convenience argument (or
+rejects unsupported ones), and `thinking=False` on api.openai.com and Ollama (default port 11434) is sent as
+`reasoning_effort="none"` (Ollama's `/v1` ignores other off switches; pass
+`reasoning_effort="none"` yourself when Ollama runs on another port). Claude accepts that same convenience argument (or
 `thinking="low"`), translating it to adaptive thinking on 4.6+ and to a token
 budget on Claude 3.7/4.0-4.5. Claude 3.5 does not support extended thinking;
 4.7+ rejects manual integer budgets. Current Fable/Mythos 5 variants keep adaptive

@@ -57,7 +57,8 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         >>> print("答案:", parsed["answer"])
 
     thinking 参数值:
-        - False: 禁用思考（官方 OpenAI: reasoning_effort="none"；vLLM: enable_thinking=False）
+        - False: 禁用思考（官方 OpenAI 与 Ollama(:11434): reasoning_effort="none"；
+          vLLM: enable_thinking=False）
         - True: 启用思考（vLLM: enable_thinking=True）
         - str: 推理强度，作为 reasoning_effort 发送，可用档位由模型与部署决定
         - dict: 透传 provider 原生 thinking 配置（如 DeepSeek / GLM）
@@ -159,7 +160,7 @@ class OpenAIClient(AudioMixin, LLMClientBase):
 
         Args:
             thinking: 统一的思考控制参数
-                - False: 禁用思考（官方 OpenAI: reasoning_effort="none"；
+                - False: 禁用思考（官方 OpenAI 与 Ollama(:11434): reasoning_effort="none"；
                   其他端点: think=False, vLLM enable_thinking=False）
                 - True: 启用思考（Ollama: think=True, vLLM: enable_thinking=True）
                 - str: 推理强度，原样作为 reasoning_effort 发送（如 "low"/"medium"/"xhigh"），
@@ -192,8 +193,10 @@ class OpenAIClient(AudioMixin, LLMClientBase):
             # 强度档位走标准字段 reasoning_effort（OpenAI / vLLM / Ollama 均认）。
             # 各模型、各部署可用的档位不同，取值交给后端校验，不在这里维护型号表
             body["reasoning_effort"] = thinking
-        elif thinking is False and is_official_openai:
-            # 官方端点只认 reasoning_effort；关不掉推理的型号会 400，而不是静默照常推理计费
+        elif thinking is False and (is_official_openai or ":11434" in (self._base_url or "")):
+            # 官方 OpenAI 与 Ollama（默认端口 11434）的 /v1 只认 reasoning_effort 关推理：
+            # Ollama 忽略 think / chat_template_kwargs（实测照常思考）。官方端点上
+            # 关不掉推理的型号会 400，而不是静默照常推理计费
             body["reasoning_effort"] = "none"
         elif thinking is not None and not is_official_openai:
             body["think"] = thinking  # Ollama

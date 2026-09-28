@@ -219,8 +219,9 @@ client = OpenAIClient(
 
 **额外参数：**
 - `thinking`: 思考模式控制
-  - `False`: 禁用思考（官方 OpenAI 端点发 `reasoning_effort="none"`，关不掉推理的型号会 400；
-    vLLM 发 `chat_template_kwargs.enable_thinking=False`）
+  - `False`: 禁用思考（官方 OpenAI 与 Ollama 默认端口 `:11434` 发 `reasoning_effort="none"`，
+    官方端点上关不掉推理的型号会 400；vLLM 发 `chat_template_kwargs.enable_thinking=False`。
+    Ollama 跑在其他端口时显式传 `reasoning_effort="none"`——它的 `/v1` 不认其他关闭字段）
   - `True`: 启用思考
   - `str`: 推理强度，原样作为 `reasoning_effort` 发送。可用档位由模型与部署决定
     （如 vLLM 上的 Qwen3.8 只收 `low`/`medium`/`xhigh`），不支持时后端报错并列出可选值

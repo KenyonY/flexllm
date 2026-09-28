@@ -102,9 +102,10 @@ def test_effort_string_becomes_reasoning_effort(base_url):
     assert "chat_template_kwargs" not in body
 
 
-def test_official_openai_disables_reasoning_with_none():
-    """官方端点只认 reasoning_effort；关不掉的型号由 API 报错，而不是静默照常推理"""
-    client = OpenAIClient(base_url="https://api.openai.com/v1", api_key="k")
+@pytest.mark.parametrize("base_url", ["https://api.openai.com/v1", "http://localhost:11434/v1"])
+def test_disable_reasoning_with_none_where_only_reasoning_effort_works(base_url):
+    """官方 OpenAI 与 Ollama /v1 只认 reasoning_effort 关推理（Ollama 忽略 think）"""
+    client = OpenAIClient(base_url=base_url, api_key="k")
     body = client._build_request_body(
         [{"role": "user", "content": "Hi"}], "gpt-5.5", thinking=False
     )
