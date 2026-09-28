@@ -80,6 +80,7 @@ await client.chat_completions(messages, preprocess_msg=True)
 `[image omitted: model does not support vision]`，`video_url` 块替换为
 `[video omitted: model does not support video]`，而不是让请求 400——否则媒体一旦进入会话历史，
 之后每次请求都会失败。调用方可读 `client.vision` / `client.video` 提前告诉模型当前能力。
+模型不接收的块（含 Claude 协议下的音视频）在 `preprocess_msg=True` 时不会被读取和编码，大视频不再白读。`placeholder` 模式下仍会检查这些本地文件能否打开（不读内容），缺失时照常显示 `[<kind> unavailable: ...]`；文件存在但已损坏时不再解码，显示 `[<kind> omitted: ...]`。
 
 ```yaml
 models:
