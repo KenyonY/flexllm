@@ -541,6 +541,8 @@ LLMClient(
     use_vertex_ai: bool = False,   # Vertex AI mode (Gemini provider; also: project_id, location, credentials)
     vision: bool = True,           # False: replace image blocks with a text placeholder before sending
     video: bool = True,            # False: replace video_url blocks with a text placeholder before sending
+    missing_local_media: str = "passthrough",  # preprocess_msg: unreadable local file -> send path as-is,
+                                   # or "placeholder" to replace the block with "[video unavailable: ...]"
 )
 ```
 

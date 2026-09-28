@@ -15,7 +15,15 @@ def model_client_kwargs(entry: dict, **overrides) -> dict:
         "base_url": entry.get("base_url"),
         "api_key": entry.get("api_key", "EMPTY"),
     }
-    for key in ("provider", "proxy", "endpoints", "fallback", "vision", "video"):
+    for key in (
+        "provider",
+        "proxy",
+        "endpoints",
+        "fallback",
+        "vision",
+        "video",
+        "missing_local_media",
+    ):
         if key in entry:
             options[key] = entry[key]
     if overrides.get("base_url") is not None and "endpoints" not in overrides:
@@ -68,6 +76,7 @@ class FlexLLMConfig:
         "proxy",
         "vision",
         "video",
+        "missing_local_media",
     }
 
     CONFIG_PATHS = [

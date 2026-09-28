@@ -19,6 +19,7 @@ from ..async_api import ConcurrentRequester, create_proxied_session, validate_pr
 from ..async_api.progress import ProgressBarConfig
 from ..cache import ResponseCache, ResponseCacheConfig
 from ..msg_processors.unified_processor import (
+    MISSING_LOCAL_MEDIA_MODES,
     UnifiedImageProcessor,
     UnifiedProcessorConfig,
     unified_messages_preprocess,
@@ -380,6 +381,7 @@ class LLMClientBase(CompletionMixin, ABC):
         proxy: str | None = None,
         vision: bool = True,
         video: bool = True,
+        missing_local_media: str = "passthrough",
         **kwargs,
     ):
         """
@@ -414,7 +416,17 @@ class LLMClientBase(CompletionMixin, ABC):
                    不降级的话之后每次请求都会失败。
             video: 模型是否支持视频输入（默认 True）。False 时 video_url 块同样替换为占位文本，
                    理由同 vision。
+            missing_local_media: preprocess_msg=True 时本地媒体（路径/file://）读不到的处理。
+                   "passthrough"（默认）原样发送路径，后端可能自己读得到（如 vLLM
+                   --allowed-local-media-path）；"placeholder" 整块换成
+                   "[video unavailable: <path>: <reason>]" 文本，适合把本地路径存进会话历史、
+                   文件可能被移走的调用方。
         """
+        if missing_local_media not in MISSING_LOCAL_MEDIA_MODES:
+            raise ValueError(
+                f"missing_local_media 必须是 {MISSING_LOCAL_MEDIA_MODES} 之一: {missing_local_media!r}"
+            )
+        self._missing_local_media = missing_local_media
         self._vision = vision
         self._video = video
         self._base_url = base_url.rstrip("/") if base_url else None
@@ -629,7 +641,10 @@ class LLMClientBase(CompletionMixin, ABC):
         """消息预处理（图片/视频/音频转 base64 等）"""
         if preprocess_msg:
             return await unified_messages_preprocess(
-                messages, proxy=self._proxy, processor=self._get_unified_processor()
+                messages,
+                proxy=self._proxy,
+                processor=self._get_unified_processor(),
+                missing_local_media=self._missing_local_media,
             )
         return messages
 
@@ -643,6 +658,7 @@ class LLMClientBase(CompletionMixin, ABC):
                 max_concurrent=self._concurrency_limit,
                 proxy=self._proxy,
                 processor=self._get_unified_processor(),
+                missing_local_media=self._missing_local_media,
             )
         return messages_list
 

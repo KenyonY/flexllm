@@ -37,10 +37,17 @@ result = await client.complete(processed)
 
 **支持的来源：** 本地路径、`file://` URI、HTTP/HTTPS URL、`data:` URI（直接透传）。
 
-**读取失败：** 本地来源（普通路径含相对路径、`file://`）读取或编码失败时，整个媒体块替换为
-文本块 `[video unavailable: /abs/path/d.mp4: No such file or directory]`（按块类型写
-image/video/audio），并打 warning——远端后端读不到调用方机器上的路径，原样透传必然 400，
-且路径进了会话历史后每轮都会失败。HTTP(S) URL 失败时保留原 URL，交给后端自己拉取。
+**本地文件读取失败**：由客户端参数 `missing_local_media`（或配置项）决定，HTTP(S) URL 失败时始终保留原 URL：
+- `"passthrough"`（默认）：原样发送路径，交给后端读取——后端可能读得到（如 vLLM 开了
+  `--allowed-local-media-path` 且文件在服务端）。
+- `"placeholder"`：整块替换为文本 `[video unavailable: /abs/path/d.mp4: No such file or directory]`
+  （按块类型写 image/video/audio）。适合把 `file://` 引用存进会话历史的调用方：文件被移走后，
+  透传会让之后每轮请求都失败。
+
+```python
+client = LLMClient(model="...", base_url="...", missing_local_media="placeholder")
+await client.chat_completions(messages, preprocess_msg=True)
+```
 
 **跨 Provider 格式转换：** Claude 和 Gemini 客户端会自动将 OpenAI 格式转换为各自原生格式：
 - Claude: `video_url`/`audio_url` → `document` 类型，`input_audio` → `document` 类型

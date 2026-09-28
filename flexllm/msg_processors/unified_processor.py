@@ -816,18 +816,28 @@ def _check_readable(path: str) -> None:
         pass
 
 
-def _mark_unavailable(part: dict, kind: str, path: str, error: Exception) -> None:
-    """本地媒体读取/编码失败：把整个媒体块原地换成文本占位。
+MISSING_LOCAL_MEDIA_MODES = ("passthrough", "placeholder")
+IMAGE_KWARGS = ("max_width", "max_height", "max_pixels")
 
-    远端后端永远读不到调用方机器上的本地路径，透传必然 400；而路径一旦进入会话历史，
-    之后每轮都会失败。换成占位后请求照常发出，模型也能知道这里原本有个文件。
+
+def _local_media_failed(part: dict, kind: str, path: str, error: Exception, mode: str) -> None:
+    """本地媒体读取/编码失败时按 mode 降级（原地修改 part）。
+
+    - passthrough（默认）: 保留原路径发给后端——后端可能自己读得到
+      （如 vLLM --allowed-local-media-path 且文件在服务端）。
+    - placeholder: 整块换成文本占位。适合会把本地路径存进会话历史的调用方：
+      文件被移走后若继续透传，后端读不到就每轮失败。
     """
     # 非 OSError 的异常文本可能带对象 repr（内存地址），占位会进会话历史，必须稳定
     if isinstance(error, OSError) and error.strerror:
         reason = error.strerror
     else:
         reason = f"cannot decode {kind}"
-    text = f"[{kind} unavailable: {os.path.abspath(path)}: {reason}]"
+    abs_path = os.path.abspath(path)
+    if mode == "passthrough":
+        logger.warning(f"本地{kind}读取失败，原样发送路径交给后端: {abs_path}: {reason}")
+        return
+    text = f"[{kind} unavailable: {abs_path}: {reason}]"
     logger.warning(f"本地{kind}不可用，已替换为占位文本: {text}")
     part.clear()
     part.update({"type": "text", "text": text})
@@ -979,9 +989,14 @@ async def process_content_recursive(
     content: Any,
     session: aiohttp.ClientSession | None = None,
     processor: UnifiedImageProcessor | None = None,
+    missing_local_media: str = "passthrough",
     **kwargs,
 ):
     """递归处理内容，根据 type 字段路由不同的媒体处理逻辑。
+
+    missing_local_media: 本地来源（路径/file://）读取或编码失败时的处理，
+        "passthrough"（默认）原样发送路径，"placeholder" 整块换成
+        "[<kind> unavailable: <path>: <reason>]" 文本。HTTP(S) 失败始终保留原 URL。
 
     支持的 type：
     - image_url: 通过 UnifiedImageProcessor 处理（支持缩放）
@@ -1016,18 +1031,22 @@ async def process_content_recursive(
                 try:
                     if local is not None:
                         _check_readable(local)
-                    base64_data = await processor.process_single_source(url, session, **kwargs)
+                    # kwargs 里还有视频/音频参数，只把图片参数交给图片处理器
+                    image_kw = {k: kwargs[k] for k in IMAGE_KWARGS if k in kwargs}
+                    base64_data = await processor.process_single_source(url, session, **image_kw)
                     if base64_data:
                         content["image_url"]["url"] = base64_data
                     elif local is not None:
-                        _mark_unavailable(content, "image", local, ValueError())
+                        _local_media_failed(
+                            content, "image", local, ValueError(), missing_local_media
+                        )
                     else:
                         # URL 处理失败时保留原 URL 交给后端（后端可能自己能拉取），
                         # 但必须让降级行为可见
                         logger.warning(f"图像处理失败，保留原始 URL 发送: {safe_repr_source(url)}")
                 except Exception as e:
                     if local is not None:
-                        _mark_unavailable(content, "image", local, e)
+                        _local_media_failed(content, "image", local, e, missing_local_media)
                     else:
                         logger.error(
                             f"处理图像URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
@@ -1048,7 +1067,7 @@ async def process_content_recursive(
                         content["video_url"]["url"] = base64_data
                 except Exception as e:
                     if local is not None:
-                        _mark_unavailable(content, "video", local, e)
+                        _local_media_failed(content, "video", local, e, missing_local_media)
                     else:
                         logger.error(
                             f"处理视频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
@@ -1075,7 +1094,7 @@ async def process_content_recursive(
                             content["audio_url"]["url"] = base64_data
                 except Exception as e:
                     if local is not None:
-                        _mark_unavailable(content, "audio", local, e)
+                        _local_media_failed(content, "audio", local, e, missing_local_media)
                     else:
                         logger.error(
                             f"处理音频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
@@ -1103,7 +1122,7 @@ async def process_content_recursive(
                             content["input_audio"]["data"] = base64_data
                 except Exception as e:
                     if local is not None:
-                        _mark_unavailable(content, "audio", local, e)
+                        _local_media_failed(content, "audio", local, e, missing_local_media)
                     else:
                         logger.error(
                             f"处理音频数据失败 {safe_repr_source(data)}: {safe_repr_error(str(e))}"
@@ -1111,7 +1130,9 @@ async def process_content_recursive(
 
         else:
             for key, value in content.items():
-                await process_content_recursive(value, session, processor, **kwargs)
+                await process_content_recursive(
+                    value, session, processor, missing_local_media, **kwargs
+                )
 
     elif isinstance(content, list):
         video_fps = kwargs.get("video_fps")
@@ -1122,7 +1143,7 @@ async def process_content_recursive(
             if video_fps and isinstance(item, dict) and item.get("type") == "video_url":
                 url = item.get("video_url", {}).get("url", "")
                 local = _local_media_path(url) if url else None
-                # 本地文件不存在时不切帧，交给下面的默认处理替换为占位
+                # 本地文件不存在时不切帧，交给下面的默认处理按 missing_local_media 降级
                 if url and (local is None or os.path.isfile(local)):
                     try:
                         frame_parts = await _extract_video_frames(url, session, processor, **kwargs)
@@ -1136,7 +1157,7 @@ async def process_content_recursive(
                             f"{safe_repr_error(str(e))}，回退到原始编码"
                         )
             # 其他项或帧提取失败时走默认处理
-            await process_content_recursive(item, session, processor, **kwargs)
+            await process_content_recursive(item, session, processor, missing_local_media, **kwargs)
             i += 1
 
 

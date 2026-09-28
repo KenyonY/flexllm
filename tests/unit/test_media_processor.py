@@ -446,27 +446,42 @@ class TestOpenAIClientAudioConversion:
         assert OpenAIClient._convert_audio_url_to_input_audio(messages) == messages
 
 
-class TestLocalMediaUnavailable:
-    """本地媒体读不到时整块替换为文字占位，而不是把本地路径发给后端"""
+PH = "placeholder"
+TEST_IMAGE = os.path.join(os.path.dirname(__file__), "..", "e2e", "media_test", "test_image.png")
 
-    async def test_missing_local_sources_become_placeholders(self, tmp_path):
+
+def _missing_media_messages(missing) -> list[dict]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"{missing}/a.png"}},
+                {"type": "image_url", "image_url": {"url": f"file://{missing}/b.png"}},
+                {"type": "audio_url", "audio_url": {"url": f"{missing}/c.wav"}},
+                {"type": "video_url", "video_url": {"url": f"{missing}/d.mp4"}},
+                {"type": "input_audio", "input_audio": {"data": f"{missing}/e.wav"}},
+            ],
+        }
+    ]
+
+
+class TestLocalMediaUnavailable:
+    """本地媒体读不到：默认原样透传（后端可能读得到），placeholder 模式整块换成文字占位"""
+
+    async def test_default_passes_local_paths_through(self, tmp_path):
+        from flexllm.msg_processors.unified_processor import unified_messages_preprocess
+
+        messages = _missing_media_messages(tmp_path / "gone")
+        out = await unified_messages_preprocess(messages)
+        assert out == messages
+
+    async def test_placeholder_mode(self, tmp_path):
         from flexllm.msg_processors.unified_processor import unified_messages_preprocess
 
         missing = tmp_path / "gone"
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"{missing}/a.png"}},
-                    {"type": "image_url", "image_url": {"url": f"file://{missing}/b.png"}},
-                    {"type": "audio_url", "audio_url": {"url": f"{missing}/c.wav"}},
-                    {"type": "video_url", "video_url": {"url": f"{missing}/d.mp4"}},
-                    {"type": "input_audio", "input_audio": {"data": f"{missing}/e.wav"}},
-                ],
-            }
-        ]
+        messages = _missing_media_messages(missing)
         snapshot = copy.deepcopy(messages)
-        out = await unified_messages_preprocess(messages)
+        out = await unified_messages_preprocess(messages, missing_local_media=PH)
 
         assert messages == snapshot
         assert out[0]["content"] == [
@@ -480,20 +495,31 @@ class TestLocalMediaUnavailable:
             ]
         ]
 
+    async def test_batch_preprocess_forwards_mode(self, tmp_path):
+        from flexllm.msg_processors.unified_processor import unified_batch_messages_preprocess
+
+        missing = tmp_path / "gone"
+        out = await unified_batch_messages_preprocess(
+            [_missing_media_messages(missing)], missing_local_media=PH
+        )
+        assert all(p["type"] == "text" for p in out[0][0]["content"])
+
     async def test_relative_path_reported_as_absolute(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         content = {"type": "video_url", "video_url": {"url": "d.mp4"}}
-        await process_content_recursive(content)
+        await process_content_recursive(content, missing_local_media=PH)
         assert content == {
             "type": "text",
             "text": f"[video unavailable: {tmp_path}/d.mp4: {ENOENT}]",
         }
 
-    async def test_undecodable_local_image_becomes_placeholder(self, tmp_path):
+    async def test_undecodable_local_image(self, tmp_path):
         f = tmp_path / "broken.png"
         f.write_bytes(b"not an image")
         content = {"type": "image_url", "image_url": {"url": str(f)}}
         await process_content_recursive(content)
+        assert content == {"type": "image_url", "image_url": {"url": str(f)}}
+        await process_content_recursive(content, missing_local_media=PH)
         assert content == {"type": "text", "text": f"[image unavailable: {f}: cannot decode image]"}
 
     async def test_undecodable_local_audio_reason_is_stable(self, tmp_path):
@@ -501,27 +527,39 @@ class TestLocalMediaUnavailable:
         f = tmp_path / "bad.wav"
         f.write_bytes(b"not audio")
         content = {"type": "audio_url", "audio_url": {"url": str(f)}}
-        await process_content_recursive(content, target_sample_rate=16000)
+        await process_content_recursive(content, missing_local_media=PH, target_sample_rate=16000)
         assert content == {"type": "text", "text": f"[audio unavailable: {f}: cannot decode audio]"}
 
     @pytest.mark.parametrize("prefix", ["", "file://"])
-    async def test_video_frames_path_missing_file_becomes_placeholder(self, tmp_path, prefix):
+    async def test_video_frames_path_missing_file(self, tmp_path, prefix):
         path = tmp_path / "d.mp4"
-        content = [{"type": "video_url", "video_url": {"url": f"{prefix}{path}"}}]
+        part = {"type": "video_url", "video_url": {"url": f"{prefix}{path}"}}
+        content = [dict(part)]
         await process_content_recursive(content, video_fps=1.0)
+        assert content == [part]
+        await process_content_recursive(content, missing_local_media=PH, video_fps=1.0)
         assert content == [{"type": "text", "text": f"[video unavailable: {path}: {ENOENT}]"}]
+
+    @pytest.mark.parametrize("extra", [{"video_fps": 1.0}, {"target_sample_rate": 16000}])
+    async def test_good_image_encodes_with_video_or_audio_kwargs(self, extra):
+        """回归：视频/音频参数不能传进图片处理器（曾因 TypeError 让好图片编码失败）"""
+        content = [{"type": "image_url", "image_url": {"url": TEST_IMAGE}}]
+        await process_content_recursive(content, missing_local_media=PH, **extra)
+        assert content[0]["image_url"]["url"].startswith("data:image/")
 
     async def test_unreachable_http_url_is_kept(self):
         url = "http://127.0.0.1:1/x.mp4"
         content = {"type": "video_url", "video_url": {"url": url}}
-        await process_content_recursive(content)
+        await process_content_recursive(content, missing_local_media=PH)
         assert content == {"type": "video_url", "video_url": {"url": url}}
 
-    async def test_client_preprocess_uses_placeholder(self, tmp_path):
-        """流式与非流式共用 _preprocess_messages，占位替换在这里生效"""
+    @pytest.mark.parametrize("mode,expected_type", [(None, "video_url"), (PH, "text")])
+    async def test_client_option(self, tmp_path, mode, expected_type):
+        """流式与非流式共用 _preprocess_messages，模式由客户端构造参数决定"""
         from flexllm import OpenAIClient
 
-        client = OpenAIClient(base_url="http://x/v1", model="m")
+        kw = {} if mode is None else {"missing_local_media": mode}
+        client = OpenAIClient(base_url="http://x/v1", model="m", **kw)
         messages = [
             {
                 "role": "user",
@@ -529,4 +567,25 @@ class TestLocalMediaUnavailable:
             }
         ]
         out = await client._preprocess_messages(messages, preprocess_msg=True)
-        assert out[0]["content"][0]["type"] == "text"
+        assert out[0]["content"][0]["type"] == expected_type
+        batch = await client._preprocess_messages_batch([messages], preprocess_msg=True)
+        assert batch[0][0]["content"][0]["type"] == expected_type
+
+    def test_invalid_mode_rejected(self):
+        from flexllm import LLMClient
+
+        with pytest.raises(ValueError, match="missing_local_media"):
+            LLMClient(base_url="http://x/v1", model="m", missing_local_media="drop")
+
+    def test_config_entry(self, tmp_path):
+        from flexllm import LLMClient
+        from flexllm.cli.config import FlexLLMConfig
+
+        path = tmp_path / "c.yaml"
+        path.write_text(
+            "default: m\nmodels:\n  - id: m\n    base_url: http://x/v1\n"
+            "    missing_local_media: placeholder\n    temperature: 0.1\n"
+        )
+        assert FlexLLMConfig(path).get_model_params("m") == {"temperature": 0.1}
+        client = LLMClient.from_config(str(path))
+        assert client.client._missing_local_media == PH
