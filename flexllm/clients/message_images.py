@@ -11,6 +11,7 @@
 IMAGE_PART_TYPES = {"image_url", "image"}
 VISION_OMITTED_TEXT = "[image omitted: model does not support vision]"
 VIDEO_OMITTED_TEXT = "[video omitted: model does not support video]"
+AUDIO_OMITTED_TEXT = "[audio omitted: model does not support audio]"
 TOOL_IMAGE_PLACEHOLDER = "(see attached image)"
 TOOL_IMAGES_HEADER = "Attached image(s) from tool result:"
 
@@ -57,6 +58,10 @@ def omit_images(messages: list[dict]) -> list[dict]:
 
 def omit_videos(messages: list[dict]) -> list[dict]:
     return _omit_parts(messages, {"video_url"}, VIDEO_OMITTED_TEXT)
+
+
+def omit_audios(messages: list[dict]) -> list[dict]:
+    return _omit_parts(messages, {"audio_url", "input_audio"}, AUDIO_OMITTED_TEXT)
 
 
 def move_tool_images_to_user(messages: list[dict]) -> list[dict]:

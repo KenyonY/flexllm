@@ -50,7 +50,7 @@ await client.chat_completions(messages, preprocess_msg=True)
 ```
 
 **跨 Provider 格式转换：** Claude 和 Gemini 客户端会自动将 OpenAI 格式转换为各自原生格式：
-- Claude: `video_url`/`audio_url` → `document` 类型，`input_audio` → `document` 类型
+- Claude: Anthropic Messages API 没有音视频内容块，`video_url`/`audio_url`/`input_audio` 一律替换为占位文本（`[video omitted: ...]` / `[audio omitted: ...]`），与 `video` 开关无关
 - Gemini: 统一转换为 `inline_data` 格式
 
 ### 工具结果带图

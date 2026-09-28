@@ -227,74 +227,26 @@ class TestProcessContentRecursiveImageUrlRegression:
 
 
 class TestClaudeClientMediaConversion:
-    """Test Claude client format conversion for video/audio."""
+    """Anthropic 协议没有音视频内容块：一律换成占位文本（不再转成必被拒的 document）"""
 
-    def test_convert_video_url_base64(self):
+    @pytest.mark.parametrize(
+        "part,placeholder",
+        [
+            ({"type": "video_url", "video_url": {"url": "data:video/mp4;base64,AAAA"}}, "video"),
+            ({"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,BBBB"}}, "audio"),
+            ({"type": "input_audio", "input_audio": {"data": "CCCC", "format": "mp3"}}, "audio"),
+        ],
+    )
+    def test_media_replaced_with_placeholder(self, part, placeholder):
         from flexllm import ClaudeClient
+        from flexllm.clients.message_images import AUDIO_OMITTED_TEXT, VIDEO_OMITTED_TEXT
 
-        client = ClaudeClient(api_key="test-key")
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "video_url",
-                        "video_url": {"url": "data:video/mp4;base64,AAAA"},
-                    }
-                ],
-            }
-        ]
-        body = client._build_request_body(messages, "claude-3-5-sonnet-20241022")
-        msg_content = body["messages"][0]["content"]
-        assert len(msg_content) == 1
-        assert msg_content[0]["type"] == "document"
-        assert msg_content[0]["source"]["type"] == "base64"
-        assert msg_content[0]["source"]["media_type"] == "video/mp4"
-        assert msg_content[0]["source"]["data"] == "AAAA"
-
-    def test_convert_audio_url_base64(self):
-        from flexllm import ClaudeClient
-
-        client = ClaudeClient(api_key="test-key")
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "audio_url",
-                        "audio_url": {"url": "data:audio/wav;base64,BBBB"},
-                    }
-                ],
-            }
-        ]
-        body = client._build_request_body(messages, "claude-3-5-sonnet-20241022")
-        msg_content = body["messages"][0]["content"]
-        assert len(msg_content) == 1
-        assert msg_content[0]["type"] == "document"
-        assert msg_content[0]["source"]["media_type"] == "audio/wav"
-        assert msg_content[0]["source"]["data"] == "BBBB"
-
-    def test_convert_input_audio(self):
-        from flexllm import ClaudeClient
-
-        client = ClaudeClient(api_key="test-key")
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_audio",
-                        "input_audio": {"data": "CCCC", "format": "mp3"},
-                    }
-                ],
-            }
-        ]
-        body = client._build_request_body(messages, "claude-3-5-sonnet-20241022")
-        msg_content = body["messages"][0]["content"]
-        assert len(msg_content) == 1
-        assert msg_content[0]["type"] == "document"
-        assert msg_content[0]["source"]["media_type"] == "audio/mp3"
-        assert msg_content[0]["source"]["data"] == "CCCC"
+        text = {"video": VIDEO_OMITTED_TEXT, "audio": AUDIO_OMITTED_TEXT}[placeholder]
+        messages = [{"role": "user", "content": [part]}]
+        # video 开关取值不影响：协议本身不收
+        for video in (True, False):
+            body = ClaudeClient(api_key="k", video=video)._build_request_body(messages, "m")
+            assert body["messages"][0]["content"] == [{"type": "text", "text": text}]
 
     def test_image_url_still_works(self):
         """回归测试：image_url 仍然正确"""

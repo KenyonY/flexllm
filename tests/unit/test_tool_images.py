@@ -286,7 +286,9 @@ class TestVideoDowngrade:
         assert make()._build_request_body(history, "m") == make(video=True)._build_request_body(
             history, "m"
         )
-        assert VIDEO_OMITTED_TEXT not in repr(make()._build_request_body(history, "m"))
+        # Claude 协议没有视频块，无论开关都占位
+        expected = make is _claude
+        assert (VIDEO_OMITTED_TEXT in repr(make()._build_request_body(history, "m"))) is expected
 
     def test_default_and_pool_exposure(self):
         assert LLMClient(base_url="http://x/v1", model="m").video is True

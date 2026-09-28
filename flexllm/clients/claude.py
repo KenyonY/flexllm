@@ -25,7 +25,12 @@ from .base import (
     ToolCall,
     _decode_error_body,
 )
-from .message_images import TOOL_IMAGE_PLACEHOLDER, has_non_text_parts
+from .message_images import (
+    TOOL_IMAGE_PLACEHOLDER,
+    has_non_text_parts,
+    omit_audios,
+    omit_videos,
+)
 
 # Anthropic Messages 流式事件的全集（含本客户端不处理但属于规范的 ping / *_stop / error）。
 # 这个集合之外的事件被当作带外信息透出，而不是静默丢弃。
@@ -277,7 +282,9 @@ class ClaudeClient(LLMClientBase):
         system_content = None
         user_messages = []
 
-        for msg in self._vision_messages(messages):
+        # Anthropic Messages API 没有接收视频/音频的内容块（document 只收 PDF 与纯文本），
+        # 兼容端点也不认 document 形式的音视频，无论 video 开关都换成占位，否则请求必然被拒
+        for msg in omit_audios(omit_videos(self._vision_messages(messages))):
             if msg.get("role") == "system":
                 # 合并多个 system messages
                 content = msg.get("content", "")
@@ -542,7 +549,7 @@ class ClaudeClient(LLMClientBase):
 
     @staticmethod
     def _convert_content_blocks(content: list) -> list[dict]:
-        """OpenAI 格式的块列表 → Claude content blocks（text/image/document）"""
+        """OpenAI 格式的块列表 → Claude content blocks（text/image）"""
         claude_content = []
         for item in content:
             if isinstance(item, str):
@@ -576,46 +583,6 @@ class ClaudeClient(LLMClientBase):
                                 "source": {
                                     "type": "url",
                                     "url": url,
-                                },
-                            }
-                        )
-                elif item_type in ("video_url", "audio_url"):
-                    # 转换视频/音频到 Claude document 格式
-                    media_key = item_type  # "video_url" 或 "audio_url"
-                    url = item.get(media_key, {}).get("url", "")
-                    if url.startswith("data:"):
-                        match = re.match(r"data:([^;]+);base64,(.+)", url)
-                        if match:
-                            claude_content.append(
-                                {
-                                    "type": "document",
-                                    "source": {
-                                        "type": "base64",
-                                        "media_type": match.group(1),
-                                        "data": match.group(2),
-                                    },
-                                }
-                            )
-                    else:
-                        claude_content.append(
-                            {
-                                "type": "document",
-                                "source": {"type": "url", "url": url},
-                            }
-                        )
-                elif item_type == "input_audio":
-                    # 转换 OpenAI input_audio 到 Claude document 格式
-                    audio_data = item.get("input_audio", {})
-                    data = audio_data.get("data", "")
-                    fmt = audio_data.get("format", "wav")
-                    if data:
-                        claude_content.append(
-                            {
-                                "type": "document",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": f"audio/{fmt}",
-                                    "data": data,
                                 },
                             }
                         )
