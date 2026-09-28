@@ -2,19 +2,17 @@
 
 统一消息格式允许 role=tool 的 content 是块列表（text + image_url），各协议在转换出口
 按自身能力适配：
-- omit_images: 模型不支持视觉时，把所有图片块替换为占位文本，避免带图历史让会话永久 400。
+- omit_images / omit_videos: 模型不支持视觉/视频时，把对应块替换为占位文本，避免带图/视频
+  的历史让会话永久 400。
 - move_tool_images_to_user: OpenAI Chat Completions 的 tool 消息只收文本，把图片挪到
   整串 tool 消息之后的一条 user 消息里。
 """
 
 IMAGE_PART_TYPES = {"image_url", "image"}
 VISION_OMITTED_TEXT = "[image omitted: model does not support vision]"
+VIDEO_OMITTED_TEXT = "[video omitted: model does not support video]"
 TOOL_IMAGE_PLACEHOLDER = "(see attached image)"
 TOOL_IMAGES_HEADER = "Attached image(s) from tool result:"
-
-
-def _is_image_part(part) -> bool:
-    return isinstance(part, dict) and part.get("type") in IMAGE_PART_TYPES
 
 
 def _is_text_part(part) -> bool:
@@ -30,23 +28,35 @@ def _text_of(part) -> str:
     return part if isinstance(part, str) else part.get("text", "")
 
 
-def omit_images(messages: list[dict]) -> list[dict]:
-    """把所有消息中的图片块替换为占位文本；不含图片的消息原样复用。
+def _omit_parts(messages: list[dict], part_types: set, placeholder: str) -> list[dict]:
+    """把所有消息中 part_types 类型的块替换为占位文本；不含这类块的消息原样复用。
 
     被改写的消息同时丢掉空文本块（Anthropic 拒绝空 text 块），占位保证内容非空。
     """
     result = []
     for msg in messages:
         content = msg.get("content")
-        if isinstance(content, list) and any(_is_image_part(p) for p in content):
+        if isinstance(content, list) and any(
+            isinstance(p, dict) and p.get("type") in part_types for p in content
+        ):
             content = [
-                {"type": "text", "text": VISION_OMITTED_TEXT} if _is_image_part(p) else p
+                {"type": "text", "text": placeholder}
+                if isinstance(p, dict) and p.get("type") in part_types
+                else p
                 for p in content
                 if not (_is_text_part(p) and not _text_of(p))
             ]
             msg = {**msg, "content": content}
         result.append(msg)
     return result
+
+
+def omit_images(messages: list[dict]) -> list[dict]:
+    return _omit_parts(messages, IMAGE_PART_TYPES, VISION_OMITTED_TEXT)
+
+
+def omit_videos(messages: list[dict]) -> list[dict]:
+    return _omit_parts(messages, {"video_url"}, VIDEO_OMITTED_TEXT)
 
 
 def move_tool_images_to_user(messages: list[dict]) -> list[dict]:

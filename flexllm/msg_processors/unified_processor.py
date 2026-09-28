@@ -797,6 +797,37 @@ def _is_source_needs_conversion(value: str) -> bool:
     return False
 
 
+def _local_media_path(source: str) -> str | None:
+    """本地来源（普通路径含相对路径、file:// URI）返回文件路径；URL、data: URI 返回 None。"""
+    if source.startswith("file://"):
+        return source[7:]
+    if source.startswith("data:") or "://" in source:
+        return None
+    # 排除误放进来的 raw base64 数据
+    if len(source) >= _BASE64_MIN_LEN and _BASE64_RE.fullmatch(source):
+        return None
+    return source
+
+
+def _check_readable(path: str) -> None:
+    """文件不可读时抛 OSError（带 strerror，作为占位文本里的失败原因）"""
+    with open(path, "rb"):
+        pass
+
+
+def _mark_unavailable(part: dict, kind: str, path: str, error: Exception) -> None:
+    """本地媒体读取/编码失败：把整个媒体块原地换成文本占位。
+
+    远端后端永远读不到调用方机器上的本地路径，透传必然 400；而路径一旦进入会话历史，
+    之后每轮都会失败。换成占位后请求照常发出，模型也能知道这里原本有个文件。
+    """
+    reason = error.strerror if isinstance(error, OSError) and error.strerror else str(error)
+    text = f"[{kind} unavailable: {os.path.abspath(path)}: {reason}]"
+    logger.warning(f"本地{kind}不可用，已替换为占位文本: {text}")
+    part.clear()
+    part.update({"type": "text", "text": text})
+
+
 async def _get_raw_bytes(source: str, session: aiohttp.ClientSession | None = None) -> bytes:
     """从文件路径、URL 或 data URI 获取原始字节"""
     if source.startswith("data:"):
@@ -976,38 +1007,55 @@ async def process_content_recursive(
         if item_type == "image_url":
             url = content.get("image_url", {}).get("url", "")
             if url and not url.startswith("data:"):
+                local = _local_media_path(url)
                 try:
+                    if local is not None:
+                        _check_readable(local)
                     base64_data = await processor.process_single_source(url, session, **kwargs)
                     if base64_data:
                         content["image_url"]["url"] = base64_data
+                    elif local is not None:
+                        raise ValueError("cannot decode image")
                     else:
-                        # process_single_source 失败时返回 ""，此处保留原 URL 交给后端，
+                        # URL 处理失败时保留原 URL 交给后端（后端可能自己能拉取），
                         # 但必须让降级行为可见
                         logger.warning(f"图像处理失败，保留原始 URL 发送: {safe_repr_source(url)}")
                 except Exception as e:
-                    logger.error(
-                        f"处理图像URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
-                    )
+                    if local is not None:
+                        _mark_unavailable(content, "image", local, e)
+                    else:
+                        logger.error(
+                            f"处理图像URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
+                        )
 
         elif item_type == "video_url":
             # 无 video_fps 时走原始 base64 编码路径
             url = content.get("video_url", {}).get("url", "")
             if url and not url.startswith("data:"):
+                local = _local_media_path(url)
                 try:
+                    if local is not None:
+                        _check_readable(local)
                     base64_data = await encode_media_to_base64(
                         url, session=session, return_with_mime=True
                     )
                     if base64_data:
                         content["video_url"]["url"] = base64_data
                 except Exception as e:
-                    logger.error(
-                        f"处理视频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
-                    )
+                    if local is not None:
+                        _mark_unavailable(content, "video", local, e)
+                    else:
+                        logger.error(
+                            f"处理视频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
+                        )
 
         elif item_type == "audio_url":
             url = content.get("audio_url", {}).get("url", "")
             if url and not url.startswith("data:"):
+                local = _local_media_path(url)
                 try:
+                    if local is not None:
+                        _check_readable(local)
                     audio_kw = extract_audio_kwargs(kwargs)
                     if audio_kw:
                         raw = await _get_raw_bytes(url, session)
@@ -1021,14 +1069,20 @@ async def process_content_recursive(
                         if base64_data:
                             content["audio_url"]["url"] = base64_data
                 except Exception as e:
-                    logger.error(
-                        f"处理音频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
-                    )
+                    if local is not None:
+                        _mark_unavailable(content, "audio", local, e)
+                    else:
+                        logger.error(
+                            f"处理音频URL失败 {safe_repr_source(url)}: {safe_repr_error(str(e))}"
+                        )
 
         elif item_type == "input_audio":
             data = content.get("input_audio", {}).get("data", "")
             if data and isinstance(data, str) and _is_source_needs_conversion(data):
+                local = _local_media_path(data)
                 try:
+                    if local is not None:
+                        _check_readable(local)
                     audio_kw = extract_audio_kwargs(kwargs)
                     if audio_kw:
                         raw = await _get_raw_bytes(data, session)
@@ -1043,9 +1097,12 @@ async def process_content_recursive(
                         if base64_data:
                             content["input_audio"]["data"] = base64_data
                 except Exception as e:
-                    logger.error(
-                        f"处理音频数据失败 {safe_repr_source(data)}: {safe_repr_error(str(e))}"
-                    )
+                    if local is not None:
+                        _mark_unavailable(content, "audio", local, e)
+                    else:
+                        logger.error(
+                            f"处理音频数据失败 {safe_repr_source(data)}: {safe_repr_error(str(e))}"
+                        )
 
         else:
             for key, value in content.items():

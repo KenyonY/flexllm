@@ -1,6 +1,9 @@
 """Tests for media (video/audio) preprocessing support."""
 
 import base64
+import copy
+import errno
+import os
 
 import pytest
 
@@ -9,6 +12,8 @@ from flexllm.msg_processors.unified_processor import (
     _is_source_needs_conversion,
     process_content_recursive,
 )
+
+ENOENT = os.strerror(errno.ENOENT)
 
 
 class TestIsSourceNeedsConversion:
@@ -439,3 +444,81 @@ class TestOpenAIClientAudioConversion:
 
         messages = [{"role": "user", "content": "纯文本"}]
         assert OpenAIClient._convert_audio_url_to_input_audio(messages) == messages
+
+
+class TestLocalMediaUnavailable:
+    """本地媒体读不到时整块替换为文字占位，而不是把本地路径发给后端"""
+
+    async def test_missing_local_sources_become_placeholders(self, tmp_path):
+        from flexllm.msg_processors.unified_processor import unified_messages_preprocess
+
+        missing = tmp_path / "gone"
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"{missing}/a.png"}},
+                    {"type": "image_url", "image_url": {"url": f"file://{missing}/b.png"}},
+                    {"type": "audio_url", "audio_url": {"url": f"{missing}/c.wav"}},
+                    {"type": "video_url", "video_url": {"url": f"{missing}/d.mp4"}},
+                    {"type": "input_audio", "input_audio": {"data": f"{missing}/e.wav"}},
+                ],
+            }
+        ]
+        snapshot = copy.deepcopy(messages)
+        out = await unified_messages_preprocess(messages)
+
+        assert messages == snapshot
+        assert out[0]["content"] == [
+            {"type": "text", "text": f"[{kind} unavailable: {missing}/{name}: {ENOENT}]"}
+            for kind, name in [
+                ("image", "a.png"),
+                ("image", "b.png"),
+                ("audio", "c.wav"),
+                ("video", "d.mp4"),
+                ("audio", "e.wav"),
+            ]
+        ]
+
+    async def test_relative_path_reported_as_absolute(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        content = {"type": "video_url", "video_url": {"url": "d.mp4"}}
+        await process_content_recursive(content)
+        assert content == {
+            "type": "text",
+            "text": f"[video unavailable: {tmp_path}/d.mp4: {ENOENT}]",
+        }
+
+    async def test_undecodable_local_image_becomes_placeholder(self, tmp_path):
+        f = tmp_path / "broken.png"
+        f.write_bytes(b"not an image")
+        content = {"type": "image_url", "image_url": {"url": str(f)}}
+        await process_content_recursive(content)
+        assert content["type"] == "text"
+        assert content["text"].startswith(f"[image unavailable: {f}: ")
+
+    async def test_video_frames_path_missing_file_becomes_placeholder(self, tmp_path):
+        content = [{"type": "video_url", "video_url": {"url": str(tmp_path / "d.mp4")}}]
+        await process_content_recursive(content, video_fps=1.0)
+        assert content[0]["type"] == "text"
+        assert "video unavailable" in content[0]["text"]
+
+    async def test_unreachable_http_url_is_kept(self):
+        url = "http://127.0.0.1:1/x.mp4"
+        content = {"type": "video_url", "video_url": {"url": url}}
+        await process_content_recursive(content)
+        assert content == {"type": "video_url", "video_url": {"url": url}}
+
+    async def test_client_preprocess_uses_placeholder(self, tmp_path):
+        """流式与非流式共用 _preprocess_messages，占位替换在这里生效"""
+        from flexllm import OpenAIClient
+
+        client = OpenAIClient(base_url="http://x/v1", model="m")
+        messages = [
+            {
+                "role": "user",
+                "content": [{"type": "video_url", "video_url": {"url": str(tmp_path / "d.mp4")}}],
+            }
+        ]
+        out = await client._preprocess_messages(messages, preprocess_msg=True)
+        assert out[0]["content"][0]["type"] == "text"

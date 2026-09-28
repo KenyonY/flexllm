@@ -9,6 +9,7 @@ from flexllm.cli.config import FlexLLMConfig, model_client_kwargs
 from flexllm.clients.message_images import (
     TOOL_IMAGE_PLACEHOLDER,
     TOOL_IMAGES_HEADER,
+    VIDEO_OMITTED_TEXT,
     VISION_OMITTED_TEXT,
 )
 
@@ -254,3 +255,56 @@ def test_string_tool_content_body_is_unchanged():
         "role": "user",
         "content": [{"type": "tool_result", "tool_use_id": "c1", "content": "r1"}],
     }
+
+
+def _video(data: str) -> dict:
+    return {"type": "video_url", "video_url": {"url": f"data:video/mp4;base64,{data}"}}
+
+
+class TestVideoDowngrade:
+    def _history(self):
+        return [
+            {"role": "user", "content": [{"type": "text", "text": "看视频"}, _video("UV")]},
+            _assistant_calls("c1"),
+            {
+                "role": "tool",
+                "tool_call_id": "c1",
+                "content": [{"type": "text", "text": "clip"}, _video("TV"), _img("IMG")],
+            },
+        ]
+
+    @pytest.mark.parametrize("make", ALL_CLIENTS)
+    def test_user_and_tool_videos_replaced_images_kept(self, make):
+        text = repr(make(video=False)._build_request_body(self._history(), "m"))
+        assert "'UV'" not in text and "'TV'" not in text
+        assert text.count(VIDEO_OMITTED_TEXT) == 2
+        assert "IMG" in text
+
+    @pytest.mark.parametrize("make", ALL_CLIENTS)
+    def test_default_body_unchanged(self, make):
+        history = self._history()
+        assert make()._build_request_body(history, "m") == make(video=True)._build_request_body(
+            history, "m"
+        )
+        assert VIDEO_OMITTED_TEXT not in repr(make()._build_request_body(history, "m"))
+
+    def test_default_and_pool_exposure(self):
+        assert LLMClient(base_url="http://x/v1", model="m").video is True
+        assert LLMClient(base_url="http://x/v1", model="m", video=False).video is False
+        pool = LLMClient(
+            endpoints=[{"base_url": "http://a/v1"}, {"base_url": "http://b/v1"}],
+            model="m",
+            video=False,
+        )
+        assert pool.video is False
+
+    def test_config(self, tmp_path):
+        with pytest.raises(ValueError, match="video"):
+            model_client_kwargs({"id": "m", "base_url": "http://x/v1", "video": "no"})
+        path = tmp_path / "c.yaml"
+        path.write_text(
+            "default: m\nmodels:\n  - id: m\n    base_url: http://x/v1\n    video: false\n"
+            "    temperature: 0.1\n"
+        )
+        assert FlexLLMConfig(path).get_model_params("m") == {"temperature": 0.1}
+        assert LLMClient.from_config(str(path)).video is False

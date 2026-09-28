@@ -37,6 +37,11 @@ result = await client.complete(processed)
 
 **支持的来源：** 本地路径、`file://` URI、HTTP/HTTPS URL、`data:` URI（直接透传）。
 
+**读取失败：** 本地来源（普通路径含相对路径、`file://`）读取或编码失败时，整个媒体块替换为
+文本块 `[video unavailable: /abs/path/d.mp4: No such file or directory]`（按块类型写
+image/video/audio），并打 warning——远端后端读不到调用方机器上的路径，原样透传必然 400，
+且路径进了会话历史后每轮都会失败。HTTP(S) URL 失败时保留原 URL，交给后端自己拉取。
+
 **跨 Provider 格式转换：** Claude 和 Gemini 客户端会自动将 OpenAI 格式转换为各自原生格式：
 - Claude: `video_url`/`audio_url` → `document` 类型，`input_audio` → `document` 类型
 - Gemini: 统一转换为 `inline_data` 格式
@@ -63,10 +68,11 @@ result = await client.complete(processed)
 
 纯字符串或纯文本块的 tool content 原样发送，与之前一致。
 
-**不支持视觉的模型**：在模型配置里加 `vision: false`（或 `LLMClient(..., vision=False)`）。
-所有消息（user 与 tool）里的图片块在发送前替换为 `[image omitted: model does not support vision]`，
-而不是让请求 400——否则图片一旦进入会话历史，之后每次请求都会失败。调用方可读 `client.vision`
-提前告诉模型"当前模型看不了图"。
+**不支持视觉/视频的模型**：在模型配置里加 `vision: false` / `video: false`（或
+`LLMClient(..., vision=False, video=False)`）。所有消息（user 与 tool）里的图片块在发送前替换为
+`[image omitted: model does not support vision]`，`video_url` 块替换为
+`[video omitted: model does not support video]`，而不是让请求 400——否则媒体一旦进入会话历史，
+之后每次请求都会失败。调用方可读 `client.vision` / `client.video` 提前告诉模型当前能力。
 
 ```yaml
 models:
