@@ -35,7 +35,7 @@ from .batch_helpers import (
     validate_batch_params,
 )
 from .completion import CompletionMixin, merge_tool_call_delta, warn_legacy_response
-from .message_images import omit_images, omit_videos
+from .message_images import IMAGE_PART_TYPES, VIDEO_PART_TYPES, omit_parts
 
 if TYPE_CHECKING:
     from ..async_api.interface import RequestResult
@@ -592,13 +592,18 @@ class LLMClientBase(CompletionMixin, ABC):
         """模型是否支持视频输入。"""
         return self._video
 
-    def _vision_messages(self, messages: list[dict]) -> list[dict]:
-        """按模型能力降级图片/视频块；各子类在 _build_request_body 入口调用。"""
+    def _unsupported_part_types(self) -> frozenset:
+        """本模型不接收的内容块类型。发送前替换为占位，预处理时也跳过（不读不编码）。"""
+        types = frozenset()
         if not self._vision:
-            messages = omit_images(messages)
+            types |= IMAGE_PART_TYPES
         if not self._video:
-            messages = omit_videos(messages)
-        return messages
+            types |= VIDEO_PART_TYPES
+        return types
+
+    def _omit_unsupported_parts(self, messages: list[dict]) -> list[dict]:
+        """按模型能力降级媒体块；各子类在 _build_request_body 入口调用。"""
+        return omit_parts(messages, self._unsupported_part_types())
 
     def _get_effective_model(self, model: str = None) -> str:
         effective_model = model or self._model
@@ -645,6 +650,7 @@ class LLMClientBase(CompletionMixin, ABC):
                 proxy=self._proxy,
                 processor=self._get_unified_processor(),
                 missing_local_media=self._missing_local_media,
+                skip_part_types=self._unsupported_part_types(),
             )
         return messages
 
@@ -659,6 +665,7 @@ class LLMClientBase(CompletionMixin, ABC):
                 proxy=self._proxy,
                 processor=self._get_unified_processor(),
                 missing_local_media=self._missing_local_media,
+                skip_part_types=self._unsupported_part_types(),
             )
         return messages_list
 

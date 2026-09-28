@@ -990,9 +990,13 @@ async def process_content_recursive(
     session: aiohttp.ClientSession | None = None,
     processor: UnifiedImageProcessor | None = None,
     missing_local_media: str = "passthrough",
+    skip_part_types: frozenset = frozenset(),
     **kwargs,
 ):
     """递归处理内容，根据 type 字段路由不同的媒体处理逻辑。
+
+    skip_part_types: 不处理的块类型（原样保留）。客户端传入目标模型不接收、发送前会被
+        替换为占位的类型，避免白读白编码（如 video=False 时的大视频）。
 
     missing_local_media: 本地来源（路径/file://）读取或编码失败时的处理，
         "passthrough"（默认）原样发送路径，"placeholder" 整块换成
@@ -1023,6 +1027,9 @@ async def process_content_recursive(
 
     if isinstance(content, dict):
         item_type = content.get("type")
+
+        if item_type in skip_part_types:
+            return
 
         if item_type == "image_url":
             url = content.get("image_url", {}).get("url", "")
@@ -1131,7 +1138,7 @@ async def process_content_recursive(
         else:
             for key, value in content.items():
                 await process_content_recursive(
-                    value, session, processor, missing_local_media, **kwargs
+                    value, session, processor, missing_local_media, skip_part_types, **kwargs
                 )
 
     elif isinstance(content, list):
@@ -1140,7 +1147,12 @@ async def process_content_recursive(
         while i < len(content):
             item = content[i]
             # video_fps 存在时，将 video_url 切帧为 image_url 序列
-            if video_fps and isinstance(item, dict) and item.get("type") == "video_url":
+            if (
+                video_fps
+                and "video_url" not in skip_part_types
+                and isinstance(item, dict)
+                and item.get("type") == "video_url"
+            ):
                 url = item.get("video_url", {}).get("url", "")
                 local = _local_media_path(url) if url else None
                 # 本地文件不可读时不切帧，交给下面的默认处理按 missing_local_media 降级
@@ -1157,7 +1169,9 @@ async def process_content_recursive(
                             f"{safe_repr_error(str(e))}，回退到原始编码"
                         )
             # 其他项或帧提取失败时走默认处理
-            await process_content_recursive(item, session, processor, missing_local_media, **kwargs)
+            await process_content_recursive(
+                item, session, processor, missing_local_media, skip_part_types, **kwargs
+            )
             i += 1
 
 

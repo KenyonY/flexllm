@@ -2,13 +2,13 @@
 
 统一消息格式允许 role=tool 的 content 是块列表（text + image_url），各协议在转换出口
 按自身能力适配：
-- omit_images / omit_videos: 模型不支持视觉/视频时，把对应块替换为占位文本，避免带图/视频
-  的历史让会话永久 400。
+- omit_parts: 模型不接收的块（图片/视频/音频）替换为占位文本，避免带媒体的历史让会话
+  永久 400。
 - move_tool_images_to_user: OpenAI Chat Completions 的 tool 消息只收文本，把图片挪到
   整串 tool 消息之后的一条 user 消息里。
 """
 
-IMAGE_PART_TYPES = {"image_url", "image"}
+IMAGE_PART_TYPES = frozenset({"image_url", "image"})
 VISION_OMITTED_TEXT = "[image omitted: model does not support vision]"
 VIDEO_OMITTED_TEXT = "[video omitted: model does not support video]"
 AUDIO_OMITTED_TEXT = "[audio omitted: model does not support audio]"
@@ -52,16 +52,21 @@ def _omit_parts(messages: list[dict], part_types: set, placeholder: str) -> list
     return result
 
 
-def omit_images(messages: list[dict]) -> list[dict]:
-    return _omit_parts(messages, IMAGE_PART_TYPES, VISION_OMITTED_TEXT)
+VIDEO_PART_TYPES = frozenset({"video_url"})
+AUDIO_PART_TYPES = frozenset({"audio_url", "input_audio"})
+_PLACEHOLDERS = (
+    (IMAGE_PART_TYPES, VISION_OMITTED_TEXT),
+    (VIDEO_PART_TYPES, VIDEO_OMITTED_TEXT),
+    (AUDIO_PART_TYPES, AUDIO_OMITTED_TEXT),
+)
 
 
-def omit_videos(messages: list[dict]) -> list[dict]:
-    return _omit_parts(messages, {"video_url"}, VIDEO_OMITTED_TEXT)
-
-
-def omit_audios(messages: list[dict]) -> list[dict]:
-    return _omit_parts(messages, {"audio_url", "input_audio"}, AUDIO_OMITTED_TEXT)
+def omit_parts(messages: list[dict], part_types: frozenset) -> list[dict]:
+    """把 part_types 中的块按类别（图片/视频/音频）替换为对应占位文本。"""
+    for types, placeholder in _PLACEHOLDERS:
+        if types & part_types:
+            messages = _omit_parts(messages, types & part_types, placeholder)
+    return messages
 
 
 def move_tool_images_to_user(messages: list[dict]) -> list[dict]:

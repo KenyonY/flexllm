@@ -196,7 +196,7 @@ class GeminiClient(LLMClientBase):
                 Gemini 原生格式原样透传
             tool_choice: OpenAI 语义（"auto"/"none"/"required"/指定函数）转为 toolConfig
         """
-        messages = self._vision_messages(messages)
+        messages = self._omit_unsupported_parts(messages)
         if _is_gemini_2(model):
             # 2.x 不支持多模态 functionResponse（400），而图片与 functionResponse 同一条消息时
             # 模型看不见它（实测）；只有单独一条紧随其后的 user 消息能被看到

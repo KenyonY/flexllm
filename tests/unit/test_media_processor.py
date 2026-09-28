@@ -595,3 +595,75 @@ class TestFileUriDecoding:
         await process_content_recursive(parts, missing_local_media="placeholder")
         assert parts[0]["image_url"]["url"].startswith("data:image/")
         assert base64.b64decode(parts[1]["input_audio"]["data"]) == b"fake wav"
+
+
+class TestSkipUnsupportedParts:
+    """模型不接收的块在预处理阶段就跳过：不读文件、不编码，发送前再替换为占位"""
+
+    @pytest.fixture
+    def files(self, tmp_path):
+        paths = {}
+        for name in ("v.mp4", "a.wav"):
+            paths[name] = tmp_path / name
+            paths[name].write_bytes(b"fake")
+        paths["i.png"] = TEST_IMAGE
+        return paths
+
+    def _messages(self, files):
+        return [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "video_url", "video_url": {"url": str(files["v.mp4"])}},
+                    {"type": "audio_url", "audio_url": {"url": str(files["a.wav"])}},
+                    {"type": "image_url", "image_url": {"url": str(files["i.png"])}},
+                ],
+            }
+        ]
+
+    @staticmethod
+    def _kinds(messages):
+        return [p[p["type"]]["url"][:5] for p in messages[0]["content"]]
+
+    @pytest.mark.parametrize(
+        "make,expected",
+        [
+            (lambda: _openai_client(video=False), ["/", "data:", "data:"]),
+            (lambda: _openai_client(vision=False), ["data:", "data:", "/"]),
+            (lambda: _claude_client(), ["/", "/", "data:"]),
+            (lambda: _openai_client(), ["data:", "data:", "data:"]),
+        ],
+    )
+    async def test_unsupported_parts_are_not_encoded(self, files, make, expected):
+        client = make()
+        out = await client._preprocess_messages(self._messages(files), preprocess_msg=True)
+        assert [k if k == "data:" else "/" for k in self._kinds(out)] == expected
+        batch = await client._preprocess_messages_batch([self._messages(files)], True)
+        assert batch[0] == out
+
+    async def test_skipped_video_is_not_split_into_frames(self, files):
+        content = [{"type": "video_url", "video_url": {"url": str(files["v.mp4"])}}]
+        await process_content_recursive(
+            content, skip_part_types=frozenset({"video_url"}), video_fps=1.0
+        )
+        assert content == [{"type": "video_url", "video_url": {"url": str(files["v.mp4"])}}]
+
+    async def test_body_still_carries_placeholder(self, files):
+        from flexllm.clients.message_images import VIDEO_OMITTED_TEXT
+
+        client = _openai_client(video=False)
+        out = await client._preprocess_messages(self._messages(files), preprocess_msg=True)
+        body = client._build_request_body(out, "m")
+        assert body["messages"][0]["content"][0] == {"type": "text", "text": VIDEO_OMITTED_TEXT}
+
+
+def _openai_client(**kw):
+    from flexllm import OpenAIClient
+
+    return OpenAIClient(base_url="http://x/v1", model="m", **kw)
+
+
+def _claude_client(**kw):
+    from flexllm import ClaudeClient
+
+    return ClaudeClient(api_key="k", model="claude-sonnet-5", **kw)

@@ -26,10 +26,10 @@ from .base import (
     _decode_error_body,
 )
 from .message_images import (
+    AUDIO_PART_TYPES,
     TOOL_IMAGE_PLACEHOLDER,
+    VIDEO_PART_TYPES,
     has_non_text_parts,
-    omit_audios,
-    omit_videos,
 )
 
 # Anthropic Messages 流式事件的全集（含本客户端不处理但属于规范的 ping / *_stop / error）。
@@ -212,6 +212,11 @@ class ClaudeClient(LLMClientBase):
             **kwargs,
         )
 
+    def _unsupported_part_types(self) -> frozenset:
+        # Anthropic Messages API 没有接收视频/音频的内容块（document 只收 PDF 与纯文本），
+        # 兼容端点也不认 document 形式的音视频，无论 video 开关都换成占位，否则请求必然被拒
+        return super()._unsupported_part_types() | VIDEO_PART_TYPES | AUDIO_PART_TYPES
+
     # ========== 实现基类核心方法 ==========
 
     def _get_url(self, model: str, stream: bool = False) -> str:
@@ -282,9 +287,7 @@ class ClaudeClient(LLMClientBase):
         system_content = None
         user_messages = []
 
-        # Anthropic Messages API 没有接收视频/音频的内容块（document 只收 PDF 与纯文本），
-        # 兼容端点也不认 document 形式的音视频，无论 video 开关都换成占位，否则请求必然被拒
-        for msg in omit_audios(omit_videos(self._vision_messages(messages))):
+        for msg in self._omit_unsupported_parts(messages):
             if msg.get("role") == "system":
                 # 合并多个 system messages
                 content = msg.get("content", "")

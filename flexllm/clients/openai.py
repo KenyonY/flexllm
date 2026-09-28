@@ -175,7 +175,7 @@ class OpenAIClient(AudioMixin, LLMClientBase):
         """
         # Chat Completions 的 tool 消息只收文本：图片挪到整串 tool 消息之后的 user 消息。
         # 先挪再降级，vision=False 时 tool content 同样是字符串
-        processed_messages = self._vision_messages(move_tool_images_to_user(messages))
+        processed_messages = self._omit_unsupported_parts(move_tool_images_to_user(messages))
         processed_messages = self._convert_audio_url_to_input_audio(processed_messages)
 
         body = {"messages": processed_messages, "model": model, "stream": stream}
