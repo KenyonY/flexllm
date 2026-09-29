@@ -44,8 +44,8 @@ def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error
         frame = frame.f_back
     warnings.warn(
         "Legacy completion return shapes are deprecated and will be removed in flexllm 0.18.0; "
-        "use complete()/complete_batch() (or their _sync variants). complete() returns a "
-        "ChatCompletionResult and raises typed errors; complete_batch() returns an equal-length "
+        "use chat()/chat_batch() (or their _sync variants). chat() returns a "
+        "ChatCompletionResult and raises typed errors; chat_batch() returns an equal-length "
         "BatchResult whose failed items carry .error instead of raising. "
         "Read .content for text and .raw_response for the provider response. "
         "Existing return values stay unchanged until 0.18.0.",
@@ -93,19 +93,19 @@ class CompletionMixin:
                 + ", ".join(sorted(reserved))
             )
 
-    async def complete(self, messages, model=None, **kwargs) -> "ChatCompletionResult":
+    async def chat(self, messages, model=None, **kwargs) -> "ChatCompletionResult":
         """Return content, usage, tools, reasoning and the raw response in one object."""
         self._validate_completion_options(kwargs)
         return await self.chat_completions(
             messages, model=model, return_usage=True, raise_on_error=True, **kwargs
         )
 
-    def complete_sync(self, messages, model=None, **kwargs) -> "ChatCompletionResult":
-        """Synchronous counterpart of complete()."""
-        return asyncio.run(self.complete(messages, model=model, **kwargs))
+    def chat_sync(self, messages, model=None, **kwargs) -> "ChatCompletionResult":
+        """Synchronous counterpart of chat()."""
+        return asyncio.run(self.chat(messages, model=model, **kwargs))
 
-    async def complete_stream(self, messages, model=None, **kwargs):
-        """流式完成：边生成边产出增量事件，结尾给出与 complete() 同构的完整结果。
+    async def chat_stream(self, messages, model=None, **kwargs):
+        """流式完成：边生成边产出增量事件，结尾给出与 chat() 同构的完整结果。
 
         事件恒为 dict（不受任何开关影响，思考内容不会混进正文）：
             {"type": "content", "content": str}
@@ -116,7 +116,7 @@ class CompletionMixin:
 
         result 里 content/reasoning_content/tool_calls 已累加好，finish_reason/usage/
         assistant_message（下一轮需原样回传的续接状态）也都在上面，调用方无需自己拼。
-        失败抛 typed error，与 complete() 相同；多 endpoint 时只在首个事件前故障转移。
+        失败抛 typed error，与 chat() 相同；多 endpoint 时只在首个事件前故障转移。
         """
         from .base import ChatCompletionResult, ToolCall
 
@@ -168,7 +168,7 @@ class CompletionMixin:
             ),
         }
 
-    async def complete_batch(self, messages_list, model=None, **kwargs) -> "BatchResult":
+    async def chat_batch(self, messages_list, model=None, **kwargs) -> "BatchResult":
         """批量完成：等长同构的 BatchResult，单条失败不抛异常。
 
         批量里"某条失败"是预期结果的一种，不是控制流事件——把它升级成异常会逼调用方
@@ -180,6 +180,6 @@ class CompletionMixin:
         run = await self._run_batch(messages_list, model=model, return_usage=True, **kwargs)
         return run.to_batch_result()
 
-    def complete_batch_sync(self, messages_list, model=None, **kwargs) -> "BatchResult":
-        """Synchronous counterpart of complete_batch()."""
-        return asyncio.run(self.complete_batch(messages_list, model=model, **kwargs))
+    def chat_batch_sync(self, messages_list, model=None, **kwargs) -> "BatchResult":
+        """Synchronous counterpart of chat_batch()."""
+        return asyncio.run(self.chat_batch(messages_list, model=model, **kwargs))

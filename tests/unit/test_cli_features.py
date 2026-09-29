@@ -191,7 +191,7 @@ class _FakeLLMClient:
     async def __aexit__(self, *args):
         return False
 
-    async def complete(self, messages, **kwargs):
+    async def chat(self, messages, **kwargs):
         _FakeLLMClient.last_call = {"messages": messages, "kwargs": kwargs}
         if isinstance(_FakeLLMClient.result, BaseException):
             raise _FakeLLMClient.result

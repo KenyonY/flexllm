@@ -187,7 +187,7 @@ class TestBatchFallbackContract:
 
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter("always")
-            results = await pool.complete_batch(messages, distribute=False)
+            results = await pool.chat_batch(messages, distribute=False)
 
         assert not [w for w in captured if issubclass(w.category, LegacyResponseWarning)]
         assert [result.content for result in results] == ["ok-1", "ok-2"]
@@ -242,9 +242,7 @@ class TestBatchFallbackContract:
                 return_value=_run([None], {0: LLMHTTPError(f"HTTP {status}", status_code=status)})
             )
 
-        results = await pool.complete_batch(
-            [[{"role": "user", "content": "test"}]], distribute=False
-        )
+        results = await pool.chat_batch([[{"role": "user", "content": "test"}]], distribute=False)
 
         assert results.failed_count == 1
         assert results[0].content is None
@@ -274,9 +272,7 @@ class TestBatchFallbackContract:
             )
         )
 
-        results = await pool.complete_batch(
-            [[{"role": "user", "content": "test"}]], distribute=True
-        )
+        results = await pool.chat_batch([[{"role": "user", "content": "test"}]], distribute=True)
 
         assert results.cost is not None
         assert results.cost.request_count == 0
@@ -304,7 +300,7 @@ class TestBatchFallbackContract:
             return original(self, index, content, *args, **kwargs)
 
         with patch.object(JsonlWriter, "write_result", record):
-            results = await pool.complete_batch(
+            results = await pool.chat_batch(
                 [[{"role": "user", "content": "a"}], [{"role": "user", "content": "b"}]],
                 distribute=False,
                 output_jsonl=str(output),

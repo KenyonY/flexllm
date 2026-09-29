@@ -606,7 +606,7 @@ class TestPoolEndToEnd:
                 fallback=True,
             ) as pool:
                 messages_list = create_messages(10)
-                results = await pool.complete_batch(messages_list, show_progress=True)
+                results = await pool.chat_batch(messages_list, show_progress=True)
                 assert results.failed_count == 10
                 assert all(not r.ok for r in results)
                 assert len(results.errors) == 10

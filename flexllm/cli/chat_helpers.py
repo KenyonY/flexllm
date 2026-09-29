@@ -51,7 +51,7 @@ def single_chat(
 
             if output_format == "json":
                 t0 = time.perf_counter()
-                result = await client.complete(messages, **kwargs)
+                result = await client.chat(messages, **kwargs)
                 elapsed_ms = int((time.perf_counter() - t0) * 1000)
                 payload = {
                     "content": result.content,
@@ -76,7 +76,7 @@ def single_chat(
                         full_response += chunk
                     result = full_response
                 else:
-                    result = (await client.complete(messages, **kwargs)).content
+                    result = (await client.chat(messages, **kwargs)).content
                 output = str(result)
                 if extract:
                     code = extract_code_block(output)
@@ -198,7 +198,7 @@ def interactive_chat(
                         messages.append({"role": "assistant", "content": full_response})
                     else:
                         try:
-                            result = (await client.complete(messages, **kwargs)).content
+                            result = (await client.chat(messages, **kwargs)).content
                         except LLMRequestError as error:
                             # 失败：打印错误、回滚本轮 user 消息，不入历史，继续会话
                             messages.pop()

@@ -171,7 +171,7 @@ class ServeServer:
 
         try:
             try:
-                result = await self._client.complete(messages, **kwargs)
+                result = await self._client.chat(messages, **kwargs)
             except LLMRequestError as error:
                 elapsed = time.perf_counter() - start
                 logger.error("POST /api/generate 502 %.3fs error=%s", elapsed, error)
@@ -282,9 +282,9 @@ class ServeServer:
         messages_list = [self._build_messages(c) for c in contents]
 
         try:
-            # 批量走 complete_batch：并发/QPS 由客户端统一控制，单条失败不打断整批，
+            # 批量走 chat_batch：并发/QPS 由客户端统一控制，单条失败不打断整批，
             # 失败项自带 error，不需要在这里靠 isinstance 分辨三种返回值。
-            batch = await self._client.complete_batch(messages_list, show_progress=False, **kwargs)
+            batch = await self._client.chat_batch(messages_list, show_progress=False, **kwargs)
             results = [
                 self._parse_result(r.raw_response)
                 if r.ok

@@ -30,7 +30,7 @@ client = LLMClient(base_url="https://api.openai.com/v1", model="gpt-4", api_key=
 
 # Process 100k requests with automatic checkpoint recovery
 # Interrupted at 50k? Just restart - it continues from 50,001
-results = await client.complete_batch(
+results = await client.chat_batch(
     messages_list,
     output_jsonl="results.jsonl",  # Progress saved here
     show_progress=True,
@@ -53,7 +53,7 @@ client = LLMClient(
     fallback=True,  # Auto-switch on endpoint failure
 )
 
-results = await client.complete_batch(messages_list, output_jsonl="results.jsonl")
+results = await client.chat_batch(messages_list, output_jsonl="results.jsonl")
 ```
 
 ---
@@ -110,25 +110,25 @@ async with LLMClient(
     base_url="https://api.openai.com/v1",
     api_key="your-api-key"
 ) as client:
-    result = await client.complete([{"role": "user", "content": "Hello!"}])
+    result = await client.chat([{"role": "user", "content": "Hello!"}])
     print(result.content)
     print(result.usage)          # {'prompt_tokens': 10, 'completion_tokens': 5, ...}
     print(result.finish_reason)  # "stop" / "length" / "tool_calls" ...
 
 # Sync version (also supports context manager)
 with LLMClient(model="gpt-4", base_url="...", api_key="...") as client:
-    result = client.complete_sync([{"role": "user", "content": "Hello!"}])
+    result = client.chat_sync([{"role": "user", "content": "Hello!"}])
 ```
 
-`complete()` 总是返回 `ChatCompletionResult`（`content` / `usage` / `tool_calls` /
+`chat()` 总是返回 `ChatCompletionResult`（`content` / `usage` / `tool_calls` /
 `reasoning_content` / `finish_reason` / `raw_response`），失败抛出结构化
 `LLMRequestError`（带 `status_code`、`response_data`、`retryable`）。
 
-批量则相反——单条失败是数据不是控制流，`complete_batch()` 不抛异常，返回等长同构的
+批量则相反——单条失败是数据不是控制流，`chat_batch()` 不抛异常，返回等长同构的
 `BatchResult`，失败项是 `content=None` 且带 `.error` 的同一种结果对象：
 
 ```python
-results = await client.complete_batch(messages_list)
+results = await client.chat_batch(messages_list)
 
 for r in results:                      # 可直接迭代/索引，与 list 写法一致
     if r.ok:
@@ -153,7 +153,7 @@ messages_list = [
 ]
 
 # Interrupted at 50,000? Re-run and it continues from 50,001.
-results = await client.complete_batch(
+results = await client.chat_batch(
     messages_list,
     output_jsonl="results.jsonl",  # Progress saved here
     show_progress=True,
@@ -182,10 +182,10 @@ client = LLMClient(
 )
 
 # Single request — automatic failover across endpoints
-result = await client.complete(messages)
+result = await client.chat(messages)
 
 # Distributed batch — shared queue, dynamic load balancing, checkpoint recovery
-results = await client.complete_batch(
+results = await client.chat_batch(
     messages_list,
     distribute=True,
     output_jsonl="results.jsonl",
@@ -193,7 +193,7 @@ results = await client.complete_batch(
 )
 
 # Streaming with failover (only before the first event; a started stream never restarts)
-async for event in client.complete_stream(messages):
+async for event in client.chat_stream(messages):
     if event["type"] == "content":
         print(event["content"], end="", flush=True)
 ```
@@ -221,21 +221,21 @@ client = LLMClient(
 )
 
 # First call: API request (~2s, ~$0.01)
-result1 = await client.complete(messages)
+result1 = await client.chat(messages)
 
 # Second call: Cache hit (~0.001s, $0)
-result2 = await client.complete(messages)   # result2.cached is True
+result2 = await client.chat(messages)   # result2.cached is True
 ```
 
 ### Cost Tracking
 
 ```python
 # Cost report comes with the batch result — no extra return-shape flag
-results = await client.complete_batch(messages_list)
+results = await client.chat_batch(messages_list)
 print(f"Total cost: ${results.cost.total_cost:.4f}")
 
 # Real-time cost display in progress bar
-results = await client.complete_batch(
+results = await client.chat_batch(
     messages_list,
     track_cost=True,  # Shows 💰 $0.0012 in progress bar
 )
@@ -245,11 +245,11 @@ results = await client.complete_batch(
 
 ```python
 # Token-by-token streaming: dict events, then one final "result"
-async for event in client.complete_stream(messages):
+async for event in client.chat_stream(messages):
     if event["type"] == "content":
         print(event["content"], end="", flush=True)
     elif event["type"] == "result":
-        result = event["result"]  # ChatCompletionResult, same shape as complete()
+        result = event["result"]  # ChatCompletionResult, same shape as chat()
 
 # Batch streaming - process results as they complete
 async for result in client.iter_chat_completions_batch(messages_list):
@@ -261,7 +261,7 @@ async for result in client.iter_chat_completions_batch(messages_list):
 Unified interface for DeepSeek-R1, Qwen3, Claude extended thinking, Gemini thinking.
 
 ```python
-result = await client.complete(
+result = await client.chat(
     messages,
     thinking=True,      # Enable where the provider supports a thinking toggle
 )
@@ -311,7 +311,7 @@ messages = [
 
 # All local paths → base64 data URIs (async)
 processed = await messages_preprocess(messages)
-result = await client.complete(processed)
+result = await client.chat(processed)
 ```
 
 | Content type   | Source field       | Output format             |
@@ -340,7 +340,7 @@ tools = [{
     },
 }]
 
-result = await client.complete(
+result = await client.chat(
     messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
     tools=tools,
 )
@@ -553,12 +553,12 @@ LLMClient(
 
 | Method                                       | Description                                     |
 | -------------------------------------------- | ----------------------------------------------- |
-| `complete(messages)`                         | Single async request → `ChatCompletionResult`   |
-| `complete_sync(messages)`                    | Single sync request                             |
-| `complete_batch(messages_list)`              | Batch async with checkpoint → `BatchResult`     |
-| `complete_batch_sync(messages_list)`         | Batch sync                                      |
+| `chat(messages)`                         | Single async request → `ChatCompletionResult`   |
+| `chat_sync(messages)`                    | Single sync request                             |
+| `chat_batch(messages_list)`              | Batch async with checkpoint → `BatchResult`     |
+| `chat_batch_sync(messages_list)`         | Batch sync                                      |
 | `iter_chat_completions_batch(messages_list)` | Streaming batch results                         |
-| `complete_stream(messages)`                  | Streaming events + final `ChatCompletionResult` |
+| `chat_stream(messages)`                  | Streaming events + final `ChatCompletionResult` |
 
 `chat_completions*` 是上一代接口，形状不变但已弃用（0.18.0 移除）。
 

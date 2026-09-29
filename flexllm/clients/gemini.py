@@ -52,7 +52,7 @@ class GeminiClient(LLMClientBase):
 
     Example (Gemini Developer API):
         >>> client = GeminiClient(api_key="your-key", model="gemini-3-flash-preview")
-        >>> result = await client.complete(messages)
+        >>> result = await client.chat(messages)
 
     Example (Vertex AI):
         >>> client = GeminiClient(
@@ -64,12 +64,12 @@ class GeminiClient(LLMClientBase):
 
     Example (thinking 参数 - 统一的思考控制):
         >>> # 禁用思考（最快响应）
-        >>> result = client.complete_sync(
+        >>> result = client.chat_sync(
         ...     messages=[{"role": "user", "content": "1+1=?"}],
         ...     thinking=False,
         ... )
         >>> # 启用思考并返回思考内容
-        >>> result = client.complete_sync(
+        >>> result = client.chat_sync(
         ...     messages=[{"role": "user", "content": "复杂推理问题"}],
         ...     thinking=True,
         ...     return_raw=True,
@@ -508,7 +508,7 @@ class GeminiClient(LLMClientBase):
             }
 
         Example:
-            >>> result = await client.complete(
+            >>> result = await client.chat(
             ...     messages=[...],
             ...     thinking=True,
             ...     return_raw=True,

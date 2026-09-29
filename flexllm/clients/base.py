@@ -236,7 +236,7 @@ class ChatCompletionResult:
     cached: bool = False
     # 本条为何失败。仅批量路径会填：批量里单条失败是数据不是控制流，返回等长同构列表
     # 比抛异常或塞 None 更好用（调用方用 .ok 分流，失败项仍带 index 对齐）。
-    # 单条 complete() 失败直接抛异常，其结果对象的 error 恒为 None。
+    # 单条 chat() 失败直接抛异常，其结果对象的 error 恒为 None。
     # 不参与序列化：失败项不写缓存、不写 checkpoint（失败项的语义就是下次重跑）。
     error: LLMRequestError | None = None
     # 端到端耗时（秒），与 RequestResult.latency 同义：latency = queue_time + service_time。
@@ -826,7 +826,7 @@ class LLMClientBase(CompletionMixin, ABC):
         """单条聊天完成（失败时抛异常）。
 
         .. deprecated:: 0.17.0
-            用 complete()：同样是失败抛 typed error，但总是返回 ChatCompletionResult，
+            用 chat()：同样是失败抛 typed error，但总是返回 ChatCompletionResult，
             不需要再靠 return_usage 决定拿 str 还是对象。本方法在 0.18.0 移除。
         """
         result = await self.chat_completions(
@@ -879,7 +879,7 @@ class LLMClientBase(CompletionMixin, ABC):
         **kwargs,
     ) -> "_BatchRun":
         """
-        批量执行的单一真源：公开的 chat_completions_batch（旧形状）与 complete_batch
+        批量执行的单一真源：公开的 chat_completions_batch（旧形状）与 chat_batch
         （BatchResult）都是它的包装，两者共用同一份缓存/断点续传/进度/成本逻辑。
 
         Args:
@@ -1262,7 +1262,7 @@ class LLMClientBase(CompletionMixin, ABC):
         """批量聊天完成（旧返回形状）。执行行为见 _run_batch。
 
         .. deprecated:: 0.17.0
-            用 complete_batch()：返回等长的 BatchResult，失败项是带 error 的
+            用 chat_batch()：返回等长的 BatchResult，失败项是带 error 的
             ChatCompletionResult 而不是 None。本方法在 0.18.0 移除。
 
         签名逐字保留 0.16.x 的参数顺序，位置参数调用的旧代码不受影响。

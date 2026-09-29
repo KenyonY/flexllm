@@ -154,11 +154,11 @@ class ClaudeClient(LLMClientBase):
         ...     api_key="your-anthropic-key",
         ...     model="claude-3-5-sonnet-20241022",
         ... )
-        >>> result = await client.complete(messages)
+        >>> result = await client.chat(messages)
 
     Example (thinking 参数 - 扩展思考模式):
         >>> # 启用扩展思考
-        >>> result = client.complete_sync(
+        >>> result = client.chat_sync(
         ...     messages=[{"role": "user", "content": "复杂推理问题"}],
         ...     thinking=True,
         ...     return_raw=True,

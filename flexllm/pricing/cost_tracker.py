@@ -6,7 +6,7 @@
 Example:
     # 仅追踪成本
     client = LLMClient(..., cost_tracker=True)
-    results = await client.complete_batch(messages_list)
+    results = await client.chat_batch(messages_list)
     print(f"Total: ${results.cost.total_cost:.4f}")
 
     # 带预算控制

@@ -32,7 +32,7 @@ async def test_cache_hit_checkpoint_preserves_structured_result(tmp_path):
     cache.get_batch.return_value = ([cached], [])
     client._response_cache = cache
 
-    first = await client.complete_batch(messages, output_jsonl=str(output), show_progress=False)
+    first = await client.chat_batch(messages, output_jsonl=str(output), show_progress=False)
     record = json.loads(output.read_text().strip())
     assert first[0].finish_reason == "stop"
     # checkpoint 默认瘦身：content/usage 只存顶层，raw_response 不落盘
@@ -43,7 +43,7 @@ async def test_cache_hit_checkpoint_preserves_structured_result(tmp_path):
     assert record["usage"]["total_tokens"] == 2
 
     client._response_cache = None
-    restored = await client.complete_batch(messages, output_jsonl=str(output), show_progress=False)
+    restored = await client.chat_batch(messages, output_jsonl=str(output), show_progress=False)
     assert restored[0].content == "hello"
     assert restored[0].usage["total_tokens"] == 2
     assert restored[0].reasoning_content == "reasoning"
@@ -64,14 +64,12 @@ async def test_save_raw_keeps_provider_response_in_checkpoint(tmp_path):
     cache.get_batch.return_value = ([cached], [])
     client._response_cache = cache
 
-    await client.complete_batch(
-        messages, output_jsonl=str(output), show_progress=False, save_raw=True
-    )
+    await client.chat_batch(messages, output_jsonl=str(output), show_progress=False, save_raw=True)
     record = json.loads(output.read_text().strip())
     assert record["result"]["raw_response"] == raw_response
 
     client._response_cache = None
-    restored = await client.complete_batch(
+    restored = await client.chat_batch(
         messages, output_jsonl=str(output), show_progress=False, save_raw=True
     )
     assert restored[0].raw_response == raw_response

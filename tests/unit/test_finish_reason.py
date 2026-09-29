@@ -356,7 +356,7 @@ class TestNonStreamResult:
             return [RequestResult(0, payload, "success", 0.0)], None
 
         monkeypatch.setattr(client._client, "process_requests", fake_process_requests)
-        result = await client.complete([{"role": "user", "content": "hi"}])
+        result = await client.chat([{"role": "user", "content": "hi"}])
         assert result.content == "ok"
         assert result.finish_reason == "stop"
         assert result.raw_response == payload

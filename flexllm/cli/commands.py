@@ -233,7 +233,7 @@ def register_commands(app):
             from flexllm import LLMClient
 
             async with LLMClient(**client_options) as client:
-                return await client.complete(messages, **model_params)
+                return await client.chat(messages, **model_params)
 
         import time
 

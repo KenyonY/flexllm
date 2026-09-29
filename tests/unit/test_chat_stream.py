@@ -1,4 +1,4 @@
-"""complete_stream：事件恒为 dict，结尾给出与 complete() 同构的 ChatCompletionResult"""
+"""chat_stream：事件恒为 dict，结尾给出与 chat() 同构的 ChatCompletionResult"""
 
 import json
 
@@ -31,7 +31,7 @@ USAGE = {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7}
 async def _collect_openai(lines, client_cls=OpenAIClient):
     async with ScriptedServer(stream_lines=lines) as server:
         client = client_cls(base_url=server.base_url, api_key="k", model="m")
-        events = [e async for e in client.complete_stream(MESSAGES)]
+        events = [e async for e in client.chat_stream(MESSAGES)]
         await client.aclose()
     return events
 
@@ -110,13 +110,13 @@ class TestCompleteStream:
         assert [e["type"] for e in events] == ["extra", "content", "result"]
         assert events[-1]["result"].extra == {"x_gateway": {"blocked": True}}
 
-    async def test_pool_exposes_complete_stream(self):
+    async def test_pool_exposes_chat_stream(self):
         lines = [_sse(_chunk({"content": "ok"}, finish_reason="stop")), "data: [DONE]\n\n"]
         async with ScriptedServer(stream_lines=lines) as server:
             pool = LLMClientPool(
                 endpoints=[{"base_url": server.base_url, "api_key": "k", "model": "m"}]
             )
-            events = [e async for e in pool.complete_stream("hi")]
+            events = [e async for e in pool.chat_stream("hi")]
             await pool.aclose()
 
         assert events[-1]["result"].content == "ok"
@@ -171,7 +171,7 @@ class TestCompleteStream:
         ]
         async with ScriptedServer(stream_lines=lines, path="/v1/messages") as server:
             client = ClaudeClient(base_url=server.base_url, api_key="k", model="m")
-            events = [e async for e in client.complete_stream(MESSAGES)]
+            events = [e async for e in client.chat_stream(MESSAGES)]
             await client.aclose()
 
         result = events[-1]["result"]
@@ -184,7 +184,7 @@ class TestCompleteStream:
     async def test_rejects_return_shape_options(self):
         client = OpenAIClient(base_url="http://x/v1", api_key="k", model="m")
         with pytest.raises(ValueError, match="return_usage"):
-            async for _ in client.complete_stream(MESSAGES, return_usage=False):
+            async for _ in client.chat_stream(MESSAGES, return_usage=False):
                 pass
 
 
@@ -213,7 +213,7 @@ class TestCompleteStreamEdges:
         client = OpenAIClient(base_url=f"http://127.0.0.1:{port}/v1", api_key="k", model="m")
         try:
             with pytest.raises(LLMHTTPError) as exc:
-                async for _ in client.complete_stream(MESSAGES):
+                async for _ in client.chat_stream(MESSAGES):
                     pass
             assert exc.value.status_code == 500
         finally:

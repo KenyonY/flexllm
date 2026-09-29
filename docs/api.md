@@ -25,14 +25,14 @@ client = LLMClient(
 
 **方法：**
 
-#### complete / complete_batch（推荐接口）
+#### chat / chat_batch（推荐接口）
 
 ```python
-result = await client.complete(messages, model=None, **gen_kwargs)
-results = await client.complete_batch(messages_list, model=None, **kwargs)
+result = await client.chat(messages, model=None, **gen_kwargs)
+results = await client.chat_batch(messages_list, model=None, **kwargs)
 ```
 
-**单条 `complete()`** 总是返回 `ChatCompletionResult`，失败抛结构化异常：
+**单条 `chat()`** 总是返回 `ChatCompletionResult`，失败抛结构化异常：
 
 | 字段 | 说明 |
 | --- | --- |
@@ -51,11 +51,11 @@ results = await client.complete_batch(messages_list, model=None, **kwargs)
 `LLMTimeoutError` / `LLMResponseError`），带 `status_code`、`response_data`、
 `request_id`、`retryable`。
 
-**批量 `complete_batch()` 不抛异常**：批量里单条失败是预期结果的一种，不是控制流事件。
+**批量 `chat_batch()` 不抛异常**：批量里单条失败是预期结果的一种，不是控制流事件。
 返回等长同构的 `BatchResult`，失败项是 `content=None` 且带 `.error` 的同一种结果对象：
 
 ```python
-results = await client.complete_batch(messages_list, output_jsonl="out.jsonl")
+results = await client.chat_batch(messages_list, output_jsonl="out.jsonl")
 
 for r in results:            # BatchResult 可迭代、可索引、可 len()
     if r.ok:
@@ -72,7 +72,7 @@ results.elapsed           # 秒
 results.raise_for_errors()  # 需要 fail-fast 时显式调用
 ```
 
-只有整批开不了工（参数非法等）才抛异常。`complete_sync` / `complete_batch_sync`
+只有整批开不了工（参数非法等）才抛异常。`chat_sync` / `chat_batch_sync`
 是同步版本。这两个入口不接受 `return_raw` / `return_usage` / `return_summary` /
 `return_cost_report` / `raise_on_error`——返回形状是固定的，传了会直接报错。
 
@@ -98,7 +98,7 @@ async def chat_completions(
 
 单条异步请求。返回形状由 `return_raw` / `return_usage` 决定；默认失败返回
 `RequestResult` 而不抛异常，`raise_on_error=True` 才抛结构化异常。
-使用旧返回形状时发出 `LegacyResponseWarning`。新代码用 `complete()`。
+使用旧返回形状时发出 `LegacyResponseWarning`。新代码用 `chat()`。
 
 `chat_completions_sync`、`chat_completions_or_raise` 同样已弃用。
 
@@ -115,7 +115,7 @@ async def chat_completions_batch(
 ) -> List[str] | Tuple[List[str], dict]
 ```
 
-批量异步请求，支持断点续传。失败项为 `None`——想知道每条为何失败，用 `complete_batch()`。
+批量异步请求，支持断点续传。失败项为 `None`——想知道每条为何失败，用 `chat_batch()`。
 
 #### 旧接口的兼容承诺（到 0.18.0）
 
@@ -127,7 +127,7 @@ async def chat_completions_batch(
 - `return_summary` 在单 endpoint 返回统计字符串、在 pool 返回 dict（两者本就不同）
 - `return_cost_report` 只在启用了 `cost_tracker` 时才多返回一项；**多 endpoint
   分布式批量下不返回**（0.16.x 的分布式路径直接丢弃该参数，这个形状一并保留，
-  但会打一条 warning 指向 `complete_batch().cost`）
+  但会打一条 warning 指向 `chat_batch().cost`）
 - checkpoint JSONL 的字段集合不变；旧文件能被新版续跑，新文件也能被旧版读
   （`resume_from_jsonl` 只挑它认识的键）
 - `transcribe` / `speech` 及其 batch 版本的失败项仍是 `RequestResult`
@@ -135,10 +135,10 @@ async def chat_completions_batch(
 唯一的行为差异：`chat_completions_or_raise` 失败时抛的是 `LLMHTTPError` 等子类而非
 `LLMRequestError` 基类，`except LLMRequestError` 照常捕获。
 
-#### complete_stream（推荐流式接口）
+#### chat_stream（推荐流式接口）
 
 ```python
-async for event in client.complete_stream(messages, model=None, **kwargs):
+async for event in client.chat_stream(messages, model=None, **kwargs):
     ...
 ```
 
@@ -150,20 +150,20 @@ async for event in client.complete_stream(messages, model=None, **kwargs):
 | `content` | `content` | 正文片段 |
 | `tool_call_delta` | `tool_calls` | 工具调用增量（OpenAI 形态，按 `index` 合并） |
 | `extra` | `extra` | 网关带外字段 |
-| `result` | `result` | **最后一条，成功时恰好一次**：`ChatCompletionResult`，与 `complete()` 同构 |
+| `result` | `result` | **最后一条，成功时恰好一次**：`ChatCompletionResult`，与 `chat()` 同构 |
 
 `result` 里 `content` / `reasoning_content` / `tool_calls` 已累加好，`finish_reason` / `usage` /
 `assistant_message`（下一轮需原样回传的续接状态，如 Claude 带签名的 thinking block）也都在上面，
-调用方不需要自己拼。失败抛 typed error，与 `complete()` 相同。
+调用方不需要自己拼。失败抛 typed error，与 `chat()` 相同。
 
-与 `complete()` 的差异（均为有意）：
-- `content` 只含正文。OpenAI 兼容端点在 `thinking=True` 时，`complete()` 的 `content`
+与 `chat()` 的差异（均为有意）：
+- `content` 只含正文。OpenAI 兼容端点在 `thinking=True` 时，`chat()` 的 `content`
   带 `<think>…</think>` 前缀，这里思考只在 `reasoning_content`；没有正文时为 `None`。
 - 响应里不带 functionCall id 时（老版本 Gemini 模型），tool call id 是本地合成的：流式按
   functionCall 顺序编号，非流式按 part 下标编号，二者不保证相同。Gemini 3 返回真实 id，两边一致。
 
 ```python
-async for event in client.complete_stream(messages, tools=tools):
+async for event in client.chat_stream(messages, tools=tools):
     if event["type"] == "content":
         print(event["content"], end="", flush=True)
     elif event["type"] == "result":
@@ -195,7 +195,7 @@ async def chat_completions_stream(
 | `finish` | `reason` | 模型停止原因，OpenAI 语义：`stop` / `length`（被 max_tokens 截断）/ `tool_calls` / `content_filter` / …；provider 不给时为 `None`。**流末尾必发一次** |
 | `usage` | `usage` | token 用量，最后一条（provider 给了才有） |
 
-新代码用 `complete_stream()`：它事件形状固定，并在结尾给出汇总好的结果。
+新代码用 `chat_stream()`：它事件形状固定，并在结尾给出汇总好的结果。
 
 流式的 `timeout` 是**空闲超时**（两个 chunk 之间的最长间隔），不限制整条流的总时长——
 长思考模型一轮可能持续数分钟，只要还在吐 token 就不算卡死。

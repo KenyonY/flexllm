@@ -226,7 +226,7 @@ class TestStream:
             stream_lines=lines, path="/v1/models/m:streamGenerateContent"
         ) as server:
             client = GeminiClient(base_url=server.base_url, api_key="k", model="m")
-            events = [e async for e in client.complete_stream([{"role": "user", "content": "q"}])]
+            events = [e async for e in client.chat_stream([{"role": "user", "content": "q"}])]
             await client.aclose()
         return events
 
@@ -291,13 +291,11 @@ class TestAgainstMockServer:
             results = []
             for _ in range(2):
                 if mode == "stream":
-                    async for event in client.complete_stream(
-                        msgs, tools=self.TOOLS, thinking=True
-                    ):
+                    async for event in client.chat_stream(msgs, tools=self.TOOLS, thinking=True):
                         pass
                     result = event["result"]
                 else:
-                    result = await client.complete(msgs, tools=self.TOOLS, thinking=True)
+                    result = await client.chat(msgs, tools=self.TOOLS, thinking=True)
                 results.append(result)
                 if not result.tool_calls:
                     break
@@ -332,7 +330,7 @@ class TestAgainstMockServer:
         return results
 
     @pytest.mark.parametrize("model", ["mock-model", "gemini-2.5-flash"])
-    @pytest.mark.parametrize("mode", ["complete", "stream", "openai_history"])
+    @pytest.mark.parametrize("mode", ["chat", "stream", "openai_history"])
     async def test_tool_loop_completes(self, mode, model):
         """Gemini 3 与 2.x 协议不同（签名、多模态 functionResponse），两代都要跑通"""
         first, second = await self._loop(mode, model)

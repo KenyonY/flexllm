@@ -23,8 +23,8 @@ Example:
     )
 
     # 接口完全一致
-    result = await client.complete(messages)
-    results = await pool.complete_batch(messages_list)
+    result = await client.chat(messages)
+    results = await pool.chat_batch(messages_list)
 """
 
 import asyncio
@@ -779,7 +779,7 @@ class LLMClientPool(CompletionMixin):
         """选路及故障转移后仍失败则抛结构化异常。
 
         .. deprecated:: 0.17.0
-            用 complete()；本方法在 0.18.0 移除。
+            用 chat()；本方法在 0.18.0 移除。
         """
         result = await self.chat_completions(
             messages=messages, model=model, return_usage=return_usage, **kwargs
@@ -845,7 +845,7 @@ class LLMClientPool(CompletionMixin):
         """
         批量执行的单一真源（支持负载均衡和故障转移）
 
-        公开的 chat_completions_batch（旧形状）与 complete_batch（BatchResult）
+        公开的 chat_completions_batch（旧形状）与 chat_batch（BatchResult）
         都是它的包装，与单 endpoint 客户端共用同一个 _BatchRun 契约。
 
         Args:
@@ -956,7 +956,7 @@ class LLMClientPool(CompletionMixin):
         """批量聊天完成（旧返回形状）。执行行为见 _run_batch。
 
         .. deprecated:: 0.17.0
-            用 complete_batch()；本方法在 0.18.0 移除。
+            用 chat_batch()；本方法在 0.18.0 移除。
 
         签名逐字保留 0.16.x 的参数顺序，位置参数调用的旧代码不受影响。
         """
@@ -983,7 +983,7 @@ class LLMClientPool(CompletionMixin):
             # tuple。这个形状要留到 0.18.0，否则按旧行为写的解包代码会突然多出一项。
             logger.warning(
                 "多 endpoint 分布式批量不返回成本报告（保持 0.16.x 行为）；"
-                "改用 complete_batch()，成本在 BatchResult.cost 上"
+                "改用 chat_batch()，成本在 BatchResult.cost 上"
             )
             cost = None
         result = run.responses

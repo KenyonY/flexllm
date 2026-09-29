@@ -1264,7 +1264,7 @@ class TestErrorHandling:
             async with LLMClient(
                 base_url=server.url, model="mock-model", api_key="EMPTY", retry_delay=0.01
             ) as client:
-                results = await client.complete_batch(_batch_msgs(3), show_progress=False)
+                results = await client.chat_batch(_batch_msgs(3), show_progress=False)
                 assert len(results) == 3
                 assert results.failed_count == 3
                 assert all(r.content is None and not r.ok for r in results)
@@ -1298,7 +1298,7 @@ class TestErrorHandling:
                 retry_times=5,  # 多次重试
                 retry_delay=0.01,  # 加快重试速度
             ) as client:
-                results = await client.complete_batch(_batch_msgs(10), show_progress=False)
+                results = await client.chat_batch(_batch_msgs(10), show_progress=False)
                 # 部分失败不抛异常：成功项和失败项在同一个等长列表里
                 assert len(results) == 10
                 assert results.success_count + results.failed_count == 10
