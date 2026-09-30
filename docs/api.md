@@ -82,6 +82,36 @@ results.raise_for_errors()  # 需要 fail-fast 时显式调用
 （`content`/`usage` 已在记录顶层），百万级批量时这份冗余是实打实的磁盘开销；
 需要事后按原始响应分析时再打开。
 
+#### chat_batch_iter（边完成边产出）
+
+```python
+async for index, result in client.chat_batch_iter(messages_list, output_jsonl="out.jsonl"):
+    handle(index, result)      # result 是 ChatCompletionResult，失败项带 .error
+```
+
+与 `chat_batch()` 是同一份执行（缓存 / 断点续传 / 成本 / 多 endpoint 故障转移都一样），
+只是按完成顺序逐条交出，不在内存里攒整批——适合下游流水线处理或超大批量。
+
+- 每个 index **恰好产出一次**：checkpoint 恢复项、缓存命中排在最前，然后是本轮请求按完成
+  顺序，最后是没跑到的项（预算中止时，带 error）。把结果收集起来按 index 排好就等于
+  `chat_batch()`。
+- 失败项与 `chat_batch()` 一致：`content=None` 且带 `.error`，不抛异常。
+- 提前停止会取消在途请求并关闭 checkpoint 文件。直接 `break` 时关闭由事件循环稍后调度；
+  需要在 break 后立刻读 checkpoint，用 `contextlib.aclosing` 包住。
+- 参数与 `chat_batch()` 相同；不返回整批的 `cost` / `elapsed`，需要成本时读客户端的
+  cost tracker。
+
+#### 0.18.0 移除清单
+
+以下旧入口在 0.18.0 移除，现在调用会发出 `LegacyResponseWarning`：
+
+| 旧入口 | 替代 |
+|---|---|
+| `chat_completions` / `chat_completions_sync` / `chat_completions_or_raise` | `chat()` / `chat_sync()` |
+| `chat_completions_batch` / `chat_completions_batch_sync` | `chat_batch()` / `chat_batch_sync()` |
+| `iter_chat_completions_batch` | `chat_batch_iter()` |
+| `chat_completions_stream` | `chat_stream()` |
+
 #### chat_completions（已弃用，0.18.0 移除）
 
 ```python
@@ -119,7 +149,7 @@ async def chat_completions_batch(
 
 #### 旧接口的兼容承诺（到 0.18.0）
 
-`chat_completions*` 的返回形状、参数顺序、失败时的返回值与 0.16.x 逐字一致，只在末尾
+上表旧入口的返回形状、参数顺序、失败时的返回值与 0.16.x 逐字一致，只在末尾
 追加了默认 `False` 的 `raise_on_error`。用 v0.16.6 的代码跑同一组调用逐行比对过，
 包括这些容易被忽略的角落：
 
@@ -132,8 +162,14 @@ async def chat_completions_batch(
   （`resume_from_jsonl` 只挑它认识的键）
 - `transcribe` / `speech` 及其 batch 版本的失败项仍是 `RequestResult`
 
-唯一的行为差异：`chat_completions_or_raise` 失败时抛的是 `LLMHTTPError` 等子类而非
-`LLMRequestError` 基类，`except LLMRequestError` 照常捕获。
+行为差异只有两处：
+
+- `chat_completions_or_raise` 失败时抛的是 `LLMHTTPError` 等子类而非 `LLMRequestError`
+  基类，`except LLMRequestError` 照常捕获。
+- 批量预算中止（0.17.8 起）：超预算后不再发新请求，**已在途的请求收完后照常返回**；
+  此前这些已被服务端处理、已计费的结果会变成 `None`，成本报告也少计了它们。返回形状
+  不变（等长 list，失败项 `None`），只是部分 `None` 变成了有效结果；哪些位置是 `None`
+  本来就取决于请求完成的时序。
 
 #### chat_stream（推荐流式接口）
 
@@ -173,7 +209,10 @@ async for event in client.chat_stream(messages, tools=tools):
 多 endpoint（pool）时，故障转移**只发生在首个事件之前**：流已开始输出后失败直接抛异常——
 已送出的内容收不回来，换 endpoint 从头再流只会产生重复输出。
 
-#### chat_completions_stream
+流式的 `timeout` 是**空闲超时**（两个 chunk 之间的最长间隔），不限制整条流的总时长——
+长思考模型一轮可能持续数分钟，只要还在吐 token 就不算卡死。
+
+#### chat_completions_stream（已弃用，0.18.0 移除）
 
 ```python
 async def chat_completions_stream(
@@ -196,9 +235,6 @@ async def chat_completions_stream(
 | `usage` | `usage` | token 用量，最后一条（provider 给了才有） |
 
 新代码用 `chat_stream()`：它事件形状固定，并在结尾给出汇总好的结果。
-
-流式的 `timeout` 是**空闲超时**（两个 chunk 之间的最长间隔），不限制整条流的总时长——
-长思考模型一轮可能持续数分钟，只要还在吐 token 就不算卡死。
 
 ---
 
@@ -366,7 +402,7 @@ class ChatCompletionResult:
     reasoning_content: Optional[str] = None  # 思考内容
     tool_calls: Optional[list[ToolCall]] = None
     queue_time: Optional[float] = None    # 客户端排队耗时（semaphore + QPS 漏桶）；缓存命中为 None
-    finish_reason: Optional[str] = None   # 停止原因（OpenAI 语义，见 chat_completions_stream 的 finish 事件）；缓存命中为 None
+    finish_reason: Optional[str] = None   # 停止原因（OpenAI 语义，见 chat_stream 的 result 事件）；缓存命中为 None
     assistant_message: Optional[dict] = None  # 下一轮应原样回传的 provider 续接消息
     latency: Optional[float] = None       # 端到端耗时；缓存命中为 None
 ```

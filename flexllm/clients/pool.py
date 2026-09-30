@@ -30,6 +30,7 @@ Example:
 import asyncio
 import logging
 import time
+from contextlib import aclosing
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, Union
 
@@ -46,7 +47,6 @@ from .base import (
     ChatCompletionResult,
     LLMClientBase,
     LLMRequestError,
-    _BatchRun,
     _checkpoint_payload,
     _request_error_from_result,
     _restore_from_record,
@@ -824,7 +824,7 @@ class LLMClientPool(CompletionMixin):
             )
         )
 
-    async def _run_batch(
+    async def _iter_batch(
         self,
         messages_list: list[str | list[dict]],
         model: str = None,
@@ -840,99 +840,59 @@ class LLMClientPool(CompletionMixin):
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
         save_raw: bool = False,
+        report=None,
         **kwargs,
-    ) -> "_BatchRun":
+    ):
         """
-        批量执行的单一真源（支持负载均衡和故障转移）
-
-        公开的 chat_completions_batch（旧形状）与 chat_batch（BatchResult）
-        都是它的包装，与单 endpoint 客户端共用同一个 _BatchRun 契约。
+        批量执行的单一真源（支持负载均衡和故障转移）：按完成顺序逐条 yield
+        ``(index, value, error)``，契约与 LLMClientBase._iter_batch 相同（每个 index
+        恰好一次）。chat_batch_iter 直接透出它，chat_batch 与旧 chat_completions_batch
+        经 _run_batch 收集。
 
         Args:
-            messages_list: 消息列表的列表
-            model: 模型名称
-            return_raw: 是否返回原始响应
-            return_usage: 是否返回包含 usage 的结果
-            show_progress: 是否显示进度条
-            track_cost: 是否在进度条中显示实时成本
-            preprocess_msg: 是否预处理消息
-            output_jsonl: 输出文件路径（JSONL）
-            flush_interval: 文件刷新间隔（秒）
             distribute: 是否将请求分散到多个 endpoint（True）
                         False 时使用单个 endpoint + fallback
-            metadata_list: 元数据列表，与 messages_list 等长，每个元素保存到对应输出记录
-            params_list: per-record 参数列表（与 messages_list 等长，dict 或 None），
-                每条覆盖全局 kwargs 并参与缓存键；带 params 的行回显到输出。
-            **kwargs: 其他参数
-
-        Returns:
-            _BatchRun（responses / errors / summary / cost / elapsed）
+            其余参数见 LLMClientBase._iter_batch
         """
         kwargs = self._merge_config_params(kwargs)
         messages_list = self._prepare_messages_batch(messages_list)
+        options = dict(
+            model=model,
+            return_raw=return_raw,
+            return_usage=return_usage,
+            show_progress=show_progress,
+            track_cost=track_cost,
+            preprocess_msg=preprocess_msg,
+            output_jsonl=output_jsonl,
+            flush_interval=flush_interval,
+            metadata_list=metadata_list,
+            save_input=save_input,
+            params_list=params_list,
+            save_raw=save_raw,
+            report=report,
+            **kwargs,
+        )
 
-        # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
-            return await self._single_client._run_batch(
-                messages_list=messages_list,
-                model=model,
-                return_raw=return_raw,
-                return_usage=return_usage,
-                show_progress=show_progress,
-                track_cost=track_cost,
-                preprocess_msg=preprocess_msg,
-                output_jsonl=output_jsonl,
-                flush_interval=flush_interval,
-                metadata_list=metadata_list,
-                save_input=save_input,
-                params_list=params_list,
-                save_raw=save_raw,
-                **kwargs,
-            )
-
-        # 多 endpoint 模式：参数校验
-        # track_cost 需要 usage 信息
-        if track_cost:
-            return_usage = True
-
-        validate_batch_params(messages_list, metadata_list, output_jsonl, params_list)
-
-        if not distribute or len(self._clients) == 1:
-            # 单 endpoint 模式：使用 fallback
-            return await self._batch_with_fallback(
-                messages_list=messages_list,
-                model=model,
-                return_raw=return_raw,
-                return_usage=return_usage,
-                show_progress=show_progress,
-                track_cost=track_cost,
-                preprocess_msg=preprocess_msg,
-                output_jsonl=output_jsonl,
-                flush_interval=flush_interval,
-                metadata_list=metadata_list,
-                save_input=save_input,
-                params_list=params_list,
-                save_raw=save_raw,
-                **kwargs,
-            )
+            items = self._single_client._iter_batch(messages_list, **options)
         else:
-            # 多 endpoint 分布式模式
-            return await self._batch_distributed(
-                messages_list=messages_list,
-                model=model,
-                return_raw=return_raw,
-                return_usage=return_usage,
-                show_progress=show_progress,
-                track_cost=track_cost,
-                preprocess_msg=preprocess_msg,
-                output_jsonl=output_jsonl,
-                flush_interval=flush_interval,
-                metadata_list=metadata_list,
-                save_input=save_input,
-                params_list=params_list,
-                save_raw=save_raw,
-                **kwargs,
-            )
+            # track_cost 需要 usage 信息
+            if track_cost:
+                options["return_usage"] = True
+            validate_batch_params(messages_list, metadata_list, output_jsonl, params_list)
+            if not distribute or len(self._clients) == 1:
+                items = self._iter_batch_with_fallback(messages_list, **options)
+            else:
+                items = self._iter_batch_distributed(messages_list, **options)
+
+        async with aclosing(items) as results:
+            async for item in results:
+                yield item
+
+    def _batch_cost(self) -> CostReport | None:
+        if self._mode == "single":
+            return self._single_client._batch_cost()
+        return self._aggregate_cost_report()
 
     async def chat_completions_batch(
         self,
@@ -993,7 +953,7 @@ class LLMClientPool(CompletionMixin):
             result = (run.responses, run.summary, cost) if return_summary else (run.responses, cost)
         return result
 
-    async def _batch_with_fallback(
+    async def _iter_batch_with_fallback(
         self,
         messages_list: list[list[dict]],
         model: str = None,
@@ -1008,118 +968,126 @@ class LLMClientPool(CompletionMixin):
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
         save_raw: bool = False,
+        report=None,
         **kwargs,
-    ) -> "_BatchRun":
-        """Use one endpoint at a time and retry only items that failed."""
+    ):
+        """Use one endpoint at a time and retry only items that failed.
+
+        成功项一出来就交出；失败项留给下一个 endpoint 重试，所有轮次都失败才带 error 交出。
+        """
         started = time.perf_counter()
         total = len(messages_list)
-        final_results = [None] * total
         final_errors: dict[int, LLMRequestError] = {}
+        yielded: set[int] = set()
+        cached_count = 0
         pending = list(range(total))
         tried_providers: list[ProviderConfig] = []
-        # 首轮由底层客户端直接落盘的 index；后续轮次恢复的结果才需要在这里补写，
-        # 否则每次 fallback 都会把已落盘的成功项重写一遍（靠 compact 去重掩盖）。
-        checkpointed: set[int] = set()
+        # 首轮由底层客户端直接落盘；之后换了 endpoint，本地 index 与文件 index 不再对齐，
+        # 恢复的结果在这里按原始 index 补写（首轮已写入的不重复写）。
+        writer = None
 
-        for attempt in range(self._max_fallback_attempts):
-            if not pending:
-                break
-            client, provider = self._acquire_client(tried_providers)
-            if provider is None:
-                break
-            tried_providers.append(provider)
-            local_messages = [messages_list[i] for i in pending]
-            local_metadata = [metadata_list[i] for i in pending] if metadata_list else None
-            local_params = [params_list[i] for i in pending] if params_list else None
-            try:
-                run = await client._run_batch(
-                    messages_list=local_messages,
-                    model=model or provider.model,
-                    return_raw=return_raw,
-                    return_usage=return_usage,
-                    show_progress=show_progress,
-                    track_cost=track_cost,
-                    preprocess_msg=preprocess_msg,
-                    # 首轮之后换了 endpoint，本地 index 与文件 index 不再对齐，
-                    # 交由下面按原始 index 补写。
-                    output_jsonl=output_jsonl if attempt == 0 else None,
-                    flush_interval=flush_interval,
-                    metadata_list=local_metadata,
-                    save_input=save_input,
-                    params_list=local_params,
-                    **kwargs,
-                )
-                values, local_errors = run.responses, run.errors
-            except Exception as error:
-                values = [None] * len(pending)
-                typed = error if isinstance(error, LLMRequestError) else LLMRequestError(str(error))
-                local_errors = {i: typed for i in range(len(pending))}
-            finally:
-                self._router.release(provider)
-
-            missing = []
-            for local_idx, original_idx in enumerate(pending):
-                value = values[local_idx] if local_idx < len(values) else None
-                if value is None:
-                    missing.append(original_idx)
-                    final_errors[original_idx] = local_errors.get(
-                        local_idx, LLMRequestError("Batch item failed")
-                    )
-                else:
-                    final_results[original_idx] = value
-                    final_errors.pop(original_idx, None)
-                    if attempt == 0 and output_jsonl:
-                        checkpointed.add(original_idx)
-
-            if not missing:
-                self._router.mark_success(provider)
-                pending = []
-                break
-            # A provider that returned failed items is unhealthy for fallback
-            # routing, even if the client did not raise an aggregate exception.
-            self._router.mark_failed(provider)
-            pending = missing if self._fallback else []
-            if not self._fallback:
-                break
-
-        # 后续 endpoint 恢复的结果要按原始 index 落盘；首轮已写入的不重复写。
-        recovered = [
-            i for i, v in enumerate(final_results) if v is not None and i not in checkpointed
-        ]
-        if output_jsonl and recovered:
-            writer = JsonlWriter(
-                output_jsonl, messages_list, save_input, metadata_list, flush_interval, params_list
-            )
-            try:
-                for index in recovered:
-                    value = final_results[index]
-                    if isinstance(value, ChatCompletionResult):
-                        writer.write_result(
-                            index,
-                            value.content,
-                            usage=value.usage,
-                            result=_checkpoint_payload(_result_payload(value), save_raw=save_raw)
-                            if return_usage
+        try:
+            for attempt in range(self._max_fallback_attempts):
+                if not pending:
+                    break
+                client, provider = self._acquire_client(tried_providers)
+                if provider is None:
+                    break
+                tried_providers.append(provider)
+                missing = []
+                done_local: set[int] = set()
+                try:
+                    async with aclosing(
+                        client._iter_batch(
+                            [messages_list[i] for i in pending],
+                            model=model or provider.model,
+                            return_raw=return_raw,
+                            return_usage=return_usage,
+                            show_progress=show_progress,
+                            track_cost=track_cost,
+                            preprocess_msg=preprocess_msg,
+                            output_jsonl=output_jsonl if attempt == 0 else None,
+                            flush_interval=flush_interval,
+                            metadata_list=[metadata_list[i] for i in pending]
+                            if metadata_list
                             else None,
+                            save_input=save_input,
+                            params_list=[params_list[i] for i in pending] if params_list else None,
+                            **kwargs,
                         )
-                    else:
-                        writer.write_result(index, value)
-            finally:
+                    ) as items:
+                        async for local_idx, value, error in items:
+                            done_local.add(local_idx)
+                            index = pending[local_idx]
+                            if error is not None:
+                                missing.append(index)
+                                final_errors[index] = error
+                                continue
+                            final_errors.pop(index, None)
+                            if attempt > 0 and output_jsonl:
+                                if writer is None:
+                                    writer = JsonlWriter(
+                                        output_jsonl,
+                                        messages_list,
+                                        save_input,
+                                        metadata_list,
+                                        flush_interval,
+                                        params_list,
+                                    )
+                                if isinstance(value, ChatCompletionResult):
+                                    writer.write_result(
+                                        index,
+                                        value.content,
+                                        usage=value.usage,
+                                        result=_checkpoint_payload(
+                                            _result_payload(value), save_raw=save_raw
+                                        )
+                                        if return_usage
+                                        else None,
+                                    )
+                                else:
+                                    writer.write_result(index, value)
+                            if getattr(value, "cached", False):
+                                cached_count += 1
+                            yielded.add(index)
+                            yield index, value, None
+                except Exception as error:
+                    # 整轮异常：本轮没交出的都算失败，交给下一个 endpoint
+                    typed = (
+                        error if isinstance(error, LLMRequestError) else LLMRequestError(str(error))
+                    )
+                    for local_idx, index in enumerate(pending):
+                        if local_idx not in done_local:
+                            missing.append(index)
+                            final_errors[index] = typed
+                finally:
+                    self._router.release(provider)
+
+                if not missing:
+                    self._router.mark_success(provider)
+                    pending = []
+                    break
+                # A provider that returned failed items is unhealthy for fallback
+                # routing, even if the client did not raise an aggregate exception.
+                self._router.mark_failed(provider)
+                pending = missing if self._fallback else []
+                if not self._fallback:
+                    break
+        finally:
+            if writer is not None:
                 writer.close()
 
-        return _BatchRun(
-            responses=final_results,
-            errors=final_errors,
-            summary={
+        if report is not None:
+            report.summary = {
                 "total": total,
                 "success": total - len(final_errors),
                 "failed": len(final_errors),
-                "cached": sum(1 for v in final_results if getattr(v, "cached", False)),
+                "cached": cached_count,
                 "elapsed": time.perf_counter() - started,
-            },
-            cost=self._aggregate_cost_report(),
-            elapsed=time.perf_counter() - started,
-        )
+            }
+        for index in range(total):
+            if index not in yielded:
+                yield index, None, final_errors.get(index, LLMRequestError("没有可用的 endpoint"))
 
     def _aggregate_cost_report(self) -> CostReport | None:
         """把各 endpoint 客户端的成本合成一份；都没开 cost_tracker 时返回 None。
@@ -1142,7 +1110,7 @@ class LLMClientPool(CompletionMixin):
             report.model = report.model or current.model
         return report
 
-    async def _batch_distributed(
+    async def _iter_batch_distributed(
         self,
         messages_list: list[list[dict]],
         model: str = None,
@@ -1157,10 +1125,11 @@ class LLMClientPool(CompletionMixin):
         save_input: bool | str = True,
         params_list: list[dict | None] | None = None,
         save_raw: bool = False,
+        report=None,
         **kwargs,
-    ) -> "_BatchRun":
+    ):
         """
-        动态分配：多个 worker 从共享队列取任务
+        动态分配：多个 worker 从共享队列取任务，完成一条交出一条
 
         每个 client 启动 concurrency_limit 个 worker，所有 worker 从同一个队列
         竞争取任务。快的 client 会自动处理更多任务，实现动态负载均衡。
@@ -1170,8 +1139,6 @@ class LLMClientPool(CompletionMixin):
         - 响应缓存：复用 LLMClient 的缓存能力
         """
         n = len(messages_list)
-        results = [None] * n
-        errors: dict[int, LLMRequestError] = {}
         cached_count = 0
         start_time = time.perf_counter()
 
@@ -1207,305 +1174,327 @@ class LLMClientPool(CompletionMixin):
         )
         completed_indices = set(writer.completed_indices)
 
-        # 恢复已完成的记录到 results（断点续传）。
-        # 恢复项按当前调用的 return_usage 语义包装，保证返回列表类型一致
-        # （文件里的 output 已含 prefix，usage 有则恢复，没有为 None）
-        file_restored_count = len(completed_indices)
-        if completed_indices:
+        # writer 必须在任何 yield 之前进入 try：调用方可能在恢复项/缓存命中阶段就 break
+        try:
+            # 断点续传恢复项直接交出。
+            # 恢复项按当前调用的 return_usage 语义包装，保证返回类型一致
+            # （文件里的 output 已含 prefix，usage 有则恢复，没有为 None）
+            file_restored_count = len(completed_indices)
             for record in writer.restored_records:
                 if return_usage and not return_raw:
-                    results[record["index"]] = _restore_from_record(record)
+                    yield record["index"], _restore_from_record(record), None
                 else:
-                    results[record["index"]] = record["output"]
+                    yield record["index"], record["output"], None
 
-        # 检查缓存命中（如果启用了缓存）—— 批量查询，单次 IPC 往返
-        # 多 endpoint 不同模型且未指定 model 时，跳过 pool 级缓存（键无法统一），
-        # 由各 base client 的 chat_completions 各自处理缓存。
-        # return_raw 跳过缓存（缓存只存提取后的 content，与 base client 行为一致）
-        effective_model = model or self._endpoints[0].model
-        all_same_model = model or len({ep.model for ep in self._endpoints}) == 1
-        if response_cache is not None and all_same_model and not return_raw:
-            # 过滤出未完成的 messages
-            pending = [
-                (idx, msg) for idx, msg in enumerate(messages_list) if idx not in completed_indices
-            ]
-            if pending:
-                pending_indices, pending_msgs = zip(*pending)
-                pending_gen_params = (
-                    [gen_params_list[i] for i in pending_indices] if gen_params_list else None
-                )
-                cached_responses, _ = response_cache.get_batch(
-                    list(pending_msgs),
-                    model=effective_model,
-                    params_list=pending_gen_params,
-                    **kwargs,
-                )
-                for idx, cached_result in zip(pending_indices, cached_responses):
-                    if cached_result is not None:
-                        # 缓存存的 content 不含 prefill 前缀，与 base client 一致在此拼回
-                        content = cached_result["content"]
-                        prefix = LLMClientBase._trailing_assistant_prefix(messages_list[idx])
-                        if prefix and content is not None:
-                            content = prefix + content
-                        if return_usage:
-                            results[idx] = ChatCompletionResult._from_payload(
-                                cached_result, cached=True
-                            )
-                            results[idx].content = content
-                        else:
-                            results[idx] = content
-                        completed_indices.add(idx)
-                        cached_count += 1
-                        # 写入输出文件（断点续传）
-                        writer.write_result(
-                            idx,
-                            content,
-                            usage=cached_result.get("usage"),
-                            result=_checkpoint_payload(cached_result, save_raw=save_raw)
-                            if return_usage
-                            else None,
-                        )
-            if cached_count > 0:
-                logger.info(f"缓存命中: {cached_count}/{n}")
-
-        # 共享任务队列（跳过已完成的）
-        queue = asyncio.Queue()
-        for idx, msg in enumerate(messages_list):
-            if idx not in completed_indices:
-                queue.put_nowait((idx, msg, set()))
-
-        pending_count = queue.qsize()
-        if pending_count == 0:
-            logger.info("所有任务已完成，无需执行")
-            writer.close()
-            return _BatchRun(
-                responses=results,
-                errors={},
-                summary={
-                    "total": n,
-                    "success": n,
-                    "failed": 0,
-                    "cached": cached_count + file_restored_count,
-                    "elapsed": time.perf_counter() - start_time,
-                },
-                cost=self._aggregate_cost_report(),
-                elapsed=time.perf_counter() - start_time,
-            )
-
-        logger.info(f"待执行: {pending_count}/{n}")
-
-        # 进度条配置（支持成本显示）
-        progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None
-
-        # 获取第一个 endpoint 的模型用于显示
-        first_model = model or self._endpoints[0].model
-        pricing = get_model_pricing(first_model) if track_cost else None
-        input_price = pricing["input"] * 1e6 if pricing else None
-        output_price = pricing["output"] * 1e6 if pricing else None
-
-        # 创建进度追踪器
-        tracker = (
-            ProgressTracker(
-                total_requests=pending_count,
-                config=progress_config,
-                model_name=first_model if track_cost else None,
-                input_price_per_1m=input_price,
-                output_price_per_1m=output_price,
-            )
-            if show_progress
-            else None
-        )
-
-        # 用于统计和线程安全更新
-        lock = asyncio.Lock()
-        active_tasks = 0
-        all_done = asyncio.Event()
-
-        async def worker(client_idx: int):
-            """单个 worker：循环从队列取任务并执行，支持 fallback 重试"""
-            nonlocal active_tasks
-
-            client = self._clients[client_idx]
-            provider = self._router._providers[client_idx].config
-            my_endpoint = provider.base_url
-            worker_model = model or provider.model
-
-            while not all_done.is_set():
-                # claim(取任务)与 active_tasks 自增必须在同一把锁内原子完成：
-                # 否则"取走末个任务但尚未计数"的窗口会被其他 worker 的空队列检查
-                # 误判为全部完成 → all_done 提前置位 → fallback 重新入队的任务
-                # 再无消费者而永久丢失（results[idx] 恒 None 且无错误记录）。
-                async with lock:
-                    try:
-                        idx, msg, tried_endpoints = queue.get_nowait()
-                    except asyncio.QueueEmpty:
-                        if active_tasks == 0:
-                            all_done.set()
-                            break
-                        idx = None
-                    else:
-                        active_tasks += 1
-                if idx is None:
-                    await asyncio.sleep(0.05)
-                    continue
-
-                # 如果已尝试过当前 endpoint，放回队列让其他 worker 处理
-                if my_endpoint in tried_endpoints:
-                    if len(tried_endpoints) >= num_endpoints:
-                        # 所有 endpoint 都失败了
-                        terminal_error = LLMRequestError("所有 endpoint 均请求失败", retryable=True)
-                        errors[idx] = terminal_error
-                        async with lock:
-                            active_tasks -= 1
-                            req_result = RequestResult(
-                                request_id=idx,
-                                data={
-                                    "error": terminal_error.__class__.__name__,
-                                    "detail": str(terminal_error),
-                                },
-                                status="error",
-                                latency=0,
-                            )
-                            results[idx] = None
-                            if tracker:
-                                tracker.update(req_result)
+            # 检查缓存命中（如果启用了缓存）—— 批量查询，单次 IPC 往返
+            # 多 endpoint 不同模型且未指定 model 时，跳过 pool 级缓存（键无法统一），
+            # 由各 base client 的 chat_completions 各自处理缓存。
+            # return_raw 跳过缓存（缓存只存提取后的 content，与 base client 行为一致）
+            effective_model = model or self._endpoints[0].model
+            all_same_model = model or len({ep.model for ep in self._endpoints}) == 1
+            if response_cache is not None and all_same_model and not return_raw:
+                # 过滤出未完成的 messages
+                pending = [
+                    (idx, msg)
+                    for idx, msg in enumerate(messages_list)
+                    if idx not in completed_indices
+                ]
+                if pending:
+                    pending_indices, pending_msgs = zip(*pending)
+                    pending_gen_params = (
+                        [gen_params_list[i] for i in pending_indices] if gen_params_list else None
+                    )
+                    cached_responses, _ = response_cache.get_batch(
+                        list(pending_msgs),
+                        model=effective_model,
+                        params_list=pending_gen_params,
+                        **kwargs,
+                    )
+                    for idx, cached_result in zip(pending_indices, cached_responses):
+                        if cached_result is not None:
+                            # 缓存存的 content 不含 prefill 前缀，与 base client 一致在此拼回
+                            content = cached_result["content"]
+                            prefix = LLMClientBase._trailing_assistant_prefix(messages_list[idx])
+                            if prefix and content is not None:
+                                content = prefix + content
+                            if return_usage:
+                                value = ChatCompletionResult._from_payload(
+                                    cached_result, cached=True
+                                )
+                                value.content = content
+                            else:
+                                value = content
+                            completed_indices.add(idx)
+                            cached_count += 1
+                            # 写入输出文件（断点续传）
                             writer.write_result(
                                 idx,
-                                None,
-                                "error",
-                                f"All {num_endpoints} endpoints failed",
+                                content,
+                                usage=cached_result.get("usage"),
+                                result=_checkpoint_payload(cached_result, save_raw=save_raw)
+                                if return_usage
+                                else None,
                             )
-                        continue
-                    await queue.put((idx, msg, tried_endpoints))
+                            yield idx, value, None
+                if cached_count > 0:
+                    logger.info(f"缓存命中: {cached_count}/{n}")
+
+            # 共享任务队列（跳过已完成的）
+            queue = asyncio.Queue()
+            for idx, msg in enumerate(messages_list):
+                if idx not in completed_indices:
+                    queue.put_nowait((idx, msg, set()))
+
+            pending_count = queue.qsize()
+            if pending_count == 0:
+                logger.info("所有任务已完成，无需执行")
+                if report is not None:
+                    report.summary = {
+                        "total": n,
+                        "success": n,
+                        "failed": 0,
+                        "cached": cached_count + file_restored_count,
+                        "elapsed": time.perf_counter() - start_time,
+                    }
+                return
+
+            logger.info(f"待执行: {pending_count}/{n}")
+
+            # 进度条配置（支持成本显示）
+            progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None
+
+            # 获取第一个 endpoint 的模型用于显示
+            first_model = model or self._endpoints[0].model
+            pricing = get_model_pricing(first_model) if track_cost else None
+            input_price = pricing["input"] * 1e6 if pricing else None
+            output_price = pricing["output"] * 1e6 if pricing else None
+
+            # 创建进度追踪器
+            tracker = (
+                ProgressTracker(
+                    total_requests=pending_count,
+                    config=progress_config,
+                    model_name=first_model if track_cost else None,
+                    input_price_per_1m=input_price,
+                    output_price_per_1m=output_price,
+                )
+                if show_progress
+                else None
+            )
+
+            # 用于统计和线程安全更新；worker 完成一条就放进 result_queue，由主循环交出
+            lock = asyncio.Lock()
+            result_queue: asyncio.Queue = asyncio.Queue()
+            active_tasks = 0
+            all_done = asyncio.Event()
+
+            async def worker(client_idx: int):
+                """单个 worker：循环从队列取任务并执行，支持 fallback 重试"""
+                nonlocal active_tasks
+
+                client = self._clients[client_idx]
+                provider = self._router._providers[client_idx].config
+                # 以 endpoint 下标记"试过谁"，与 num_endpoints 同口径：用 base_url 时，
+                # 同 base_url 不同 api_key 的两个 endpoint 永远凑不满 num_endpoints，
+                # 全部失败的任务会被无限放回队列
+                my_endpoint = client_idx
+                worker_model = model or provider.model
+
+                while not all_done.is_set():
+                    # claim(取任务)与 active_tasks 自增必须在同一把锁内原子完成：
+                    # 否则"取走末个任务但尚未计数"的窗口会被其他 worker 的空队列检查
+                    # 误判为全部完成 → all_done 提前置位 → fallback 重新入队的任务
+                    # 再无消费者而永久丢失（results[idx] 恒 None 且无错误记录）。
                     async with lock:
-                        active_tasks -= 1
-                    await asyncio.sleep(0.01)
-                    continue
-
-                task_start = time.perf_counter()
-                try:
-                    if tracker:
-                        retry_callback.set(tracker.increment_retry)
-                    row_extra = gen_params_list[idx] if gen_params_list else None
-                    # 内部强制 return_usage=True 以拿到 queue_time（return_raw 时
-                    # RequestResult 本身就带），返回前按用户要求解包
-                    with suppress_legacy_response_warning():
-                        result = await client.chat_completions(
-                            messages=msg,
-                            model=worker_model,
-                            return_raw=return_raw,
-                            return_usage=return_usage or not return_raw,
-                            raise_on_error=True,
-                            **({**kwargs, **row_extra} if row_extra else kwargs),
-                        )
-
-                    latency = time.perf_counter() - task_start
-                    queue_time = getattr(result, "queue_time", None)
-                    if not return_usage and not return_raw and hasattr(result, "content"):
-                        result = result.content  # 用户没要 usage，解包回 str
-                    results[idx] = result
-                    self._router.mark_success(provider)
-
-                    # 缓存写入由 base client 的 chat_completions 内部处理，
-                    # 无需在 pool 层重复写入
-
-                    async with lock:
-                        active_tasks -= 1
-                        if tracker:
-                            req_result = RequestResult(
-                                request_id=idx,
-                                data=result,
-                                status="success",
-                                latency=latency,
-                                queue_time=queue_time or 0.0,
-                            )
-                            tracker.update(req_result)
-
-                            if track_cost and hasattr(result, "usage") and result.usage:
-                                usage = result.usage
-                                input_tokens = usage.get("prompt_tokens", 0)
-                                output_tokens = usage.get("completion_tokens", 0)
-                                cost = 0.0
-                                if pricing:
-                                    cost = (
-                                        input_tokens * pricing["input"]
-                                        + output_tokens * pricing["output"]
-                                    )
-                                tracker.update_cost(input_tokens, output_tokens, cost)
-
-                        # 写入文件
-                        if hasattr(result, "content"):
-                            output_content = result.content
-                            output_usage = getattr(result, "usage", None)
+                        try:
+                            idx, msg, tried_endpoints = queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            if active_tasks == 0:
+                                all_done.set()
+                                break
+                            idx = None
                         else:
-                            output_content = result
-                            output_usage = None
-                        writer.write_result(
-                            idx,
-                            output_content,
-                            usage=output_usage,
-                            result=_checkpoint_payload(_result_payload(result), save_raw=save_raw)
-                            if return_usage and isinstance(result, ChatCompletionResult)
-                            else None,
-                        )
+                            active_tasks += 1
+                    if idx is None:
+                        await asyncio.sleep(0.05)
+                        continue
 
-                except Exception as e:
-                    latency = time.perf_counter() - task_start
-                    self._router.mark_failed(provider)
-
-                    tried_endpoints = tried_endpoints | {my_endpoint}
-
-                    if self._fallback and len(tried_endpoints) < num_endpoints:
+                    # 如果已尝试过当前 endpoint，放回队列让其他 worker 处理
+                    if my_endpoint in tried_endpoints:
+                        if len(tried_endpoints) >= num_endpoints:
+                            # 所有 endpoint 都失败了
+                            terminal_error = LLMRequestError(
+                                "所有 endpoint 均请求失败", retryable=True
+                            )
+                            result_queue.put_nowait((idx, None, terminal_error))
+                            async with lock:
+                                active_tasks -= 1
+                                req_result = RequestResult(
+                                    request_id=idx,
+                                    data={
+                                        "error": terminal_error.__class__.__name__,
+                                        "detail": str(terminal_error),
+                                    },
+                                    status="error",
+                                    latency=0,
+                                )
+                                if tracker:
+                                    tracker.update(req_result)
+                                writer.write_result(
+                                    idx,
+                                    None,
+                                    "error",
+                                    f"All {num_endpoints} endpoints failed",
+                                )
+                            continue
                         await queue.put((idx, msg, tried_endpoints))
                         async with lock:
                             active_tasks -= 1
-                            if tracker:
-                                tracker.increment_retry()
-                    else:
-                        errors[idx] = (
-                            e if isinstance(e, LLMRequestError) else LLMRequestError(str(e))
-                        )
+                        await asyncio.sleep(0.01)
+                        continue
+
+                    task_start = time.perf_counter()
+                    try:
+                        if tracker:
+                            retry_callback.set(tracker.increment_retry)
+                        row_extra = gen_params_list[idx] if gen_params_list else None
+                        # 内部强制 return_usage=True 以拿到 queue_time（return_raw 时
+                        # RequestResult 本身就带），返回前按用户要求解包
+                        with suppress_legacy_response_warning():
+                            result = await client.chat_completions(
+                                messages=msg,
+                                model=worker_model,
+                                return_raw=return_raw,
+                                return_usage=return_usage or not return_raw,
+                                raise_on_error=True,
+                                **({**kwargs, **row_extra} if row_extra else kwargs),
+                            )
+
+                        latency = time.perf_counter() - task_start
+                        queue_time = getattr(result, "queue_time", None)
+                        if not return_usage and not return_raw and hasattr(result, "content"):
+                            result = result.content  # 用户没要 usage，解包回 str
+                        self._router.mark_success(provider)
+
+                        # 缓存写入由 base client 的 chat_completions 内部处理，
+                        # 无需在 pool 层重复写入
+
                         async with lock:
                             active_tasks -= 1
-                            req_result = RequestResult(
-                                request_id=idx,
-                                data={"error": str(e)},
-                                status="error",
-                                latency=latency,
-                            )
-                            results[idx] = None
                             if tracker:
+                                req_result = RequestResult(
+                                    request_id=idx,
+                                    data=result,
+                                    status="success",
+                                    latency=latency,
+                                    queue_time=queue_time or 0.0,
+                                )
                                 tracker.update(req_result)
-                            writer.write_result(idx, None, "error", str(e))
 
-        try:
-            workers = []
-            for client_idx, client in enumerate(self._clients):
-                concurrency = getattr(client, "_concurrency_limit", 10)
-                for _ in range(concurrency):
-                    workers.append(worker(client_idx))
-            await asyncio.gather(*workers)
+                                if track_cost and hasattr(result, "usage") and result.usage:
+                                    usage = result.usage
+                                    input_tokens = usage.get("prompt_tokens", 0)
+                                    output_tokens = usage.get("completion_tokens", 0)
+                                    cost = 0.0
+                                    if pricing:
+                                        cost = (
+                                            input_tokens * pricing["input"]
+                                            + output_tokens * pricing["output"]
+                                        )
+                                    tracker.update_cost(input_tokens, output_tokens, cost)
 
+                            # 写入文件
+                            if hasattr(result, "content"):
+                                output_content = result.content
+                                output_usage = getattr(result, "usage", None)
+                            else:
+                                output_content = result
+                                output_usage = None
+                            writer.write_result(
+                                idx,
+                                output_content,
+                                usage=output_usage,
+                                result=_checkpoint_payload(
+                                    _result_payload(result), save_raw=save_raw
+                                )
+                                if return_usage and isinstance(result, ChatCompletionResult)
+                                else None,
+                            )
+                        result_queue.put_nowait((idx, result, None))
+
+                    except Exception as e:
+                        latency = time.perf_counter() - task_start
+                        self._router.mark_failed(provider)
+
+                        tried_endpoints = tried_endpoints | {my_endpoint}
+
+                        if self._fallback and len(tried_endpoints) < num_endpoints:
+                            await queue.put((idx, msg, tried_endpoints))
+                            async with lock:
+                                active_tasks -= 1
+                                if tracker:
+                                    tracker.increment_retry()
+                        else:
+                            result_queue.put_nowait(
+                                (
+                                    idx,
+                                    None,
+                                    e
+                                    if isinstance(e, LLMRequestError)
+                                    else LLMRequestError(str(e)),
+                                )
+                            )
+                            async with lock:
+                                active_tasks -= 1
+                                req_result = RequestResult(
+                                    request_id=idx,
+                                    data={"error": str(e)},
+                                    status="error",
+                                    latency=latency,
+                                )
+                                if tracker:
+                                    tracker.update(req_result)
+                                writer.write_result(idx, None, "error", str(e))
+
+            done = object()
+
+            async def run_workers():
+                try:
+                    await asyncio.gather(
+                        *(
+                            worker(client_idx)
+                            for client_idx, client in enumerate(self._clients)
+                            for _ in range(getattr(client, "_concurrency_limit", 10))
+                        )
+                    )
+                finally:
+                    # 哨兵排在所有结果之后：主循环读到它时，worker 产出的每一条都已交出
+                    result_queue.put_nowait(done)
+
+            runner = asyncio.create_task(run_workers())
+            try:
+                while (item := await result_queue.get()) is not done:
+                    yield item
+                await runner  # worker 自身崩溃时把异常抛给调用方
+            finally:
+                # 调用方提前 break 时停掉 worker（在途请求随之取消）
+                all_done.set()
+                runner.cancel()
+                await asyncio.gather(runner, return_exceptions=True)
+                if tracker:
+                    tracker.summary(print_to_console=True)
+
+            if report is not None:
+                total_cached = cached_count + file_restored_count
+                report.summary = {
+                    "total": n,
+                    "success": (tracker.success_count if tracker else 0) + total_cached,
+                    "failed": tracker.error_count if tracker else 0,
+                    "cached": total_cached,
+                    "elapsed": time.perf_counter() - start_time,
+                }
         finally:
             writer.close()
-            if tracker:
-                tracker.summary(print_to_console=True)
-
-        total_cached = cached_count + file_restored_count
-        elapsed = time.perf_counter() - start_time
-        return _BatchRun(
-            responses=results,
-            errors=errors,
-            summary={
-                "total": n,
-                "success": (tracker.success_count if tracker else 0) + total_cached,
-                "failed": tracker.error_count if tracker else 0,
-                "cached": total_cached,
-                "elapsed": elapsed,
-            },
-            cost=self._aggregate_cost_report(),
-            elapsed=elapsed,
-        )
 
     def chat_completions_batch_sync(
         self,
@@ -1566,7 +1555,7 @@ class LLMClientPool(CompletionMixin):
             )
         )
 
-    async def chat_completions_stream(
+    async def _stream(
         self,
         messages: str | list[dict],
         model: str = None,
@@ -1589,14 +1578,14 @@ class LLMClientPool(CompletionMixin):
             **kwargs: 其他参数
 
         Yields:
-            与 LLMClient.chat_completions_stream 一致
+            与 LLMClientBase._stream 一致
         """
         kwargs = self._merge_config_params(kwargs)
         messages = self._prepare_messages(messages)
 
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
-            async for chunk in self._single_client.chat_completions_stream(
+            async for chunk in self._single_client._stream(
                 messages=messages,
                 model=model,
                 return_usage=return_usage,
@@ -1624,7 +1613,7 @@ class LLMClientPool(CompletionMixin):
             yielded = False
 
             try:
-                async for chunk in client.chat_completions_stream(
+                async for chunk in client._stream(
                     messages=messages,
                     model=model or provider.model,
                     return_usage=return_usage,
@@ -1649,7 +1638,7 @@ class LLMClientPool(CompletionMixin):
 
         raise last_error or RuntimeError("所有 endpoint 都失败了")
 
-    async def iter_chat_completions_batch(
+    async def _legacy_iter_batch(
         self,
         messages_list: list[list[dict]],
         model: str = None,
@@ -1665,7 +1654,8 @@ class LLMClientPool(CompletionMixin):
         **kwargs,
     ):
         """
-        迭代式批量聊天完成（边请求边返回结果）
+        旧 iter_chat_completions_batch 的实现：行为冻结在 0.17.7，0.18.0 随公开入口一起删除。
+        新代码走 chat_batch_iter（与 chat_batch 共用 _iter_batch）。
 
         Args:
             messages_list: 消息列表的列表
@@ -1686,7 +1676,7 @@ class LLMClientPool(CompletionMixin):
         """
         # 单 endpoint 模式：直接调用底层客户端
         if self._mode == "single":
-            async for result in self._single_client.iter_chat_completions_batch(
+            async for result in self._single_client._legacy_iter_batch(
                 messages_list=messages_list,
                 model=model,
                 return_raw=return_raw,
@@ -1734,7 +1724,7 @@ class LLMClientPool(CompletionMixin):
             while not all_done.is_set():
                 # claim(取任务)与 active_tasks 自增在同一把锁内原子完成，
                 # 杜绝末个任务被取走但尚未计数的窗口被误判为全部完成而丢任务
-                # （详见 _batch_distributed 中同款修复）。
+                # （详见 _iter_batch_distributed 中同款修复）。
                 async with lock:
                     try:
                         idx, msg, tried = task_queue.get_nowait()

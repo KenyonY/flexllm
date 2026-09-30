@@ -203,14 +203,13 @@ class ChatWebServer:
             stream_kwargs = dict(
                 temperature=self.config.temperature,
                 max_tokens=self.config.max_tokens,
-                return_usage=True,
             )
             if self.config.thinking is not None:
                 stream_kwargs["thinking"] = self.config.thinking
 
             parser = ThinkTagParser()
 
-            async for event in self._client.chat_completions_stream(messages, **stream_kwargs):
+            async for event in self._client.chat_stream(messages, **stream_kwargs):
                 for parsed in parser.feed(event):
                     if parsed["type"] in ("content", "thinking"):
                         sse = json.dumps(parsed, ensure_ascii=False)

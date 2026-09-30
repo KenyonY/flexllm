@@ -16,6 +16,7 @@ from ..msg_processors.unified_processor import (
     UnifiedImageProcessor,
     UnifiedProcessorConfig,
 )
+from .completion import think_tagged_text
 from .openai import OpenAIClient
 
 
@@ -224,15 +225,15 @@ class MllmClient(MllmClientBase):
             [messages], show_progress=False
         )
 
-        # 使用OpenAIClient的流式方法
-        async for token in self.client.chat_completions_stream(
-            messages=processed_messages[0],
+        events = self.client.chat_stream(
+            processed_messages[0],
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             top_p=top_p,
             **kwargs,
-        ):
+        )
+        async for token in think_tagged_text(events):
             yield token
 
     async def _preprocess_messages_with_instance(

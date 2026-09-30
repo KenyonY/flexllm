@@ -139,8 +139,9 @@ print(results.success_count, results.failed_count, results.errors)  # errors: {i
 results.raise_for_errors()             # 需要 fail-fast 时显式调用
 ```
 
-旧的 `chat_completions*` 返回形状（`str` / `RequestResult` / 失败项 `None`）保持不变，
-但会发出 `LegacyResponseWarning`，将在 **0.18.0** 移除。
+旧入口（`chat_completions` / `chat_completions_batch` 等，完整清单见文末）的返回形状
+（`str` / `RequestResult` / 失败项 `None`）保持不变，但会发出 `LegacyResponseWarning`，
+将在 **0.18.0** 移除。
 
 ### Batch Processing with Checkpoint Recovery
 
@@ -251,9 +252,9 @@ async for event in client.chat_stream(messages):
     elif event["type"] == "result":
         result = event["result"]  # ChatCompletionResult, same shape as chat()
 
-# Batch streaming - process results as they complete
-async for result in client.iter_chat_completions_batch(messages_list):
-    process(result)
+# Batch streaming - each (index, result) as soon as it completes; same execution as chat_batch()
+async for index, result in client.chat_batch_iter(messages_list):
+    process(index, result)
 ```
 
 ### Thinking Mode (Reasoning Models)
@@ -551,16 +552,18 @@ LLMClient(
 
 ### Main Methods
 
-| Method                                       | Description                                     |
-| -------------------------------------------- | ----------------------------------------------- |
-| `chat(messages)`                         | Single async request → `ChatCompletionResult`   |
-| `chat_sync(messages)`                    | Single sync request                             |
-| `chat_batch(messages_list)`              | Batch async with checkpoint → `BatchResult`     |
-| `chat_batch_sync(messages_list)`         | Batch sync                                      |
-| `iter_chat_completions_batch(messages_list)` | Streaming batch results                         |
-| `chat_stream(messages)`                  | Streaming events + final `ChatCompletionResult` |
+| Method                           | Description                                            |
+| -------------------------------- | ------------------------------------------------------ |
+| `chat(messages)`                 | Single async request → `ChatCompletionResult`          |
+| `chat_sync(messages)`            | Single sync request                                    |
+| `chat_batch(messages_list)`      | Batch async with checkpoint → `BatchResult`            |
+| `chat_batch_sync(messages_list)` | Batch sync                                             |
+| `chat_batch_iter(messages_list)` | Batch, yields `(index, ChatCompletionResult)` as done |
+| `chat_stream(messages)`          | Streaming events + final `ChatCompletionResult`        |
 
-`chat_completions*` 是上一代接口，形状不变但已弃用（0.18.0 移除）。
+上一代接口 `chat_completions` / `chat_completions_sync` / `chat_completions_or_raise` /
+`chat_completions_batch` / `chat_completions_batch_sync` / `chat_completions_stream` /
+`iter_chat_completions_batch` 返回形状不变但已弃用，0.18.0 移除（替代关系见 [docs/api.md](docs/api.md)）。
 
 ---
 

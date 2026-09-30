@@ -24,7 +24,7 @@ pool = LLMClientPool(
 batch_messages = [[{"role": "user", "content": "用一句话介绍自己"}] for _ in range(100)]
 mt = MeasureTime()
 
-# results = client.chat_completions_batch_sync(
+# results = client.chat_batch_sync(
 #     batch_messages,
 #     output_jsonl="output.jsonl",
 #     track_cost=True,
@@ -33,7 +33,7 @@ mt = MeasureTime()
 # mt.show_interval()
 # print(results[0])
 
-results_v2 = pool.chat_completions_batch_sync(
+results_v2 = pool.chat_batch_sync(
     batch_messages,
     thinking=False,
     output_jsonl="output_pool.jsonl",

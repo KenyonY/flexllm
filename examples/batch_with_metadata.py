@@ -35,10 +35,10 @@ async def main():
     output_file = "batch_results.jsonl"
 
     # 批量请求
-    results = await client.chat_completions_batch(
-        messages_list=messages_list,
+    results = await client.chat_batch(
+        messages_list,
         metadata_list=metadata_list,
-        output_file=output_file,
+        output_jsonl=output_file,
         show_progress=True,
     )
 

@@ -6,6 +6,7 @@ import asyncio
 import sys
 
 from ..clients.base import LLMRequestError
+from ..clients.completion import think_tagged_text
 from .utils import apply_user_template, extract_code_block
 
 # ========== Chat 辅助函数 ==========
@@ -28,7 +29,7 @@ def single_chat(
     """单次对话
 
     Args:
-        model_params: 传给 chat_completions 的参数 dict
+        model_params: 传给 chat 的参数 dict
             （temperature/max_tokens/response_format/top_p 等）
     """
     import json
@@ -65,14 +66,14 @@ def single_chat(
 
             if stream and not extract:
                 print("Assistant: ", end="", flush=True)
-                async for chunk in client.chat_completions_stream(messages, **kwargs):
+                async for chunk in think_tagged_text(client.chat_stream(messages, **kwargs)):
                     print(chunk, end="", flush=True)
                 print()
             else:
                 # extract 模式需要完整响应，不能流式
                 if stream:
                     full_response = ""
-                    async for chunk in client.chat_completions_stream(messages, **kwargs):
+                    async for chunk in think_tagged_text(client.chat_stream(messages, **kwargs)):
                         full_response += chunk
                     result = full_response
                 else:
@@ -151,7 +152,7 @@ def interactive_chat(
     """多轮交互对话
 
     Args:
-        model_params: 传给 chat_completions 的参数 dict
+        model_params: 传给 chat 的参数 dict
     """
 
     async def _run():
@@ -190,12 +191,14 @@ def interactive_chat(
 
                     if stream:
                         print("Assistant: ", end="", flush=True)
-                        full_response = ""
-                        async for chunk in client.chat_completions_stream(messages, **kwargs):
+                        replies = []
+                        async for chunk in think_tagged_text(
+                            client.chat_stream(messages, **kwargs), on_result=replies.append
+                        ):
                             print(chunk, end="", flush=True)
-                            full_response += chunk
                         print()
-                        messages.append({"role": "assistant", "content": full_response})
+                        # 历史只记正文：思考文本发回给模型会被当成它说过的话
+                        messages.append({"role": "assistant", "content": replies[0].content or ""})
                     else:
                         try:
                             result = (await client.chat(messages, **kwargs)).content

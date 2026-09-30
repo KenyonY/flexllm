@@ -221,17 +221,14 @@ class ServeServer:
         try:
             parser = ThinkTagParser()
 
-            async for event in self._client.chat_completions_stream(
-                messages, return_usage=True, **kwargs
-            ):
-                if event["type"] == "usage":
-                    # usage 事件在最后，先 flush parser
+            async for event in self._client.chat_stream(messages, **kwargs):
+                usage = event["result"].usage if event["type"] == "result" else None
+                if usage:
+                    # usage 随结尾的 result 事件到达，先 flush parser
                     for parsed in parser.flush():
                         sse = json.dumps(parsed, ensure_ascii=False)
                         await response.write(f"data: {sse}\n\n".encode("utf-8"))
-                    done_event = json.dumps(
-                        {"type": "done", "usage": event["usage"]}, ensure_ascii=False
-                    )
+                    done_event = json.dumps({"type": "done", "usage": usage}, ensure_ascii=False)
                     await response.write(f"data: {done_event}\n\n".encode("utf-8"))
                     break
 

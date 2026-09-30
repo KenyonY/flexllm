@@ -10,13 +10,31 @@ from flexllm import (
     LLMClientPool,
     LLMHTTPError,
 )
-from flexllm.clients.base import ChatCompletionResult, _BatchRun
+from flexllm.clients.base import ChatCompletionResult, LLMRequestError
 from flexllm.clients.batch_helpers import JsonlWriter
 
 
-def _run(responses, errors=None):
-    """底层客户端 _run_batch 的返回值"""
-    return _BatchRun(responses=responses, errors=errors or {}, summary=None, cost=None, elapsed=0.0)
+class _FakeIter:
+    """替身 _iter_batch：按给定结果逐条产出 (index, value, error)，并记录每次调用的参数。
+
+    value 为 None 而没给 error 的项按"失败"产出，与真实 _iter_batch 的契约一致。
+    """
+
+    def __init__(self, responses, errors=None):
+        self.responses = responses
+        self.errors = errors or {}
+        self.calls = []
+
+    def __call__(self, messages_list, **kwargs):
+        self.calls.append({"messages_list": messages_list, **kwargs})
+        return self._items()
+
+    async def _items(self):
+        for index, value in enumerate(self.responses):
+            error = self.errors.get(index)
+            if value is None and error is None:
+                error = LLMRequestError("failed")
+            yield index, value, error
 
 
 class TestClientPoolCreation:
@@ -85,11 +103,11 @@ class TestClientPoolBatchParameters:
         assert "output_jsonl" in params
 
     @pytest.mark.asyncio
-    async def test_run_batch_signature(self, pool):
+    async def test_iter_batch_signature(self, pool):
         """批量真源接受执行类参数；返回形状开关只在公开包装上"""
         import inspect
 
-        params = list(inspect.signature(pool._run_batch).parameters)
+        params = list(inspect.signature(pool._iter_batch).parameters)
         assert "track_cost" in params
         assert "show_progress" in params
         assert "distribute" in params
@@ -109,15 +127,15 @@ class TestClientPoolBatchParameters:
         )
         assert pool._mode == "single"
 
-        with patch.object(pool._single_client, "_run_batch", new_callable=AsyncMock) as mock_batch:
-            mock_batch.return_value = _run(["Test response"])
+        mock_batch = _FakeIter(["Test response"])
+        with patch.object(pool._single_client, "_iter_batch", mock_batch):
             await pool.chat_completions_batch(
                 [[{"role": "user", "content": "test"}]],
                 track_cost=True,
                 return_cost_report=True,
                 show_progress=False,
             )
-            call_kwargs = mock_batch.call_args[1]
+            call_kwargs = mock_batch.calls[-1]
             assert call_kwargs["track_cost"] is True
 
 
@@ -133,7 +151,7 @@ class TestClientPoolTrackCost:
             ]
         )
 
-        mock_result = _run(
+        mock_batch = _FakeIter(
             [
                 ChatCompletionResult(
                     content="Test",
@@ -142,10 +160,8 @@ class TestClientPoolTrackCost:
             ]
         )
 
-        with patch.object(pool._clients[0], "_run_batch", new_callable=AsyncMock) as mock_batch:
-            mock_batch.return_value = mock_result
-
-            # Use distribute=False to use _batch_with_fallback
+        with patch.object(pool._clients[0], "_iter_batch", mock_batch):
+            # Use distribute=False to use _iter_batch_with_fallback
             await pool.chat_completions_batch(
                 [[{"role": "user", "content": "test"}]],
                 track_cost=True,
@@ -154,7 +170,7 @@ class TestClientPoolTrackCost:
             )
 
             # Verify return_usage or track_cost was passed as True
-            call_kwargs = mock_batch.call_args[1]
+            call_kwargs = mock_batch.calls[-1]
             assert call_kwargs.get("return_usage") is True or call_kwargs.get("track_cost") is True
 
 
@@ -178,12 +194,10 @@ class TestBatchFallbackContract:
             [{"role": "user", "content": "second"}],
         ]
         upstream_error = LLMHTTPError("HTTP 500", status_code=500, response_data={"x": 1})
-        pool._clients[0]._run_batch = AsyncMock(
-            return_value=_run([ChatCompletionResult(content="ok-1"), None], {1: upstream_error})
+        pool._clients[0]._iter_batch = _FakeIter(
+            [ChatCompletionResult(content="ok-1"), None], {1: upstream_error}
         )
-        pool._clients[1]._run_batch = AsyncMock(
-            return_value=_run([ChatCompletionResult(content="ok-2")])
-        )
+        pool._clients[1]._iter_batch = _FakeIter([ChatCompletionResult(content="ok-2")])
 
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter("always")
@@ -192,17 +206,17 @@ class TestBatchFallbackContract:
         assert not [w for w in captured if issubclass(w.category, LegacyResponseWarning)]
         assert [result.content for result in results] == ["ok-1", "ok-2"]
         assert results.failed_count == 0
-        second_call = pool._clients[1]._run_batch.call_args.kwargs
+        second_call = pool._clients[1]._iter_batch.calls[-1]
         assert second_call["messages_list"] == [messages[1]]
 
     @pytest.mark.asyncio
     async def test_legacy_cost_report_keeps_0_16_shape(self):
         """旧接口的 return_cost_report 形状不变：没有 cost_tracker 就不多出一项"""
         pool = self._pool()
-        pool._clients[0]._run_batch = AsyncMock(
-            return_value=_run([None], {0: LLMHTTPError("HTTP 500", status_code=500)})
+        pool._clients[0]._iter_batch = _FakeIter(
+            [None], {0: LLMHTTPError("HTTP 500", status_code=500)}
         )
-        pool._clients[1]._run_batch = AsyncMock(return_value=_run(["ok"]))
+        pool._clients[1]._iter_batch = _FakeIter(["ok"])
 
         results = await pool.chat_completions_batch(
             [[{"role": "user", "content": "test"}]],
@@ -211,7 +225,7 @@ class TestBatchFallbackContract:
         )
 
         assert results == ["ok"]
-        pool._clients[1]._run_batch.assert_awaited_once()
+        assert len(pool._clients[1]._iter_batch.calls) == 1
 
     @pytest.mark.asyncio
     async def test_legacy_cost_report_ignored_in_distributed_mode(self):
@@ -223,7 +237,7 @@ class TestBatchFallbackContract:
             ],
             cost_tracker=True,
         )
-        pool._batch_distributed = AsyncMock(return_value=_run(["ok"]))
+        pool._iter_batch_distributed = _FakeIter(["ok"])
 
         results = await pool.chat_completions_batch(
             [[{"role": "user", "content": "test"}]],
@@ -238,8 +252,8 @@ class TestBatchFallbackContract:
         """全部 endpoint 失败：不抛异常，失败项自带最后一次的 typed error"""
         pool = self._pool()
         for client, status in zip(pool._clients, (500, 503)):
-            client._run_batch = AsyncMock(
-                return_value=_run([None], {0: LLMHTTPError(f"HTTP {status}", status_code=status)})
+            client._iter_batch = _FakeIter(
+                [None], {0: LLMHTTPError(f"HTTP {status}", status_code=status)}
             )
 
         results = await pool.chat_batch([[{"role": "user", "content": "test"}]], distribute=False)
@@ -262,15 +276,7 @@ class TestBatchFallbackContract:
             ],
             cost_tracker=True,
         )
-        pool._batch_distributed = AsyncMock(
-            return_value=_BatchRun(
-                responses=[ChatCompletionResult(content="ok")],
-                errors={},
-                summary=None,
-                cost=pool._aggregate_cost_report(),
-                elapsed=0.0,
-            )
-        )
+        pool._iter_batch_distributed = _FakeIter([ChatCompletionResult(content="ok")])
 
         results = await pool.chat_batch([[{"role": "user", "content": "test"}]], distribute=True)
 
@@ -282,15 +288,11 @@ class TestBatchFallbackContract:
         """首轮已落盘的成功项不重复写；只补写后续 endpoint 恢复的那条"""
         pool = self._pool()
         output = tmp_path / "out.jsonl"
-        pool._clients[0]._run_batch = AsyncMock(
-            return_value=_run(
-                [ChatCompletionResult(content="ok-1"), None],
-                {1: LLMHTTPError("HTTP 500", status_code=500)},
-            )
+        pool._clients[0]._iter_batch = _FakeIter(
+            [ChatCompletionResult(content="ok-1"), None],
+            {1: LLMHTTPError("HTTP 500", status_code=500)},
         )
-        pool._clients[1]._run_batch = AsyncMock(
-            return_value=_run([ChatCompletionResult(content="ok-2")])
-        )
+        pool._clients[1]._iter_batch = _FakeIter([ChatCompletionResult(content="ok-2")])
 
         written = []
         original = JsonlWriter.write_result
@@ -317,7 +319,7 @@ class TestBatchFallbackContract:
             fallback=False,
             failure_threshold=1,
         )
-        pool._clients[0]._run_batch = AsyncMock(return_value=_run([None]))
+        pool._clients[0]._iter_batch = _FakeIter([None])
 
         results = await pool.chat_completions_batch(
             [[{"role": "user", "content": "test"}]], distribute=False
@@ -349,7 +351,7 @@ class TestClientPoolOutputJsonl:
 
 
 class TestClientPoolDistributedAttributes:
-    """验证 _batch_distributed 中属性直接在 base client 上可访问（回归测试）"""
+    """验证 _iter_batch_distributed 中属性直接在 base client 上可访问（回归测试）"""
 
     def test_response_cache_on_base_client(self):
         """base client 有 _response_cache 属性（修复前 client._client 导致获取不到）"""
@@ -714,12 +716,10 @@ class TestFromConfig:
 
         client = LLMClientPool.from_config()
 
-        with patch.object(
-            client._single_client, "_run_batch", new_callable=AsyncMock
-        ) as mock_batch:
-            mock_batch.return_value = _run(["r1", "r2"])
+        mock_batch = _FakeIter(["r1", "r2"])
+        with patch.object(client._single_client, "_iter_batch", mock_batch):
             await client.chat_completions_batch(["问题1", "问题2"], show_progress=False)
-            messages_list = mock_batch.call_args[1]["messages_list"]
+            messages_list = mock_batch.calls[-1]["messages_list"]
             assert len(messages_list) == 2
             assert messages_list[0][0]["role"] == "system"
             assert messages_list[0][1]["content"] == "问题1"
@@ -845,10 +845,10 @@ class TestCapacityAwareSelection:
             yield "a"
             yield "b"
 
-        pool._clients[0].chat_completions_stream = fake_stream
-        pool._clients[1].chat_completions_stream = fake_stream
+        pool._clients[0]._stream = fake_stream
+        pool._clients[1]._stream = fake_stream
 
-        agen = pool.chat_completions_stream("hi")
+        agen = pool._stream("hi")
         chunks = [await anext(agen)]
         # 流进行中：恰有一个 endpoint in_flight == 1
         assert sorted(p.in_flight for p in pool._router._providers) == [0, 1]
@@ -872,10 +872,10 @@ class TestCapacityAwareSelection:
             yield "a"
             yield "b"
 
-        pool._clients[0].chat_completions_stream = fail_first_call
-        pool._clients[1].chat_completions_stream = fail_first_call
+        pool._clients[0]._stream = fail_first_call
+        pool._clients[1]._stream = fail_first_call
 
-        chunks = [c async for c in pool.chat_completions_stream("hi")]
+        chunks = [c async for c in pool._stream("hi")]
 
         assert chunks == ["a", "b"]
         assert len(calls) == 2
@@ -891,12 +891,12 @@ class TestCapacityAwareSelection:
             yield "a"
             raise RuntimeError("connection reset")
 
-        pool._clients[0].chat_completions_stream = partial_then_fail
-        pool._clients[1].chat_completions_stream = partial_then_fail
+        pool._clients[0]._stream = partial_then_fail
+        pool._clients[1]._stream = partial_then_fail
 
         chunks = []
         with pytest.raises(RuntimeError, match="connection reset"):
-            async for chunk in pool.chat_completions_stream("hi"):
+            async for chunk in pool._stream("hi"):
                 chunks.append(chunk)
 
         assert chunks == ["a"]

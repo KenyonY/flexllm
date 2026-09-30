@@ -9,6 +9,7 @@ import json
 import logging
 import time
 from abc import ABC, abstractmethod
+from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import asdict, dataclass, fields
 from typing import TYPE_CHECKING, Union
@@ -323,8 +324,15 @@ class BatchResult:
 
 
 @dataclass
+class _BatchReport:
+    """_iter_batch 边产出边执行，整批摘要只能在跑完后带回：旧 return_summary 用。"""
+
+    summary: str | dict | None = None
+
+
+@dataclass
 class _BatchRun:
-    """_run_batch 的输出：公开包装各取所需，避免真源里塞返回形状开关。
+    """_run_batch 收集 _iter_batch 的结果：公开包装各取所需，避免真源里塞返回形状开关。
 
     responses 的元素形状由 return_raw / return_usage 决定（失败项为 None），
     errors 是 {index: 错误}，两者按 index 对齐。
@@ -859,7 +867,7 @@ class LLMClientBase(CompletionMixin, ABC):
             )
         )
 
-    async def _run_batch(
+    async def _iter_batch(
         self,
         messages_list: list[list[dict]],
         model: str = None,
@@ -876,21 +884,26 @@ class LLMClientBase(CompletionMixin, ABC):
         include_prefix: bool = True,
         params_list: list[dict | None] | None = None,
         save_raw: bool = False,
+        report: "_BatchReport | None" = None,
         **kwargs,
-    ) -> "_BatchRun":
+    ):
         """
-        批量执行的单一真源：公开的 chat_completions_batch（旧形状）与 chat_batch
-        （BatchResult）都是它的包装，两者共用同一份缓存/断点续传/进度/成本逻辑。
+        批量执行的单一真源：按完成顺序逐条 yield ``(index, value, error)``。
+
+        chat_batch_iter 直接透出它；chat_batch 与旧 chat_completions_batch 经
+        _run_batch 收集成整批。三者共用同一份缓存/断点续传/进度/成本逻辑。
+
+        每个 index 恰好产出一次，顺序为：checkpoint 恢复项 → 缓存命中 → 本轮请求（按完成
+        顺序）→ 没跑到的项（预算中止时，带 error）。value 的形状由 return_raw /
+        return_usage 决定，失败项 value 为 None 且 error 非空。
 
         Args:
             messages_list: 消息列表
             model: 模型名称
-            return_raw: 是否返回原始响应 JSON dict 列表（跳过响应缓存，不做 prefix 拼接；
+            return_raw: value 为原始响应 JSON dict（跳过响应缓存，不做 prefix 拼接；
                 output_jsonl 的 output 字段写入原始 dict）。优先级高于 return_usage。
-            return_usage: 是否返回包含 usage 的结果（ChatCompletionResult 列表）
+            return_usage: value 为 ChatCompletionResult（否则为 str）
             show_progress: 是否显示进度条
-            return_summary: 是否返回执行摘要
-            return_cost_report: 是否返回成本报告（需要启用 cost_tracker）
             track_cost: 是否在进度条中显示实时成本（自动启用 return_usage）
             preprocess_msg: 是否预处理消息
             output_jsonl: 输出文件路径（JSONL 格式），用于持久化保存结果
@@ -909,23 +922,17 @@ class LLMClientBase(CompletionMixin, ABC):
                 每条的有效请求参数 = {**全局kwargs, **params_list[i]}，覆盖全局 kwargs，
                 并参与各自的缓存键计算。带 params 的行会把 params 原样回显到输出 JSONL。
                 注：断点续传校验只看 messages，不感知 params 变化（与改 kwargs 不影响续传一致）。
-
-        Returns:
-            - return_usage=True: List[ChatCompletionResult] 或 (List[ChatCompletionResult], summary)
-            - return_cost_report=True: 返回元组 (results, cost_report)
-            - 默认: List[str] 或 (List[str], summary)
+            report: 用来带回进度条摘要（旧 return_summary 用）
 
         Note:
             缓存由初始化时的 cache 参数控制。
             切换 save_input 模式可能导致断点续传校验失败，这是预期行为。
 
             预算控制（cost_tracker 配置硬限制时）：批量中超预算不抛异常，而是停止发起
-            新请求，已完成的结果正常返回（未完成的为 None），日志记录 warning，
-            summary（如有）末尾追加预算中止标注。这与单条 chat_completions
-            （超预算时抛 BudgetExceededError）不同：批量场景抛异常会丢弃已完成结果。
+            新请求，在途请求收完后照常产出，没发出的项带 error 产出，日志记录 warning，
+            summary（如有）末尾追加预算中止标注。这与单条 chat（超预算时抛
+            BudgetExceededError）不同：批量场景抛异常会丢弃已完成结果。
         """
-        # track_cost 需要 usage 信息
-        started = time.perf_counter()
         if track_cost:
             return_usage = True
         effective_model = self._get_effective_model(model)
@@ -967,10 +974,15 @@ class LLMClientBase(CompletionMixin, ABC):
                 return {"content": result.data, "usage": self._extract_usage(result.data)}
             return _result_payload(self._completion_result(result, **merged_kwargs(idx)))
 
-        def to_chat_result(extracted, idx: int):
-            result = ChatCompletionResult._from_payload(extracted)
-            result.content = with_prefix(idx, result.content)
-            return result
+        def finalize(idx: int, extracted: dict):
+            """缓存/请求得到的 payload → 调用方要的形状（prefill 前缀只在这里拼）"""
+            if return_raw:
+                return extracted["content"]
+            if return_usage:
+                result = ChatCompletionResult._from_payload(extracted)
+                result.content = with_prefix(idx, result.content)
+                return result
+            return with_prefix(idx, extracted["content"])
 
         # 进度条配置（支持成本显示）
         progress_config = ProgressBarConfig(show_cost=track_cost) if show_progress else None
@@ -991,162 +1003,89 @@ class LLMClientBase(CompletionMixin, ABC):
         )
         completed_indices = writer.completed_indices
 
-        # responses/progress 在 try 外初始化：预算超限提前跳出时二者必须有定义
-        responses: list = [None] * len(messages_list)
-        batch_errors: dict[int, LLMRequestError] = {}
+        def checkpoint(idx: int, extracted: dict):
+            writer.write_result(
+                idx,
+                with_prefix(idx, extracted["content"]),
+                usage=extracted.get("usage"),
+                result=_checkpoint_payload(extracted, save_raw=save_raw)
+                if return_usage and not return_raw
+                else None,
+            )
+
+        not_yielded = set(range(len(messages_list)))
         progress = None
-        budget_exceeded = False
+        budget_error = None
 
         try:
-            # 计算实际需要执行的索引（排除文件中已完成的）
+            # 断点续传：文件中已完成的记录本轮不请求，直接产出。
+            # 文件里的 output 已是最终形态（含 prefix / return_raw 时为原始 dict），不再二次加工。
             if completed_indices:
                 logger.info(f"从文件恢复跳过: {len(completed_indices)}/{len(messages_list)}")
+            for record in writer.restored_records:
+                idx = record["index"]
+                not_yielded.discard(idx)
+                if return_usage and not return_raw:
+                    yield idx, _restore_from_record(record), None
+                else:
+                    yield idx, record["output"], None
 
-            # 带缓存执行
-            if use_cache and self._response_cache:
+            indices_to_run = [i for i in range(len(messages_list)) if i not in completed_indices]
+
+            if use_cache:
                 # 查询缓存（传递 kwargs + per-record params 以确保不同参数使用不同缓存键）
                 cached_responses, uncached_indices = self._response_cache.get_batch(
                     messages_list, model=effective_model, params_list=gen_params_list, **kwargs
                 )
-                # 提前绑定：后续对 cached_responses 的原地写入即对 responses 的写入，
-                # 预算超限提前跳出时已完成部分不丢失
-                cached_responses = [
-                    {**r, "cached": True, "queue_time": None, "latency": None}
-                    if r is not None
-                    else None
-                    for r in cached_responses
-                ]
-                responses = cached_responses
-
-                # 将缓存命中的写入文件（如果文件中没有）
-                for i, resp in enumerate(cached_responses):
-                    if resp is not None and i not in completed_indices:
-                        writer.write_result(
-                            i,
-                            with_prefix(i, resp["content"]),
-                            usage=resp.get("usage"),
-                            result=_checkpoint_payload(resp, save_raw=save_raw)
-                            if return_usage and not return_raw
-                            else None,
-                        )
-
-                # 过滤掉文件中已完成的
-                actual_uncached = [i for i in uncached_indices if i not in completed_indices]
                 cache_hit_count = len(messages_list) - len(uncached_indices)
-
                 if cache_hit_count > 0:
                     logger.info(f"缓存命中: {cache_hit_count}/{len(messages_list)}")
-                if actual_uncached:
-                    logger.info(f"待执行: {len(actual_uncached)}/{len(messages_list)}")
+                for i, resp in enumerate(cached_responses):
+                    if resp is None or i in completed_indices:
+                        continue
+                    resp = {**resp, "cached": True, "queue_time": None, "latency": None}
+                    checkpoint(i, resp)
+                    not_yielded.discard(i)
+                    yield i, finalize(i, resp), None
+                uncached = set(uncached_indices)
+                indices_to_run = [i for i in indices_to_run if i in uncached]
 
-                    request_params = [
-                        {
+            if indices_to_run:
+                logger.info(f"待执行: {len(indices_to_run)}/{len(messages_list)}")
+
+                def request_params():
+                    # 并发窗口按需取下一条：超预算后不再发新请求，已在途的照常收完交出
+                    # （它们服务端已经处理、已经计费，丢掉就是白花钱）
+                    for i in indices_to_run:
+                        if budget_error is not None:
+                            return
+                        yield {
                             "json": self._build_request_body(
                                 messages_list[i], effective_model, **merged_kwargs(i)
                             ),
                             "headers": headers,
                         }
-                        for i in actual_uncached
-                    ]
 
-                    async for batch in self._client.aiter_stream_requests(
-                        request_params=request_params,
+                # aclosing：调用方提前 break 时，立即取消窗口内的在途请求。
+                # batch_size=1：完成一条交一条（默认要攒满一个并发窗口才交付，
+                # chat_batch_iter 就不再是"边完成边产出"；并发窗口大小不受它影响）
+                async with aclosing(
+                    self._client.aiter_stream_requests(
+                        request_params=request_params(),
                         url=effective_url,
                         method="POST",
                         show_progress=show_progress,
-                        total_requests=len(actual_uncached),
-                        progress_config=progress_config,
-                        model_name=effective_model if track_cost else None,
-                        input_price_per_1m=input_price,
-                        output_price_per_1m=output_price,
-                    ):
-                        for result in batch.completed_requests:
-                            original_idx = actual_uncached[result.request_id]
-                            if result.status != "success":
-                                error_msg = (
-                                    result.data.get("error", "Unknown error")
-                                    if isinstance(result.data, dict)
-                                    else str(result.data)
-                                )
-                                logger.debug(f"请求失败: {error_msg}")
-                                cached_responses[original_idx] = None
-                                batch_errors[original_idx] = _request_error_from_result(result)
-                                writer.write_result(original_idx, None, "error", error_msg)
-                                continue
-                            try:
-                                extracted = extractor(result, original_idx)
-                                cached_responses[original_idx] = extracted
-                                # 写入缓存（per-record 参数纳入键，与 get_batch 对齐）
-                                self._response_cache.set(
-                                    messages_list[original_idx],
-                                    extracted,
-                                    model=effective_model,
-                                    **merged_kwargs(original_idx),
-                                )
-                                # 文件输出
-                                writer.write_result(
-                                    original_idx,
-                                    with_prefix(original_idx, extracted["content"]),
-                                    usage=extracted.get("usage"),
-                                    result=_checkpoint_payload(extracted, save_raw=save_raw)
-                                    if return_usage and not return_raw
-                                    else None,
-                                )
-                                # 记录成本
-                                if self._cost_tracker and extracted.get("usage"):
-                                    self._cost_tracker.record(extracted["usage"], effective_model)
-                                # 更新进度条的成本显示
-                                if track_cost and batch.progress and extracted.get("usage"):
-                                    usage = extracted["usage"]
-                                    input_tokens = usage.get("prompt_tokens", 0)
-                                    output_tokens = usage.get("completion_tokens", 0)
-                                    cost = estimate_cost(
-                                        input_tokens, output_tokens, effective_model
-                                    )
-                                    batch.progress.update_cost(input_tokens, output_tokens, cost)
-                            except BudgetExceededError:
-                                logger.warning("预算超限，停止批量处理")
-                                raise
-                            except Exception as e:
-                                logger.warning(f"提取结果失败: {e}")
-                                cached_responses[original_idx] = None
-                                batch_errors[original_idx] = (
-                                    e
-                                    if isinstance(e, LLMRequestError)
-                                    else LLMResponseError(str(e))
-                                )
-                                writer.write_result(original_idx, None, "error", str(e))
-                        if batch.is_final:
-                            progress = batch.progress
-            else:
-                # 不使用缓存，直接批量执行（流式处理以支持增量保存）
-                indices_to_run = [
-                    i for i in range(len(messages_list)) if i not in completed_indices
-                ]
-
-                if indices_to_run:
-                    request_params = [
-                        {
-                            "json": self._build_request_body(
-                                messages_list[i], effective_model, **merged_kwargs(i)
-                            ),
-                            "headers": headers,
-                        }
-                        for i in indices_to_run
-                    ]
-                    async for batch in self._client.aiter_stream_requests(
-                        request_params=request_params,
-                        url=effective_url,
-                        method="POST",
-                        show_progress=show_progress,
+                        batch_size=1,
                         total_requests=len(indices_to_run),
                         progress_config=progress_config,
                         model_name=effective_model if track_cost else None,
                         input_price_per_1m=input_price,
                         output_price_per_1m=output_price,
-                    ):
+                    )
+                ) as batches:
+                    async for batch in batches:
                         for result in batch.completed_requests:
-                            original_idx = indices_to_run[result.request_id]
+                            idx = indices_to_run[result.request_id]
                             if result.status != "success":
                                 error_msg = (
                                     result.data.get("error", "Unknown error")
@@ -1154,90 +1093,73 @@ class LLMClientBase(CompletionMixin, ABC):
                                     else str(result.data)
                                 )
                                 logger.debug(f"请求失败: {error_msg}")
-                                responses[original_idx] = None
-                                batch_errors[original_idx] = _request_error_from_result(result)
-                                writer.write_result(original_idx, None, "error", error_msg)
+                                writer.write_result(idx, None, "error", error_msg)
+                                not_yielded.discard(idx)
+                                yield idx, None, _request_error_from_result(result)
                                 continue
                             try:
-                                extracted = extractor(result, original_idx)
-                                responses[original_idx] = extracted
-                                writer.write_result(
-                                    original_idx,
-                                    with_prefix(original_idx, extracted["content"]),
-                                    usage=extracted.get("usage"),
-                                    result=_checkpoint_payload(extracted, save_raw=save_raw)
-                                    if return_usage and not return_raw
-                                    else None,
-                                )
-                                if self._cost_tracker and extracted.get("usage"):
-                                    self._cost_tracker.record(extracted["usage"], effective_model)
-                                if track_cost and batch.progress and extracted.get("usage"):
-                                    usage = extracted["usage"]
-                                    input_tokens = usage.get("prompt_tokens", 0)
-                                    output_tokens = usage.get("completion_tokens", 0)
-                                    cost = estimate_cost(
-                                        input_tokens, output_tokens, effective_model
+                                extracted = extractor(result, idx)
+                                if use_cache:
+                                    # 写入缓存（per-record 参数纳入键，与 get_batch 对齐）
+                                    self._response_cache.set(
+                                        messages_list[idx],
+                                        extracted,
+                                        model=effective_model,
+                                        **merged_kwargs(idx),
                                     )
-                                    batch.progress.update_cost(input_tokens, output_tokens, cost)
-                            except BudgetExceededError:
-                                logger.warning("预算超限，停止批量处理")
-                                raise
+                                checkpoint(idx, extracted)
+                                try:
+                                    self._track_batch_cost(
+                                        extracted, effective_model, batch.progress, track_cost
+                                    )
+                                except BudgetExceededError as error:
+                                    if budget_error is None:
+                                        logger.warning(
+                                            "预算超限，批量提前中止：停止发起新请求，"
+                                            "在途请求收完后返回已完成结果"
+                                        )
+                                    budget_error = budget_error or error
                             except Exception as e:
-                                logger.warning(f"Error: {e}, set content to None")
-                                responses[original_idx] = None
-                                batch_errors[original_idx] = (
-                                    e
-                                    if isinstance(e, LLMRequestError)
-                                    else LLMResponseError(str(e))
-                                )
-                                writer.write_result(original_idx, None, "error", str(e))
+                                logger.warning(f"提取结果失败: {e}")
+                                writer.write_result(idx, None, "error", str(e))
+                                not_yielded.discard(idx)
+                                typed = e if isinstance(e, LLMRequestError) else None
+                                yield idx, None, typed or LLMResponseError(str(e))
+                                continue
+                            not_yielded.discard(idx)
+                            yield idx, finalize(idx, extracted), None
                         if batch.is_final:
                             progress = batch.progress
-
-        except BudgetExceededError:
-            # 超预算 → 停止发新请求，已完成的正常返回（见 docstring Note）
-            budget_exceeded = True
-            logger.warning("预算超限，批量提前中止：停止发起新请求，返回已完成结果")
 
         finally:
             writer.close()
 
         summary = progress.summary(print_to_console=False) if progress else None
+        budget_exceeded = budget_error is not None
         if budget_exceeded and isinstance(summary, str):
             summary += "\n| ⚠ 预算超限，批量提前中止（未完成请求返回 None）\n"
+        if report is not None:
+            report.summary = summary
 
-        # 转换返回值格式（prefill 场景统一在此拼接 prefix；return_raw 返回原始 dict）
-        if return_raw:
-            final_responses = [
-                r["content"] if r is not None else None for i, r in enumerate(responses)
-            ]
-        elif return_usage:
-            final_responses = [
-                to_chat_result(r, i) if r is not None else None for i, r in enumerate(responses)
-            ]
-        else:
-            final_responses = [
-                with_prefix(i, r["content"]) if r is not None else None
-                for i, r in enumerate(responses)
-            ]
+        reason = "批量因预算超限中止，该条未发出请求" if budget_exceeded else "未取得该条结果"
+        for idx in sorted(not_yielded):
+            yield idx, None, LLMRequestError(reason)
 
-        # 断点续传：把文件中已完成的记录回填到返回值。
-        # 不回填的话这些位置恒为 None（本轮没请求过），调用方直接用返回值会静默丢结果。
-        # 文件里的 output 已是最终形态（含 prefix / return_raw 时为原始 dict），不再二次加工。
-        for record in writer.restored_records:
-            idx = record["index"]
-            if return_usage and not return_raw:
-                final_responses[idx] = _restore_from_record(record)
-            else:
-                final_responses[idx] = record["output"]
+    def _track_batch_cost(self, extracted: dict, model: str, progress, track_cost: bool):
+        """记录一条成功结果的成本；配置了硬预算时可能抛 BudgetExceededError"""
+        usage = extracted.get("usage")
+        if not usage:
+            return
+        if self._cost_tracker:
+            self._cost_tracker.record(usage, model)
+        if track_cost and progress:
+            input_tokens = usage.get("prompt_tokens", 0)
+            output_tokens = usage.get("completion_tokens", 0)
+            cost = estimate_cost(input_tokens, output_tokens, model)
+            progress.update_cost(input_tokens, output_tokens, cost)
 
-        return _BatchRun(
-            responses=final_responses,
-            errors=batch_errors,
-            summary=summary,
-            cost=self._cost_tracker.get_report() if self._cost_tracker else None,
-            elapsed=time.perf_counter() - started,
-        )
+    def _batch_cost(self) -> "CostReport | None":
+        return self._cost_tracker.get_report() if self._cost_tracker else None
 
     async def chat_completions_batch(
         self,
@@ -1331,7 +1253,7 @@ class LLMClientBase(CompletionMixin, ABC):
             )
         )
 
-    async def iter_chat_completions_batch(
+    async def _legacy_iter_batch(
         self,
         messages_list: list[list[dict]],
         model: str = None,
@@ -1349,10 +1271,8 @@ class LLMClientBase(CompletionMixin, ABC):
         **kwargs,
     ):
         """
-        迭代式批量聊天完成（边请求边返回结果）
-
-        与 chat_completions_batch 功能相同，但以流式方式逐条返回结果，
-        适合处理大批量数据时节省内存。
+        旧 iter_chat_completions_batch 的实现：行为冻结在 0.17.7，0.18.0 随公开入口一起删除。
+        新代码走 chat_batch_iter（与 chat_batch 共用 _iter_batch）。
 
         Args:
             messages_list: 消息列表
@@ -1564,7 +1484,7 @@ class LLMClientBase(CompletionMixin, ABC):
         finally:
             writer.close()
 
-    async def chat_completions_stream(
+    async def _stream(
         self,
         messages: list[dict],
         model: str = None,
@@ -1576,7 +1496,8 @@ class LLMClientBase(CompletionMixin, ABC):
         **kwargs,
     ):
         """
-        流式聊天完成
+        流式实现：chat_stream 以 return_usage=True 消费它，旧 chat_completions_stream
+        原样透出它。provider 子类覆写的也是这个方法。
 
         Args:
             messages: 消息列表

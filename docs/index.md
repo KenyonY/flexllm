@@ -41,9 +41,11 @@ LLMClient (统一入口，LLMClientPool 的别名)
 | 单条同步 | `chat_sync()` | 同上 |
 | 批量异步 | `chat_batch()` | `BatchResult`，失败项带 `.error`，不抛异常 |
 | 批量同步 | `chat_batch_sync()` | 同上 |
+| 批量逐条 | `chat_batch_iter()` | 按完成顺序 yield `(index, ChatCompletionResult)`，与 `chat_batch` 同一份执行 |
 | 流式输出 | `chat_stream()` | 增量事件 dict，结尾一条 `result`（`ChatCompletionResult`） |
 
-`chat_completions*` 是上一代接口，返回形状不变但已弃用，0.18.0 移除。
+上一代接口（`chat_completions` / `chat_completions_sync` / `chat_completions_or_raise` / `chat_completions_batch` / `chat_completions_batch_sync` / `chat_completions_stream` / `iter_chat_completions_batch`）返回形状不变但已弃用，0.18.0 移除，
+替代关系见 [api.md](api.md#0180-移除清单)。
 
 ### 3. 缓存机制
 

@@ -687,19 +687,21 @@ class ChainOfThoughtClient:
                 start_time = time.time()
 
                 # 创建超时任务
-                llm_task = self.openai_client.chat_completions(
-                    messages=messages,
+                llm_task = self.openai_client.chat(
+                    messages,
                     preprocess_msg=True,
                     show_progress=False,  # LLM调用的进度条始终关闭
                     **step.model_params,
                 )
 
+                # 请求失败抛 LLMRequestError，由下方 except Exception 走重试
                 if self.execution_config.step_timeout:
-                    response_content = await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         llm_task, timeout=self.execution_config.step_timeout
                     )
                 else:
-                    response_content = await llm_task
+                    result = await llm_task
+                response_content = result.content
 
                 execution_time = time.time() - start_time
                 step_info.execution_time = execution_time

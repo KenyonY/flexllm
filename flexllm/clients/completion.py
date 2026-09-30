@@ -4,16 +4,16 @@ import asyncio
 import sys
 import time
 import warnings
-from contextlib import contextmanager
+from contextlib import aclosing, contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .base import BatchResult, ChatCompletionResult
+    from .base import BatchResult, ChatCompletionResult, _BatchRun
 
 
 class LegacyResponseWarning(FutureWarning):
-    """A legacy return shape is being used; these shapes go away in 0.18.0.
+    """A legacy return shape or entry point is being used; both go away in 0.18.0.
 
     刻意用 FutureWarning 而不是 DeprecationWarning：后者默认对终端用户静默，
     而这里需要调用方真的看见。
@@ -33,8 +33,8 @@ def suppress_legacy_response_warning():
         _SUPPRESS_LEGACY_WARNING.reset(token)
 
 
-def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error: bool = False):
-    if _SUPPRESS_LEGACY_WARNING.get() or (return_usage and not return_raw and raise_on_error):
+def _warn_legacy(message: str):
+    if _SUPPRESS_LEGACY_WARNING.get():
         return
     # Attribute warnings to the consumer even through pool and sync wrappers.
     level = 2
@@ -42,15 +42,19 @@ def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error
     while frame and frame.f_globals.get("__name__", "").startswith(("flexllm.", "asyncio.")):
         level += 1
         frame = frame.f_back
-    warnings.warn(
+    warnings.warn(message, LegacyResponseWarning, stacklevel=level)
+
+
+def warn_legacy_response(*, return_raw: bool, return_usage: bool, raise_on_error: bool = False):
+    if return_usage and not return_raw and raise_on_error:
+        return
+    _warn_legacy(
         "Legacy completion return shapes are deprecated and will be removed in flexllm 0.18.0; "
         "use chat()/chat_batch() (or their _sync variants). chat() returns a "
         "ChatCompletionResult and raises typed errors; chat_batch() returns an equal-length "
         "BatchResult whose failed items carry .error instead of raising. "
         "Read .content for text and .raw_response for the provider response. "
-        "Existing return values stay unchanged until 0.18.0.",
-        LegacyResponseWarning,
-        stacklevel=level,
+        "Existing return values stay unchanged until 0.18.0."
     )
 
 
@@ -73,6 +77,31 @@ def merge_tool_call_delta(tool_calls: dict[int, dict], delta: dict) -> None:
         current["function"]["name"] = function["name"]
     if "arguments" in function:
         current["function"]["arguments"] += function["arguments"]
+
+
+async def think_tagged_text(events, on_result=None):
+    """把 chat_stream 的事件还原成纯文本片段，思考内容包在 <think>…</think> 里。
+
+    给只认文本流的消费方（CLI 终端输出、MllmClient 的 token 流）用。需要结构化结果的
+    （如把回复写回对话历史——那里不该混进思考文本）传 on_result 接住结尾的
+    ChatCompletionResult。
+    """
+    thinking = False
+    async for event in events:
+        if event["type"] == "result" and on_result is not None:
+            on_result(event["result"])
+        elif event["type"] == "thinking":
+            if not thinking:
+                yield "<think>\n"
+                thinking = True
+            yield event["content"]
+        elif event["type"] == "content":
+            if thinking:
+                yield "</think>"
+                thinking = False
+            yield event["content"]
+    if thinking:
+        yield "</think>"
 
 
 class CompletionMixin:
@@ -128,9 +157,7 @@ class CompletionMixin:
         assistant_message = finish_reason = usage = None
         start = time.perf_counter()
 
-        async for event in self.chat_completions_stream(
-            messages, model=model, return_usage=True, **kwargs
-        ):
+        async for event in self._stream(messages, model=model, return_usage=True, **kwargs):
             kind = event["type"]
             # 汇总类事件只进 result，不单独产出
             if kind == "assistant_message":
@@ -183,3 +210,79 @@ class CompletionMixin:
     def chat_batch_sync(self, messages_list, model=None, **kwargs) -> "BatchResult":
         """Synchronous counterpart of chat_batch()."""
         return asyncio.run(self.chat_batch(messages_list, model=model, **kwargs))
+
+    async def chat_batch_iter(self, messages_list, model=None, **kwargs):
+        """边完成边产出的 chat_batch：逐条 yield ``(index, ChatCompletionResult)``。
+
+        与 chat_batch 是同一份执行（缓存/断点续传/成本/故障转移都一样），差别只在交付方式：
+        按完成顺序逐条交出，不在内存里攒整批。每个 index 恰好出现一次——断点续传恢复的、
+        缓存命中的也会产出（排在最前），所以把它收集起来按 index 排好就等于 chat_batch。
+        失败项与 chat_batch 一致：content=None 且带 error，不抛异常。
+
+        提前停止：生成器关闭时取消在途请求并关闭 checkpoint 文件，已落盘的下次可续跑。
+        直接 break 出 async for 时，关闭由事件循环稍后调度（Python async generator 的
+        语义）；要在 break 之后立刻读 checkpoint，用 ``contextlib.aclosing`` 包住::
+
+            async with aclosing(client.chat_batch_iter(msgs, output_jsonl=path)) as items:
+                async for index, result in items:
+                    ...
+        """
+        from .base import ChatCompletionResult
+
+        self._validate_completion_options(kwargs)
+        async with aclosing(
+            self._iter_batch(messages_list, model=model, return_usage=True, **kwargs)
+        ) as items:
+            async for index, value, error in items:
+                yield index, (value if error is None else ChatCompletionResult._from_error(error))
+
+    async def _run_batch(self, messages_list, **kwargs) -> "_BatchRun":
+        """把 _iter_batch 收集成整批结果：chat_batch 与旧 chat_completions_batch 共用。"""
+        from .base import _BatchReport, _BatchRun
+
+        started = time.perf_counter()
+        report = _BatchReport()
+        responses: list = [None] * len(messages_list)
+        errors: dict = {}
+        async with aclosing(self._iter_batch(messages_list, report=report, **kwargs)) as items:
+            async for index, value, error in items:
+                responses[index] = value
+                if error is not None:
+                    errors[index] = error
+        return _BatchRun(
+            responses=responses,
+            errors=errors,
+            summary=report.summary,
+            cost=self._batch_cost(),
+            elapsed=time.perf_counter() - started,
+        )
+
+    async def chat_completions_stream(self, *args, **kwargs):
+        """流式聊天完成（旧接口）。
+
+        .. deprecated:: 0.17.8
+            用 chat_stream()：事件形状固定，结尾给出汇总好的 ChatCompletionResult。
+            本方法在 0.18.0 移除。参数与产出与 0.17.7 完全一致。
+        """
+        _warn_legacy(
+            "chat_completions_stream() is deprecated and will be removed in flexllm 0.18.0; "
+            "use chat_stream(), which yields fixed-shape event dicts and ends with a "
+            '{"type": "result"} event carrying the aggregated ChatCompletionResult.'
+        )
+        async for chunk in self._stream(*args, **kwargs):
+            yield chunk
+
+    async def iter_chat_completions_batch(self, *args, **kwargs):
+        """迭代式批量聊天完成（旧接口）。
+
+        .. deprecated:: 0.17.8
+            用 chat_batch_iter()：逐条产出 (index, ChatCompletionResult)，与 chat_batch
+            共用同一份执行。本方法在 0.18.0 移除。参数与产出与 0.17.7 完全一致。
+        """
+        _warn_legacy(
+            "iter_chat_completions_batch() is deprecated and will be removed in flexllm 0.18.0; "
+            "use chat_batch_iter(), which yields (index, ChatCompletionResult) pairs and shares "
+            "chat_batch()'s caching, checkpointing and failover."
+        )
+        async for result in self._legacy_iter_batch(*args, **kwargs):
+            yield result

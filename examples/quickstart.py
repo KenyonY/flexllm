@@ -21,14 +21,14 @@ client = LLMClient(
 messages = [{"role": "user", "content": "你好，用一句话介绍自己"}]
 
 # 同步调用
-# response = client.chat_completions_sync(messages)
-# print(response)
+# result = client.chat_sync(messages)
+# print(result.content)
 
 
-# 异步调用
+# 异步调用：总是返回 ChatCompletionResult，失败抛 LLMRequestError
 async def single_request():
-    response = await client.chat_completions(messages)
-    print(response)
+    result = await client.chat(messages)
+    print(result.content, result.usage)
 
 
 # ============================================================
@@ -48,12 +48,21 @@ async def batch_processing():
 
     messages_list = [[{"role": "user", "content": f"{i}+{i}等于多少？"}] for i in range(100)]
 
-    results = await client.chat_completions_batch(
+    # 返回等长的 BatchResult：单条失败不抛异常，失败项带 .error
+    results = await client.chat_batch(
         messages_list,
-        output_file="results.jsonl",  # 指定文件即支持断点续传
+        output_jsonl="results.jsonl",  # 指定文件即支持断点续传
         show_progress=True,
     )
+    print(results.success_count, results.failed_count)
     return results
+
+
+async def batch_iter():
+    """边完成边处理：与 chat_batch 同一份执行，按完成顺序逐条交出"""
+    messages_list = [[{"role": "user", "content": f"{i}+{i}等于多少？"}] for i in range(100)]
+    async for index, result in client.chat_batch_iter(messages_list):
+        print(index, result.content if result.ok else result.error)
 
 
 # ============================================================
@@ -70,10 +79,11 @@ async def with_cache():
     )
 
     # 第一次调用 -> API 请求
-    r1 = await client.chat_completions(messages)
+    r1 = await client.chat(messages)
 
     # 第二次调用 -> 直接读缓存（瞬间返回）
-    r2 = await client.chat_completions(messages)
+    r2 = await client.chat(messages)
+    print(r1.cached, r2.cached)  # False True
 
 
 # ============================================================
@@ -82,8 +92,11 @@ async def with_cache():
 
 
 async def streaming():
-    async for chunk in client.chat_completions_stream(messages):
-        print(chunk, end="", flush=True)
+    async for event in client.chat_stream(messages):
+        if event["type"] == "content":
+            print(event["content"], end="", flush=True)
+        elif event["type"] == "result":
+            print("\n", event["result"].usage)  # 结尾一条汇总好的 ChatCompletionResult
 
 
 # ============================================================
@@ -123,11 +136,13 @@ async def load_balancing():
     )
 
     # 和 LLMClient API 完全一致
-    result = await pool.chat_completions(messages)
+    result = await pool.chat(messages)
+    print(result.content)
 
     # 批量请求自动分发到多节点
     messages_list = [[{"role": "user", "content": f"问题{i}"}] for i in range(10)]
-    results = await pool.chat_completions_batch(messages_list, distribute=True)
+    results = await pool.chat_batch(messages_list, distribute=True)
+    print(results.success_count)
 
 
 # ============================================================
@@ -151,8 +166,8 @@ async def tool_use():
         }
     ]
 
-    result = await client.chat_completions(
-        messages=[{"role": "user", "content": "东京天气怎么样？"}],
+    result = await client.chat(
+        [{"role": "user", "content": "东京天气怎么样？"}],
         tools=tools,
     )
 
@@ -189,6 +204,7 @@ if __name__ == "__main__":
     # 取消注释以运行示例
     # asyncio.run(single_request())
     # asyncio.run(batch_processing())
+    # asyncio.run(batch_iter())
     # asyncio.run(with_cache())
     # asyncio.run(streaming())
     pass

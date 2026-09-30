@@ -686,10 +686,10 @@ class ClaudeClient(LLMClientBase):
             return None
 
     # ========== 流式响应 ==========
-    # ClaudeClient 完整覆写 chat_completions_stream，
+    # ClaudeClient 完整覆写 _stream，
     # 基类的 _extract_stream_* / _prepare_stream_body 钩子不会被调用，无需覆写
 
-    async def chat_completions_stream(
+    async def _stream(
         self,
         messages: list[dict],
         model: str = None,
@@ -709,7 +709,7 @@ class ClaudeClient(LLMClientBase):
         headers = self._merge_headers(extra_headers)
 
         effective_timeout = timeout if timeout is not None else self._timeout
-        # 流式：空闲超时语义（见基类 chat_completions_stream 说明）
+        # 流式：空闲超时语义（见基类 _stream 说明）
         aio_timeout = aiohttp.ClientTimeout(
             total=None,
             sock_connect=min(30, effective_timeout) if effective_timeout else None,

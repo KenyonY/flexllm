@@ -575,7 +575,7 @@ class GeminiClient(LLMClientBase):
         """Gemini 不需要 stream_options"""
         return body
 
-    async def chat_completions_stream(
+    async def _stream(
         self,
         messages: list[dict],
         model: str = None,
@@ -607,7 +607,7 @@ class GeminiClient(LLMClientBase):
         headers = self._merge_headers(extra_headers)
 
         effective_timeout = timeout if timeout is not None else self._timeout
-        # 流式：空闲超时语义（见基类 chat_completions_stream 说明）
+        # 流式：空闲超时语义（见基类 _stream 说明）
         aio_timeout = aiohttp.ClientTimeout(
             total=None,
             sock_connect=min(30, effective_timeout) if effective_timeout else None,

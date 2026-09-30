@@ -323,7 +323,7 @@ pool = LLMClientPool(
 
 - **批量调用**（`distribute=True`）：worker 模型——每个 endpoint 的 worker 数等于其并发上限，所有 worker 从共享队列抢任务，快 endpoint 周转快自然多拿任务。这条路径不经过上面的选路器，work-stealing 本身已经按实际速度分配吞吐。
 
-- **流式调用**（`chat_stream` / `chat_completions_stream`）：容量感知选路，但不采集延迟样本——流的总耗时受调用方消费 chunk 的速度影响，不能代表 endpoint 的服务能力。故障转移只发生在首个 chunk 之前，流已开始输出后失败直接抛异常（已送出的内容收不回来）。
+- **流式调用**（`chat_stream`）：容量感知选路，但不采集延迟样本——流的总耗时受调用方消费 chunk 的速度影响，不能代表 endpoint 的服务能力。故障转移只发生在首个 chunk 之前，流已开始输出后失败直接抛异常（已送出的内容收不回来）。
 
 延迟感知的行为细节：
 
@@ -397,7 +397,7 @@ async with LLMClient.from_config(model="qwen-pool") as client:
 - `await client.chat_batch(...)` 在 pool 上同样不抛异常：某条在所有 endpoint 上都
   失败时，它在返回的 `BatchResult` 里是带 `.error` 的失败项，其余结果照常返回，
   checkpoint 也照常写入（失败项下次重跑）。
-- 旧 `chat_completions*` 返回形状不变但已弃用，发出 `LegacyResponseWarning`，0.18.0 移除。
+- 旧入口（`chat_completions` / `chat_completions_sync` / `chat_completions_or_raise` / `chat_completions_batch` / `chat_completions_batch_sync` / `chat_completions_stream` / `iter_chat_completions_batch`）返回形状不变但已弃用，发出 `LegacyResponseWarning`，0.18.0 移除。
 - `system`、`user_template`、生成参数仍按具名模型读取，`endpoints`、`fallback`
   和 `proxy` 不会作为生成参数发给模型。
 - CLI 的显式 `--base-url`（或 `from_config(base_url=...)`）会替换整个地址池，
@@ -469,7 +469,7 @@ pool = LLMClientPool(
 - 全局闸门在底层请求执行点生效，获取顺序为 endpoint 并发 → 全局并发 → endpoint QPS → 全局 QPS。
   等全局 slot 的请求不占任何全局稀缺资源，不存在"慢 endpoint 拖住快 endpoint"的队头阻塞
 - QPS 令牌按 wire 请求计：fallback 换 endpoint 重试会再取一次令牌
-- **流式接口不受约束**（`chat_completions_stream` 不经过并发引擎，per-endpoint 限制同样不约束它）
+- **流式接口不受约束**（`chat_stream` 不经过并发引擎，per-endpoint 限制同样不约束它）
 - 排队等待计入 `queue_time`（`return_usage=True` 时可从 `ChatCompletionResult.queue_time` 读取）
 
 **CLI 配置方式**（`~/.flexllm/config.yaml`）：
@@ -589,19 +589,16 @@ client = LLMClient(
     cache=ResponseCacheConfig(enabled=True),
 )
 
-# 4. 迭代式处理（内存友好）
-async for batch_result in client.iter_chat_completions_batch(
-    messages_list,
-    batch_size=100,
-):
-    process(batch_result)
+# 4. 逐条处理（内存友好）：完成一条交出一条，与 chat_batch 同一份执行
+async for index, result in client.chat_batch_iter(messages_list, output_jsonl="results.jsonl"):
+    process(index, result)
 ```
 
 #### 断点续传的三条语义
 
 1. **返回列表始终是全量**：续跑时，`output_jsonl` 中已完成的样本不会重新请求，但会回填到
    `chat_batch` 的返回列表，直接用返回值即可，不必读回文件。
-   （例外：`iter_chat_completions_batch` 是流式接口，恢复项不 yield，续跑要全量结果就读文件。）
+   `chat_batch_iter` 同样会把恢复项逐条交出（排在最前），每个 index 恰好一次。
 
 2. **按 index 对齐，顺序不能变**：checkpoint 用列表位置对齐。重跑时逐条校验文件里的
    `input` 与当前 `messages_list`，顺序变了会直接抛 `ValueError`，不会静默错位。
@@ -906,8 +903,13 @@ client = LLMClient(
     )
 )
 
+# 批量超预算不抛异常：停止发新请求，在途的收完照常返回，没发出的项带 .error
+results = await client.chat_batch(messages_list)
+print(results.cost.total_cost, results.failed_count)
+
+# 单条 chat() 超预算则抛 BudgetExceededError
 try:
-    results = await client.chat_batch(messages_list)
+    result = await client.chat(messages)
 except BudgetExceededError as e:
     print(f"预算超限: {e}")
 ```
@@ -1047,7 +1049,7 @@ scheme**，给它未知 scheme 它会照样往该端口发 HTTP `CONNECT`，表�
 > client 独占一个 connector），无法 per-request——这正好覆盖了按 endpoint
 > 区分走不走代理的需求。
 
-两种代理对流式（`chat_completions_stream`）与非流式请求同样生效。流式路径不走
+两种代理对流式（`chat_stream`）与非流式请求同样生效。流式路径不走
 `ConcurrentRequester`（各客户端自建 session），但通过 `create_proxied_session()`
 共用同一套代理语义。
 
