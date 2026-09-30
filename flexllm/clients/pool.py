@@ -537,12 +537,11 @@ class LLMClientPool(CompletionMixin):
         self._mode = "multi"
         self._fallback = fallback
         self._single_client = None
-        self._provider = None
-        self._model = None
 
         # 从 endpoints 创建底层 clients
         self._endpoints = []
         self._clients = []
+        providers = set()
 
         num_endpoints = len(endpoints)
 
@@ -572,6 +571,7 @@ class LLMClientPool(CompletionMixin):
             provider = ep.provider
             if provider == "auto":
                 provider = self._infer_provider(ep.base_url, False)
+            providers.add(provider)
 
             # 合并参数
             client_kwargs = {
@@ -592,6 +592,12 @@ class LLMClientPool(CompletionMixin):
             }
             # 直接创建底层客户端
             self._clients.append(self._create_base_client(**client_kwargs))
+
+        # 所有 endpoint 协议/模型一致时对外报出（调用方据此选思考开关、记模型名）；
+        # 不一致时 provider 报 "multi"、model 为 None
+        models = {client._model for client in self._clients}
+        self._provider = providers.pop() if len(providers) == 1 else None
+        self._model = models.pop() if len(models) == 1 else None
 
         # 创建路由器
         # concurrency_limit 直接取底层 client 的实际值（ground truth 在 client 上）
@@ -1982,8 +1988,8 @@ class LLMClientPool(CompletionMixin):
         if self._mode == "single":
             return self._provider
         else:
-            # 多模式：返回 "multi"
-            return "multi"
+            # 多模式：所有 endpoint 协议一致时返回该协议，否则 "multi"
+            return self._provider or "multi"
 
     @property
     def vision(self) -> bool:
@@ -2024,6 +2030,8 @@ class LLMClientPool(CompletionMixin):
         else:
             return {
                 "mode": "multi",
+                "provider": self.provider,
+                "model": self._model,
                 "fallback": self._fallback,
                 "num_endpoints": len(self._clients),
                 "router_stats": self._router.stats,

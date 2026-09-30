@@ -961,11 +961,37 @@ class TestPoolMethods:
         ]
         with MockLLMServerGroup(configs) as group:
             pool = LLMClientPool(endpoints=group.endpoints, fallback=True)
-            assert pool.provider == "multi"
+            # 所有 endpoint 协议/模型一致：直接报出
+            assert pool.provider == "openai"
             assert pool.stats["mode"] == "multi"
+            assert pool.stats["provider"] == "openai"
+            assert pool.stats["model"] == group.endpoints[0]["model"]
             assert pool.stats["num_endpoints"] == 2
             assert pool.stats["fallback"] is True
             pool.close()
+
+    def test_pool_multi_heterogeneous_identity(self):
+        """endpoint 协议或模型不一致时，provider 报 multi、model 为 None"""
+        mixed_model = LLMClientPool(
+            endpoints=[
+                {"base_url": "http://a.local/v1", "model": "m1"},
+                {"base_url": "http://b.local/v1", "model": "m2"},
+            ]
+        )
+        assert mixed_model.provider == "openai"
+        assert mixed_model.stats["model"] is None
+        mixed_model.close()
+
+        mixed_provider = LLMClientPool(
+            endpoints=[
+                {"base_url": "http://a.local/v1", "model": "m1"},
+                {"base_url": "https://api.anthropic.com", "api_key": "k", "model": "m1"},
+            ]
+        )
+        assert mixed_provider.provider == "multi"
+        assert mixed_provider.stats["provider"] == "multi"
+        assert mixed_provider.stats["model"] == "m1"
+        mixed_provider.close()
 
 
 # ============== 9. 类型体系 ==============

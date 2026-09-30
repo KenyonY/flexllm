@@ -346,6 +346,7 @@ pool = LLMClientPool(
   for p in pool.stats["router_stats"]["providers"]:
       print(p["base_url"], p["ewma_latency"], p["in_flight"], p["healthy"])
   ```
+- 池子的协议与模型名：所有 endpoint 一致时，`pool.provider` 和 `pool.stats["provider"]` / `pool.stats["model"]` 直接报出该值（与单 endpoint 相同）；不一致时 provider 为 `"multi"`、model 为 `None`。多 endpoint 模式判断请用 `pool.stats["mode"]`。
 
 ### 模型级 endpoints 配置
 
