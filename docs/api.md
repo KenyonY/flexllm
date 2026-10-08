@@ -1,5 +1,8 @@
 # API 参考
 
+思考控制、能力查询及配置见 [Reasoning](reasoning.md)。新接口导出 `Reasoning`、
+`ReasoningCapabilities`、`TokenBudget`、`ModelCapabilities`。
+
 ## 客户端类
 
 ### LLMClient

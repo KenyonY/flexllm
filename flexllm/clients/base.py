@@ -372,6 +372,8 @@ class LLMClientBase(CompletionMixin, ABC):
     - _get_stream_url(model) -> str
     """
 
+    REASONING_PROVIDER = "openai"
+
     def __init__(
         self,
         base_url: str = None,
@@ -390,6 +392,9 @@ class LLMClientBase(CompletionMixin, ABC):
         vision: bool = True,
         video: bool = True,
         missing_local_media: str = "passthrough",
+        reasoning=None,
+        reasoning_adapter: str | None = None,
+        reasoning_capabilities=None,
         **kwargs,
     ):
         """
@@ -440,6 +445,13 @@ class LLMClientBase(CompletionMixin, ABC):
         self._base_url = base_url.rstrip("/") if base_url else None
         self._api_key = api_key
         self._model = model
+        from ..reasoning import Reasoning, ReasoningCapabilities, resolve_adapter
+
+        self._reasoning_default = Reasoning.parse(reasoning) if reasoning is not None else None
+        self._reasoning_adapter = resolve_adapter(
+            reasoning_adapter, self.REASONING_PROVIDER, self._base_url
+        )
+        self._reasoning_capabilities = ReasoningCapabilities.parse(reasoning_capabilities)
         self._concurrency_limit = concurrency_limit
         self._timeout = timeout
         self._proxy = validate_proxy(proxy)
@@ -576,6 +588,13 @@ class LLMClientBase(CompletionMixin, ABC):
         extra = {k: v for k, v in data.items() if k not in _OPENAI_ENVELOPE_KEYS}
         return extra or None
 
+    @staticmethod
+    def _raise_stream_error(data: dict) -> None:
+        # Gateways can return HTTP 200 and report failure inside an SSE frame.
+        # Never turn that failure into an empty or partially successful result.
+        if data.get("error") is not None:
+            raise LLMResponseError(f"LLM stream error: {data['error']}", response_data=data)
+
     def _prepare_stream_body(self, body: dict, return_usage: bool) -> dict:
         """流式请求体的额外处理，子类可覆盖
 
@@ -612,6 +631,44 @@ class LLMClientBase(CompletionMixin, ABC):
     def _omit_unsupported_parts(self, messages: list[dict]) -> list[dict]:
         """按模型能力降级媒体块；各子类在 _build_request_body 入口调用。"""
         return omit_parts(messages, self._unsupported_part_types())
+
+    @property
+    def capabilities(self):
+        """Declared capabilities of the configured endpoint/model; no network IO."""
+        return self.get_capabilities()
+
+    def get_capabilities(self, model: str | None = None):
+        from ..reasoning import ModelCapabilities, ReasoningCapabilities
+
+        # A declaration is bound to the configured model, never to every model
+        # served by the same endpoint.
+        caps = self._reasoning_capabilities
+        if model is not None and model != self._model:
+            caps = ReasoningCapabilities()
+        return ModelCapabilities(reasoning=caps)
+
+    def _prepare_reasoning_kwargs(
+        self, model: str, kwargs: dict, *, url: str | None = None, stream: bool = False
+    ) -> dict:
+        from ..reasoning import Reasoning, apply_reasoning
+
+        try:
+            if url:
+                expected_url = self._get_stream_url(model) if stream else self._get_url(model)
+                policy = Reasoning.parse(kwargs.get("reasoning", self._reasoning_default))
+                if url.rstrip("/") != expected_url.rstrip("/") and policy.to_dict():
+                    raise ValueError(
+                        "Cannot combine reasoning with a different request url; "
+                        "configure a client with the target base_url and capabilities instead"
+                    )
+            return apply_reasoning(
+                kwargs,
+                default=self._reasoning_default,
+                capabilities=self.get_capabilities(model).reasoning,
+                adapter=self._reasoning_adapter,
+            )
+        except ValueError as exc:
+            raise ValueError(f"Reasoning for model {model!r}: {exc}") from exc
 
     def _get_effective_model(self, model: str = None) -> str:
         effective_model = model or self._model
@@ -761,6 +818,7 @@ class LLMClientBase(CompletionMixin, ABC):
             return_raw=return_raw, return_usage=return_usage, raise_on_error=raise_on_error
         )
         effective_model = self._get_effective_model(model)
+        kwargs = self._prepare_reasoning_kwargs(effective_model, kwargs, url=url)
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
         # prefix 显式参数等价于在 messages 末尾追加 assistant message
@@ -945,6 +1003,16 @@ class LLMClientBase(CompletionMixin, ABC):
         # per-record 生成参数：剥除消息构造类键（system/user_template，已在上层消费），
         # 其余作为该行覆盖全局 kwargs 的生成参数，并参与各自缓存键。
         gen_params_list = build_gen_params_list(params_list)
+        if gen_params_list is not None:
+            gen_params_list = [
+                self._prepare_reasoning_kwargs(
+                    effective_model, {**kwargs, **(extra or {})}, url=url
+                )
+                for extra in gen_params_list
+            ]
+            kwargs = {}
+        else:
+            kwargs = self._prepare_reasoning_kwargs(effective_model, kwargs, url=url)
 
         def merged_kwargs(idx: int) -> dict:
             """该行有效请求参数 = 全局 kwargs 叠加 per-record 生成参数"""
@@ -1522,6 +1590,7 @@ class LLMClientBase(CompletionMixin, ABC):
         import aiohttp
 
         effective_model = self._get_effective_model(model)
+        kwargs = self._prepare_reasoning_kwargs(effective_model, kwargs, url=url, stream=True)
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
         body = self._build_request_body(messages, effective_model, stream=True, **kwargs)
@@ -1571,6 +1640,7 @@ class LLMClientBase(CompletionMixin, ABC):
                                 break
                             try:
                                 data = json.loads(data_str)
+                                self._raise_stream_error(data)
 
                                 # usage 与内容可能共存于同一 chunk（OpenAI 官方只在最后的空
                                 # chunk 携带；SiliconFlow 等则每个 chunk 都带并与 content 共存），

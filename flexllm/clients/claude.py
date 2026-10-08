@@ -179,6 +179,8 @@ class ClaudeClient(LLMClientBase):
     DEFAULT_BASE_URL = "https://api.anthropic.com/v1"
     DEFAULT_API_VERSION = "2023-06-01"
 
+    REASONING_PROVIDER = "claude"
+
     def __init__(
         self,
         api_key: str,
@@ -255,6 +257,7 @@ class ClaudeClient(LLMClientBase):
         top_k: int = None,
         thinking: bool | str | int | dict | None = None,
         reasoning_effort: str | None = None,
+        _reasoning_validated: bool = False,
         response_format: dict = None,
         **kwargs,
     ) -> dict:
@@ -309,7 +312,9 @@ class ClaudeClient(LLMClientBase):
                     else json_instruction
                 )
 
-        is_claude = _is_claude_model(model)
+        # The new reasoning adapter has already validated the endpoint/model
+        # declaration. Name-based rules apply only to the legacy thinking API.
+        is_claude = _is_claude_model(model) and not _reasoning_validated
         thinking_mode = _claude_thinking_mode(model) if is_claude else "unsupported"
         adaptive = thinking_mode == "adaptive"
         allows_manual = _allows_manual_thinking(model) if is_claude else False
@@ -702,6 +707,7 @@ class ClaudeClient(LLMClientBase):
     ):
         """Claude 流式聊天完成"""
         effective_model = self._get_effective_model(model)
+        kwargs = self._prepare_reasoning_kwargs(effective_model, kwargs, url=url, stream=True)
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
         body = self._build_request_body(messages, effective_model, stream=True, **kwargs)
@@ -750,6 +756,7 @@ class ClaudeClient(LLMClientBase):
                                 break
                             try:
                                 data = json.loads(data_str)
+                                self._raise_stream_error(data)
                                 event_type = data.get("type")
 
                                 # Anthropic 规范要求客户端忽略未知事件类型，网关正是靠这一点

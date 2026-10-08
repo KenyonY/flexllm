@@ -32,6 +32,7 @@ class ChatWebConfig:
     max_tokens: int = 2048
     user_template: str | None = None
     thinking: bool | str | int | None = None
+    client_kwargs: dict | None = None
     multi_turn: bool = False
     title: str = "flexllm"
 
@@ -137,11 +138,13 @@ class ChatWebServer:
     async def _on_startup(self, app: web.Application):
         from flexllm import LLMClient
 
-        self._client = LLMClient(
-            model=self.config.model,
-            base_url=self.config.base_url,
-            api_key=self.config.api_key,
-        )
+        options = {
+            "model": self.config.model,
+            "base_url": self.config.base_url,
+            "api_key": self.config.api_key,
+        }
+        options.update(self.config.client_kwargs or {})
+        self._client = LLMClient(**options)
 
     async def _on_cleanup(self, app: web.Application):
         if self._client:

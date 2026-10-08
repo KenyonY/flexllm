@@ -87,6 +87,8 @@ class GeminiClient(LLMClientBase):
     DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
     VERTEX_AI_URL_TEMPLATE = "https://{location}-aiplatform.googleapis.com/v1"
 
+    REASONING_PROVIDER = "gemini"
+
     def __init__(
         self,
         api_key: str = None,
@@ -599,6 +601,7 @@ class GeminiClient(LLMClientBase):
         import aiohttp
 
         effective_model = self._get_effective_model(model)
+        kwargs = self._prepare_reasoning_kwargs(effective_model, kwargs, url=url, stream=True)
         messages = await self._preprocess_messages(messages, preprocess_msg)
 
         body = self._build_request_body(messages, effective_model, stream=True, **kwargs)
@@ -646,6 +649,7 @@ class GeminiClient(LLMClientBase):
                                 break
                             try:
                                 data = json.loads(data_str)
+                                self._raise_stream_error(data)
 
                                 # 一个 chunk 可以有多个 part（思考、正文、函数调用混排），
                                 # 按顺序逐个处理，任何一个都不能漏

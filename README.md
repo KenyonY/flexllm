@@ -71,7 +71,7 @@ results = await client.chat_batch(messages_list, output_jsonl="results.jsonl")
 | **Speech**                 | Audio transcription (text/SRT, batch) and text-to-speech via `flexllm transcribe` / `flexllm speak` |
 | **Proxy Support**          | HTTP/HTTPS and SOCKS4/SOCKS5 forward proxies for all API calls                  |
 | **Multimodal Preprocessing** | Auto-convert local files/URLs to base64 for `image_url`, `video_url`, `audio_url`, `input_audio` |
-| **Thinking Mode**          | Unified reasoning interface for DeepSeek-R1, Qwen3, Claude, Gemini |
+| **Reasoning**              | [Unified policy and per-endpoint model capabilities](docs/reasoning.md), with explicit effort, enable/disable, and token budgets |
 
 ---
 

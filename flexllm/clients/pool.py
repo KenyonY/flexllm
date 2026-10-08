@@ -87,6 +87,9 @@ class EndpointConfig:
     proxy: str = None
     # 其他 LLMClient 参数
     extra: dict[str, Any] = None
+    reasoning: Any = None
+    reasoning_adapter: str | None = None
+    reasoning_capabilities: Any = None
 
     def __post_init__(self):
         if self.extra is None:
@@ -590,6 +593,9 @@ class LLMClientPool(CompletionMixin):
                 **kwargs,
                 **(ep.extra or {}),
             }
+            for key in ("reasoning", "reasoning_adapter", "reasoning_capabilities"):
+                if getattr(ep, key) is not None:
+                    client_kwargs[key] = getattr(ep, key)
             # 直接创建底层客户端
             self._clients.append(self._create_base_client(**client_kwargs))
 
@@ -1198,7 +1204,17 @@ class LLMClientPool(CompletionMixin):
             # return_raw 跳过缓存（缓存只存提取后的 content，与 base client 行为一致）
             effective_model = model or self._endpoints[0].model
             all_same_model = model or len({ep.model for ep in self._endpoints}) == 1
-            if response_cache is not None and all_same_model and not return_raw:
+            has_reasoning = (
+                "reasoning" in kwargs
+                or any(client._reasoning_default is not None for client in self._clients)
+                or any("reasoning" in (p or {}) for p in (gen_params_list or []))
+            )
+            if (
+                response_cache is not None
+                and all_same_model
+                and not return_raw
+                and not has_reasoning
+            ):
                 # 过滤出未完成的 messages
                 pending = [
                     (idx, msg)
@@ -2070,6 +2086,23 @@ class LLMClientPool(CompletionMixin):
             return f"LLMClientPool(provider='{self._provider}', model='{self._model}')"
         else:
             return f"LLMClientPool(endpoints={len(self._clients)}, fallback={self._fallback})"
+
+    @property
+    def endpoint_capabilities(self):
+        """Capabilities remain separate for each endpoint; no invented intersection."""
+        clients = [self._single_client] if self._mode == "single" else self._clients
+        return tuple(client.capabilities for client in clients)
+
+    @property
+    def capabilities(self):
+        return self.get_capabilities()
+
+    def get_capabilities(self, model=None):
+        clients = [self._single_client] if self._mode == "single" else self._clients
+        capabilities = [client.get_capabilities(model) for client in clients]
+        if any(item != capabilities[0] for item in capabilities[1:]):
+            raise ValueError("Endpoint capabilities differ; inspect endpoint_capabilities")
+        return capabilities[0]
 
     def __getattr__(self, name):
         """自动委托未显式定义的方法给底层客户端（仅单模式）"""

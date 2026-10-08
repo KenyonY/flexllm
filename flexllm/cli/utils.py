@@ -105,9 +105,11 @@ def resolve_client_kwargs(model=None, base_url=None, api_key=None, *, required=T
         model_id, resolved_url, resolved_key = resolve_model_config(
             model, base_url, api_key, required=required
         )
-        return model_client_kwargs(
-            entry or {}, model=model_id, base_url=resolved_url, api_key=resolved_key
-        )
+        options = model_client_kwargs(entry or {}, **overrides)
+        # Resolving an omitted provider URL is not a target override. Only
+        # explicit CLI overrides above invalidate endpoint-bound declarations.
+        options.update(model=model_id, base_url=resolved_url, api_key=resolved_key)
+        return options
     except ValueError as exc:
         cli_error(
             ErrorType.INVALID_ARGS,
@@ -643,3 +645,44 @@ def query_credits(base_url: str, api_key: str) -> dict | None:
         return {"error": f"请求失败: {e}"}
     except Exception as e:
         return {"error": f"解析失败: {e}"}
+
+
+def reasoning_options(effort=None, budget=None, enabled=None, server_default=False, thinking=None):
+    """Parse new CLI controls without merging them into a configured policy."""
+    from ..reasoning import Reasoning
+    from .errors import ErrorType, cli_error
+
+    supplied = effort is not None or budget is not None or enabled is not None
+    if not supplied and not server_default:
+        return {}
+    try:
+        if thinking is not None:
+            raise ValueError("Cannot combine --thinking with --reasoning-* options")
+        if supplied and server_default:
+            raise ValueError("--reasoning-default cannot be combined with other reasoning options")
+        policy = Reasoning(enabled=enabled, effort=effort, budget_tokens=budget)
+        return {"reasoning": policy.to_dict()}
+    except ValueError as exc:
+        cli_error(ErrorType.INVALID_ARGS, str(exc))
+
+
+def validate_reasoning_options(client_options, params):
+    """Validate declarations locally, including dry-run, without network access."""
+    from .. import LLMClient
+    from .errors import ErrorType, cli_error
+
+    endpoints = client_options.get("endpoints", [])
+    requested = "reasoning" in params or client_options.get("reasoning") is not None
+    requested = requested or any(
+        ep.get("reasoning") is not None or (ep.get("extra") or {}).get("reasoning") is not None
+        for ep in endpoints
+    )
+    if not requested:
+        return
+    try:
+        with LLMClient(**client_options) as client:
+            leaves = [client._single_client] if client._mode == "single" else client._clients
+            for leaf in leaves:
+                leaf._prepare_reasoning_kwargs(leaf._model, params)
+    except ValueError as exc:
+        cli_error(ErrorType.INVALID_ARGS, str(exc))

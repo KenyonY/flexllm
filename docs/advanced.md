@@ -655,6 +655,9 @@ CLI 中通过 JSONL 每行的 `params` 字段使用（嵌套，不平铺）：
 
 ## Thinking 模式
 
+新代码使用 [Reasoning 统一接口](reasoning.md)：按端点和模型声明能力，支持配置默认、
+请求整体覆盖和能力查询。以下为旧 `thinking` 接口的兼容行为。
+
 ### OpenAI 兼容（DeepSeek、GLM 等）
 
 ```python

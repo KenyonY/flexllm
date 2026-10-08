@@ -23,6 +23,9 @@ def model_client_kwargs(entry: dict, **overrides) -> dict:
         "vision",
         "video",
         "missing_local_media",
+        "reasoning",
+        "reasoning_adapter",
+        "reasoning_capabilities",
     ):
         if key in entry:
             options[key] = entry[key]
@@ -30,6 +33,20 @@ def model_client_kwargs(entry: dict, **overrides) -> dict:
         options.pop("endpoints", None)
     if overrides.get("endpoints") is not None and "base_url" not in overrides:
         options.pop("base_url", None)
+    # Capability declarations and wire adapters belong to a particular target.
+    # Changing that target must not carry its declarations to a new gateway/model.
+    target_changed = False
+    for key in ("base_url", "model", "endpoints"):
+        if key not in overrides:
+            continue
+        old, new = options.get(key), overrides[key]
+        if key == "base_url":
+            old = old.rstrip("/") if isinstance(old, str) else old
+            new = new.rstrip("/") if isinstance(new, str) else new
+        target_changed = target_changed or old != new
+    if target_changed:
+        for key in ("reasoning_capabilities", "reasoning_adapter"):
+            options.pop(key, None)
     options.update(overrides)
 
     if "fallback" in options and not isinstance(options["fallback"], bool):
@@ -77,6 +94,9 @@ class FlexLLMConfig:
         "vision",
         "video",
         "missing_local_media",
+        "reasoning",
+        "reasoning_adapter",
+        "reasoning_capabilities",
     }
 
     CONFIG_PATHS = [

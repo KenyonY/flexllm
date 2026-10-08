@@ -245,7 +245,12 @@ class JsonlWriter:
         if self._metadata_list is not None:
             record["metadata"] = self._metadata_list[index]
         if self._params_list is not None and self._params_list[index]:
-            record["params"] = self._params_list[index]
+            from ..reasoning import Reasoning
+
+            params = dict(self._params_list[index])
+            if isinstance(params.get("reasoning"), Reasoning):
+                params["reasoning"] = params["reasoning"].to_dict()
+            record["params"] = params
         if usage is not None:
             record["usage"] = usage
         if result is not None:

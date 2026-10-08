@@ -204,9 +204,14 @@ from .pricing import (
 )
 
 # 工具函数（从 utils/ 模块导入）
+from .reasoning import ModelCapabilities, Reasoning, ReasoningCapabilities, TokenBudget
 from .utils import extract_code_snippets, parse_to_code, parse_to_obj
 
 __all__ = [
+    "Reasoning",
+    "ReasoningCapabilities",
+    "ModelCapabilities",
+    "TokenBudget",
     # 客户端
     "LLMClientBase",
     "LLMRequestError",

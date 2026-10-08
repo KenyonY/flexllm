@@ -220,3 +220,13 @@ batch:
 #    FLEXLLM_MODEL="qwen" \
 #    FLEXLLM_API_KEY="EMPTY" \
 #    flexllm ask "你好"
+
+# 新一代思考控制（放在 models 的目标模型条目中）：
+# reasoning: {effort: high}                 # 请求级整体替换，不自动映射档位
+# reasoning_adapter: siliconflow           # openai/siliconflow/deepseek/vllm/claude/gemini
+# reasoning_capabilities:
+#   can_enable: true
+#   can_disable: true
+#   effort_levels: [high, max]              # 按实际 endpoint/model 配置，[] 表示不支持
+#   budget_tokens: {min: 128, max: 32768}    # false 不支持，null 未知
+# 不与旧 thinking 同时配置；详细说明见 docs/reasoning.md。

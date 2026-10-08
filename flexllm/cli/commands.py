@@ -19,8 +19,10 @@ from .utils import (
     query_credits,
     query_credits_by_key,
     read_file_contents,
+    reasoning_options,
     resolve_client_kwargs,
     resolve_model_config,
+    validate_reasoning_options,
 )
 
 SKILL_TARGETS = {
@@ -88,6 +90,19 @@ def register_commands(app):
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
+        reasoning_effort: Annotated[
+            str | None, Option("--reasoning-effort", help="模型支持的原生思考档位；不自动映射")
+        ] = None,
+        reasoning_budget: Annotated[
+            int | None, Option("--reasoning-budget", help="思考 token 预算")
+        ] = None,
+        reasoning_enabled: Annotated[
+            bool | None,
+            Option("--reasoning-enabled/--no-reasoning-enabled", help="明确开启或关闭思考"),
+        ] = None,
+        reasoning_default: Annotated[
+            bool, Option("--reasoning-default", help="忽略配置的思考策略，使用服务端默认")
+        ] = False,
         thinking: Annotated[
             str | None,
             Option(
@@ -200,9 +215,15 @@ def register_commands(app):
 
         model_params = config.get_model_params(model)
 
+        reasoning_params = reasoning_options(
+            reasoning_effort, reasoning_budget, reasoning_enabled, reasoning_default, thinking
+        )
         thinking_value = parse_thinking(thinking)
         if thinking_value is not None:
             model_params["thinking"] = thinking_value
+
+        model_params.update(reasoning_params)
+        validate_reasoning_options(client_options, model_params)
 
         response_format = parse_schema(schema)
         if response_format is not None:
@@ -316,6 +337,19 @@ def register_commands(app):
         user_template: Annotated[
             str | None, Option("--user-template", help="user content 模板 (使用 {content} 占位符)")
         ] = None,
+        reasoning_effort: Annotated[
+            str | None, Option("--reasoning-effort", help="模型支持的原生思考档位；不自动映射")
+        ] = None,
+        reasoning_budget: Annotated[
+            int | None, Option("--reasoning-budget", help="思考 token 预算")
+        ] = None,
+        reasoning_enabled: Annotated[
+            bool | None,
+            Option("--reasoning-enabled/--no-reasoning-enabled", help="明确开启或关闭思考"),
+        ] = None,
+        reasoning_default: Annotated[
+            bool, Option("--reasoning-default", help="忽略配置的思考策略，使用服务端默认")
+        ] = False,
         thinking: Annotated[
             str | None,
             Option(
@@ -411,9 +445,15 @@ def register_commands(app):
         model_params.setdefault("temperature", 0.7)
         model_params.setdefault("max_tokens", 2048)
 
+        reasoning_params = reasoning_options(
+            reasoning_effort, reasoning_budget, reasoning_enabled, reasoning_default, thinking
+        )
         thinking_value = parse_thinking(thinking)
         if thinking_value is not None:
             model_params["thinking"] = thinking_value
+
+        model_params.update(reasoning_params)
+        validate_reasoning_options(client_options, model_params)
 
         response_format = parse_schema(schema)
         if response_format is not None:
@@ -494,6 +534,19 @@ def register_commands(app):
         ] = None,
         port: Annotated[int, Option("-p", "--port", help="Web 服务端口")] = 8080,
         host: Annotated[str, Option("--host", help="监听地址")] = "localhost",
+        reasoning_effort: Annotated[
+            str | None, Option("--reasoning-effort", help="模型支持的原生思考档位；不自动映射")
+        ] = None,
+        reasoning_budget: Annotated[
+            int | None, Option("--reasoning-budget", help="思考 token 预算")
+        ] = None,
+        reasoning_enabled: Annotated[
+            bool | None,
+            Option("--reasoning-enabled/--no-reasoning-enabled", help="明确开启或关闭思考"),
+        ] = None,
+        reasoning_default: Annotated[
+            bool, Option("--reasoning-default", help="忽略配置的思考策略，使用服务端默认")
+        ] = False,
         thinking: Annotated[
             str | None,
             Option(
@@ -519,6 +572,8 @@ def register_commands(app):
         flexllm chat-web --thinking true      # 启用思考模式
         flexllm chat-web --dry-run            # 预览启动配置
         """
+        model_selector = model
+        client_options = resolve_client_kwargs(model, base_url, api_key)
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
 
@@ -532,11 +587,11 @@ def register_commands(app):
             )
 
         if not system_prompt:
-            system_prompt = config.get_system(model)
+            system_prompt = config.get_system(model_selector)
         if not user_template:
-            user_template = config.get_user_template(model)
+            user_template = config.get_user_template(model_selector)
 
-        model_params = config.get_model_params(model)
+        model_params = config.get_model_params(model_selector)
         if temperature is not None:
             model_params["temperature"] = temperature
         if max_tokens is not None:
@@ -555,13 +610,22 @@ def register_commands(app):
                 doc="flexllm chat-web --help",
             )
 
+        reasoning_params = reasoning_options(
+            reasoning_effort, reasoning_budget, reasoning_enabled, reasoning_default, thinking
+        )
         thinking_value = parse_thinking(thinking)
         if thinking_value is None:
             thinking_value = model_params.get("thinking")
+        if thinking_value is not None:
+            model_params["thinking"] = thinking_value
+
+        client_options.update(reasoning_params)
+        validate_reasoning_options(client_options, model_params)
 
         if dry_run:
             dry_run_output(
                 {
+                    "reasoning": client_options.get("reasoning"),
                     "action": "chat_web",
                     "host": host,
                     "port": port,
@@ -585,6 +649,7 @@ def register_commands(app):
             max_tokens=model_params["max_tokens"],
             user_template=user_template,
             thinking=thinking_value,
+            client_kwargs=client_options,
             multi_turn=multi_turn,
             title=title,
         )
@@ -626,6 +691,19 @@ def register_commands(app):
         ] = None,
         temperature: Annotated[float | None, Option("-t", "--temperature", help="采样温度")] = None,
         max_tokens: Annotated[int | None, Option("--max-tokens", help="最大生成 token 数")] = None,
+        reasoning_effort: Annotated[
+            str | None, Option("--reasoning-effort", help="模型支持的原生思考档位；不自动映射")
+        ] = None,
+        reasoning_budget: Annotated[
+            int | None, Option("--reasoning-budget", help="思考 token 预算")
+        ] = None,
+        reasoning_enabled: Annotated[
+            bool | None,
+            Option("--reasoning-enabled/--no-reasoning-enabled", help="明确开启或关闭思考"),
+        ] = None,
+        reasoning_default: Annotated[
+            bool, Option("--reasoning-default", help="忽略配置的思考策略，使用服务端默认")
+        ] = False,
         thinking: Annotated[
             str | None,
             Option(
@@ -662,6 +740,8 @@ def register_commands(app):
         flexllm serve --thinking true -c 20 -p 8000
         flexllm serve --dry-run                     # 预览启动配置
         """
+        model_selector = model
+        client_options = resolve_client_kwargs(model, base_url, api_key)
         model, base_url, api_key = resolve_model_config(model, base_url, api_key)
         config = get_config()
 
@@ -675,11 +755,11 @@ def register_commands(app):
             )
 
         if not system_prompt:
-            system_prompt = config.get_system(model)
+            system_prompt = config.get_system(model_selector)
         if not user_template:
-            user_template = config.get_user_template(model)
+            user_template = config.get_user_template(model_selector)
 
-        model_params = config.get_model_params(model)
+        model_params = config.get_model_params(model_selector)
         if temperature is not None:
             model_params["temperature"] = temperature
         if max_tokens is not None:
@@ -696,13 +776,22 @@ def register_commands(app):
                 doc="flexllm serve --help",
             )
 
+        reasoning_params = reasoning_options(
+            reasoning_effort, reasoning_budget, reasoning_enabled, reasoning_default, thinking
+        )
         thinking_value = parse_thinking(thinking)
         if thinking_value is None:
             thinking_value = model_params.get("thinking")
+        if thinking_value is not None:
+            model_params["thinking"] = thinking_value
+
+        client_options.update(reasoning_params)
+        validate_reasoning_options(client_options, model_params)
 
         if dry_run:
             dry_run_output(
                 {
+                    "reasoning": client_options.get("reasoning"),
                     "action": "serve",
                     "host": host,
                     "port": port,
@@ -732,6 +821,7 @@ def register_commands(app):
             temperature=model_params.get("temperature"),
             max_tokens=model_params.get("max_tokens"),
             thinking=thinking_value,
+            client_kwargs=client_options,
             concurrency=concurrency,
             max_qps=max_qps,
             timeout=timeout,
@@ -807,6 +897,19 @@ def register_commands(app):
         system: Annotated[str | None, Option("-s", "--system", help="全局 system prompt")] = None,
         temperature: Annotated[float | None, Option("-t", "--temperature", help="采样温度")] = None,
         max_tokens: Annotated[int | None, Option("--max-tokens", help="最大生成 token 数")] = None,
+        reasoning_effort: Annotated[
+            str | None, Option("--reasoning-effort", help="模型支持的原生思考档位；不自动映射")
+        ] = None,
+        reasoning_budget: Annotated[
+            int | None, Option("--reasoning-budget", help="思考 token 预算")
+        ] = None,
+        reasoning_enabled: Annotated[
+            bool | None,
+            Option("--reasoning-enabled/--no-reasoning-enabled", help="明确开启或关闭思考"),
+        ] = None,
+        reasoning_default: Annotated[
+            bool, Option("--reasoning-default", help="忽略配置的思考策略，使用服务端默认")
+        ] = False,
         thinking: Annotated[
             str | None,
             Option(
@@ -1070,6 +1173,9 @@ def register_commands(app):
             else config.get_user_template(effective_model)
         )
 
+        reasoning_params = reasoning_options(
+            reasoning_effort, reasoning_budget, reasoning_enabled, reasoning_default, thinking
+        )
         thinking_value = parse_thinking(thinking)
 
         effective_save_input: bool | str = True
@@ -1174,6 +1280,22 @@ def register_commands(app):
             if not any(p for p in params_list):
                 params_list = None
 
+            request_params = config.get_model_params(effective_model)
+            request_params.update(reasoning_params)
+            if thinking_value is not None:
+                request_params["thinking"] = thinking_value
+            reasoning_client_options = named_pool_options or (
+                {"endpoints": endpoints_config}
+                if use_pool
+                else resolve_client_kwargs(effective_model, base_url, api_key)
+            )
+            validate_reasoning_options(reasoning_client_options, request_params)
+            for row_params in params_list or []:
+                if row_params:
+                    validate_reasoning_options(
+                        reasoning_client_options, {**request_params, **row_params}
+                    )
+
             if dry_run:
                 dry_run_output(
                     {
@@ -1188,6 +1310,9 @@ def register_commands(app):
                         "max_qps": effective_max_qps,
                         "cache": effective_cache,
                         "thinking": thinking_value,
+                        "reasoning": request_params.get(
+                            "reasoning", reasoning_client_options.get("reasoning")
+                        ),
                         "sample_messages": messages_list[0] if messages_list else None,
                         # 第一条解析后的 per-record 参数（覆盖全局；None 表示该行无 params）
                         "sample_params": params_list[0] if params_list else None,
@@ -1205,7 +1330,7 @@ def register_commands(app):
                     cache_config = ResponseCacheConfig.with_ttl(ttl=batch_config["cache_ttl"])
 
                 # 模型参数只从 models 节读取；CLI 参数覆盖
-                kwargs = config.get_model_params(effective_model)
+                kwargs = dict(request_params)
                 if temperature is not None:
                     kwargs["temperature"] = temperature
                 if max_tokens is not None:
@@ -1260,8 +1385,7 @@ def register_commands(app):
                         "retry_delay": batch_config["retry_delay"],
                         "cache": cache_config,
                     }
-                    if named_pool_options:
-                        client_kwargs.update(named_pool_options)
+                    client_kwargs.update(reasoning_client_options)
                     if effective_max_qps is not None:
                         client_kwargs["max_qps"] = effective_max_qps
 
@@ -1515,6 +1639,42 @@ def register_commands(app):
                 },
                 doc="flexllm models --help",
             )
+
+    @app.command("capabilities")
+    def capabilities(
+        model: Annotated[str | None, Option("-m", "--model", help="配置中的模型名称")] = None,
+        json_output: Annotated[bool, Option("--json", help="JSON 输出（默认）")] = False,
+    ):
+        """查询各端点声明的模型能力；不发网络请求，null 表示未知。
+
+        Examples: flexllm capabilities -m my-model --json
+        """
+        import json
+
+        from flexllm import LLMClient
+
+        from .config import model_client_kwargs
+
+        entry = get_config().get_model_config(model)
+        if entry is None:
+            cli_error(
+                ErrorType.NOT_FOUND, "未找到模型配置", suggestion="使用 flexllm list 查看模型"
+            )
+        try:
+            options = model_client_kwargs(entry)
+            with LLMClient(**options) as client:
+                leaves = [client._single_client] if client._mode == "single" else client._clients
+                result = [
+                    {
+                        "model": leaf._model,
+                        "reasoning_adapter": leaf._reasoning_adapter,
+                        "reasoning": leaf.capabilities.reasoning.to_dict(),
+                    }
+                    for leaf in leaves
+                ]
+                print(json.dumps({"endpoints": result}, ensure_ascii=False, indent=2))
+        except ValueError as exc:
+            cli_error(ErrorType.INVALID_ARGS, str(exc))
 
     @app.command("list")
     def list_models(

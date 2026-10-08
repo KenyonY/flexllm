@@ -51,6 +51,7 @@ class ServeConfig:
     temperature: float | None = None
     max_tokens: int | None = None
     thinking: bool | str | int | None = None
+    client_kwargs: dict | None = None
     concurrency: int = 1000
     max_qps: float | None = None
     timeout: int = 120
@@ -128,6 +129,7 @@ class ServeServer:
         }
         if self.config.max_qps is not None:
             client_kwargs["max_qps"] = self.config.max_qps
+        client_kwargs.update(self.config.client_kwargs or {})
         self._client = LLMClient(**client_kwargs)
 
     async def _on_cleanup(self, app: web.Application):
