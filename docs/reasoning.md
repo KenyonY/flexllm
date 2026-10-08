@@ -77,8 +77,8 @@ models:
       supports_effort_and_budget: true
 ```
 
-这三个 reasoning 配置字段用于本地解析，不会泄漏到 HTTP 请求体。Python 构造函数接受同名
-参数；能力也可使用 `ReasoningCapabilities` 和 `TokenBudget` 对象。
+这三个配置字段由本地解析。`reasoning_capabilities`、`reasoning_adapter` 不会进入 HTTP 请求体；
+`reasoning` 转换成目标协议字段（OpenRouter 恰好也叫 `reasoning`）。Python 构造函数接受同名参数；能力也可使用 `ReasoningCapabilities` 和 `TokenBudget` 对象。
 
 声明绑定到配置的模型。请求时改用另一个 `model`，能力回到未知；CLI 或 `from_config`
 显式替换 base URL、模型或端点列表时，不继承原目标的能力声明和 adapter。
@@ -89,6 +89,8 @@ models:
 故障转移不改变调用方指定的档位。CLI 预检会检查目标池的全部端点。
 
 当前能力来源是显式配置。`/models` 通常只列模型 ID 和协议，不能据此承诺某档位可用。
+OpenRouter 的模型目录还可能提供 `reasoning.supported_efforts`、`mandatory` 等能力元数据，
+可据此填写声明，但当前客户端不会自动拉取。模型出现在目录中不保证当前账号或地区可调用。
 不内置推测性的型号表，也不自动执行付费探测。客户端构造时读取配置快照，修改文件后需重建客户端。
 
 ## 协议适配
@@ -96,6 +98,7 @@ models:
 | adapter | 开关 | effort | 预算 |
 | --- | --- | --- | --- |
 | `openai` | 关闭发 `reasoning_effort: none`；不支持单独开启 | `reasoning_effort` | 不支持 |
+| `openrouter` | `reasoning.enabled` | `reasoning.effort` | `reasoning.max_tokens` |
 | `siliconflow` | `enable_thinking` | `reasoning_effort`，同时开启思考 | `thinking_budget`，同时开启思考 |
 | `deepseek` | `thinking.type: enabled/disabled` | `reasoning_effort`，同时开启思考 | 不支持 |
 | `vllm` | `chat_template_kwargs.enable_thinking` | `reasoning_effort`，同时开启思考 | 不支持 |
@@ -103,10 +106,18 @@ models:
 | `gemini` | 关闭发 `thinkingBudget: 0` | `thinkingConfig.thinkingLevel` | `thinkingConfig.thinkingBudget` |
 
 `provider=claude/gemini` 自动使用相应 adapter。OpenAI 协议对 SiliconFlow、DeepSeek 的官方
-域名选择对应 adapter，其他地址默认 `openai`；自建 vLLM、中转的 DeepSeek 路由需显式配置。
+域名选择对应 adapter，`openrouter.ai` 自动使用 `openrouter`，其他地址默认 `openai`；自建 vLLM、中转的 DeepSeek 路由需显式配置。
 自动选择格式不等于确认模型能力。Gemini 2.x 应声明只支持预算，不接受 effort；本接口不会
 套用旧版的等级转预算逻辑，也不允许同时指定 effort 和预算。Claude 的预算还受服务端 `max_tokens` 约束，现有客户端会在必要时
 提高输出上限以满足协议。
+
+OpenRouter 使用 `provider: openai` 和 `base_url: https://openrouter.ai/api/v1`，即使目标是
+Gemini，也无需切换成原生 Gemini 协议。可显式设置 `reasoning_adapter: openrouter`。
+`Reasoning(budget_tokens=128)` 会发送 `reasoning: {max_tokens: 128}`，与输出上限
+`max_tokens` 区分；不允许同时指定 effort 和预算。FlexLLM 不转换档位，但 OpenRouter 或其
+上游可能自行映射档位和预算，因此 Gemini 3 的预算参数不能理解为精确的 token 上限。
+新接口仍只接受 `enabled`、`effort`、`budget_tokens`，不能直接传 OpenRouter 原生
+`reasoning.max_tokens` 或 `reasoning.exclude`；省略策略或传 `None` 的语义与其他 adapter 一致。
 
 原生参数仍可独立使用，但不能和新 `reasoning`（包括配置默认）混用。旧 `thinking` 入口暂时
 保持旧行为；新代码使用此处的契约。不要同时配置 `thinking` 和 `reasoning`。
@@ -131,6 +142,7 @@ Web/Serve 使用启动时传入的策略和能力配置；当前网页没有动�
 
 - [OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning)
 - [Claude effort](https://platform.claude.com/docs/en/build-with-claude/effort)
+- [OpenRouter reasoning](https://openrouter.ai/docs/guides/best-practices/reasoning-tokens)
 - [DeepSeek thinking](https://api-docs.deepseek.com/guides/thinking_mode/)
 - [SiliconFlow Chat Completions](https://docs.siliconflow.cn/docs/api/chat-completions-post)
 

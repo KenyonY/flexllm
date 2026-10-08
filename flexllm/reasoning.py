@@ -144,7 +144,7 @@ class ModelCapabilities:
     reasoning: ReasoningCapabilities
 
 
-ADAPTERS = ("openai", "siliconflow", "deepseek", "vllm", "claude", "gemini")
+ADAPTERS = ("openai", "openrouter", "siliconflow", "deepseek", "vllm", "claude", "gemini")
 NATIVE_REASONING_KEYS = frozenset(
     {"thinking", "reasoning_effort", "enable_thinking", "thinking_budget", "think"}
 )
@@ -171,6 +171,8 @@ def resolve_adapter(adapter, provider, base_url):
         return "siliconflow"
     if host == "api.deepseek.com":
         return "deepseek"
+    if host == "openrouter.ai":
+        return "openrouter"
     return "openai"
 
 
@@ -179,6 +181,13 @@ def compile_reasoning(policy: Reasoning, adapter: str) -> dict:
     enabled, effort, budget = policy.enabled, policy.effort, policy.budget_tokens
     if not policy.to_dict():
         return {}
+    if adapter == "openrouter":
+        if effort is not None and budget is not None:
+            raise ValueError("OpenRouter reasoning adapter cannot combine effort and budget_tokens")
+        config = policy.to_dict()
+        if budget is not None:
+            config["max_tokens"] = config.pop("budget_tokens")
+        return {"reasoning": config}
     if adapter == "openai":
         if budget is not None or (enabled is True and effort is None):
             raise ValueError(
