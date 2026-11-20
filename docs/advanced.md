@@ -822,6 +822,12 @@ retried = await client.chat_batch([messages_list[i] for i in retry_indices])
 
 ## 上下文管理
 
+同一客户端的流式和非流式请求共享 HTTP 连接池；连续请求可以复用 TCP/TLS
+连接。流结束或取消只释放当前响应，客户端退出时统一关闭连接池。服务端应用应
+在服务生命周期内复用客户端，并在退出时调用 `aclose()`。必须在所属 event loop
+关闭前完成 `aclose()`；之后可在新 loop 中再次使用该客户端，不支持多个 loop 并发
+共用客户端。LLM 连接池不保存响应 Cookie，鉴权始终由调用参数指定。
+
 ```python
 # 推荐：使用 async with 自动清理资源
 async with LLMClient(...) as client:
@@ -1053,9 +1059,9 @@ scheme**，给它未知 scheme 它会照样往该端口发 HTTP `CONNECT`，表�
 > client 独占一个 connector），无法 per-request——这正好覆盖了按 endpoint
 > 区分走不走代理的需求。
 
-两种代理对流式（`chat_stream`）与非流式请求同样生效。流式路径不走
-`ConcurrentRequester`（各客户端自建 session），但通过 `create_proxied_session()`
-共用同一套代理语义。
+两种代理对流式（`chat_stream`）与非流式请求同样生效。流式请求复用
+`ConcurrentRequester` 的 session 和 connector，保留独立的空闲超时；HTTP
+代理仍由请求参数指定，SOCKS 由共享 connector 建立隧道。
 
 **多模态图片/媒体下载也走代理**：`preprocess_msg=True` 时，消息里的图片/音频/
 视频 URL 会被预处理下载并转 base64，这条下载链同样经 client 的 `proxy`。VPN

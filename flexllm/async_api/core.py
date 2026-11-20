@@ -18,6 +18,7 @@ from aiohttp import (
     ClientPayloadError,
     ClientSession,
     ClientTimeout,
+    DummyCookieJar,
     TCPConnector,
 )
 
@@ -334,10 +335,12 @@ class ConcurrentRequester:
         proxy: str | None = None,
         pool_semaphore: ConcurrencyLimiter | None = None,
         pool_rate_limiter: RateLimiter | None = None,
+        use_cookies: bool = True,
     ):
         self._concurrency_limit = concurrency_limit
         self._proxy = validate_proxy(proxy)
         self._proxy_is_socks = is_socks_proxy(self._proxy)
+        self._use_cookies = use_cookies
         if timeout:
             self._timeout = ClientTimeout(total=timeout, connect=min(10.0, timeout))
         else:
@@ -378,7 +381,10 @@ class ConcurrentRequester:
         # SOCKS 时关 trust_env：隧道由 connector 全权负责，环境代理不应再介入
         # （HTTP 路径靠 make_requests 的 per-request proxy= 保证显式配置优先）
         self._session = ClientSession(
-            timeout=self._timeout, connector=self._connector, trust_env=not self._proxy_is_socks
+            timeout=self._timeout,
+            connector=self._connector,
+            trust_env=not self._proxy_is_socks,
+            cookie_jar=None if self._use_cookies else DummyCookieJar(),
         )
         return self._session
 

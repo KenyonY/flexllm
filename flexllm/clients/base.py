@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Union
 
 logger = logging.getLogger(__name__)
 
-from ..async_api import ConcurrentRequester, create_proxied_session, validate_proxy
+from ..async_api import ConcurrentRequester, validate_proxy
 from ..async_api.progress import ProgressBarConfig
 from ..cache import ResponseCache, ResponseCacheConfig
 from ..msg_processors.unified_processor import (
@@ -463,6 +463,9 @@ class LLMClientBase(CompletionMixin, ABC):
             retry_times=retry_times,
             retry_delay=retry_delay,
             proxy=proxy,
+            # LLM calls authenticate explicitly; never carry gateway cookies
+            # across calls that may override authorization headers.
+            use_cookies=False,
         )
 
         # 图片/媒体预处理的磁盘缓存开关与路径。持有一个按此配置构建的处理器实例
@@ -1607,9 +1610,11 @@ class LLMClientBase(CompletionMixin, ABC):
             sock_read=effective_timeout,
         )
 
-        session, proxy_kwargs = create_proxied_session(self._proxy)
+        proxy_kwargs = (
+            {"proxy": self._proxy} if self._proxy and not self._client._proxy_is_socks else {}
+        )
         try:
-            async with session:
+            async with self._client._get_session() as session:
                 async with session.post(
                     effective_url,
                     json=body,

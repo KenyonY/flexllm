@@ -14,7 +14,6 @@ import aiohttp
 
 logger = logging.getLogger(__name__)
 
-from ..async_api import create_proxied_session
 from ..cache import ResponseCacheConfig
 from .base import (
     LLMClientBase,
@@ -722,9 +721,11 @@ class ClaudeClient(LLMClientBase):
             sock_read=effective_timeout,
         )
 
-        session, proxy_kwargs = create_proxied_session(self._proxy)
+        proxy_kwargs = (
+            {"proxy": self._proxy} if self._proxy and not self._client._proxy_is_socks else {}
+        )
         try:
-            async with session:
+            async with self._client._get_session() as session:
                 async with session.post(
                     effective_url,
                     json=body,
