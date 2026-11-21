@@ -5,7 +5,7 @@ import json
 import pytest
 
 from flexllm import ClaudeClient, LLMClient
-from flexllm.clients import claude as claude_mod
+from flexllm.clients import base as base_mod
 
 
 class _FakeStreamContent:
@@ -444,7 +444,7 @@ class TestClaudeClientExtractContent:
             {"type": "message_stop"},
         ]
         session = _FakeStreamSession(events)
-        monkeypatch.setattr(claude_mod, "create_proxied_session", lambda proxy: (session, {}))
+        monkeypatch.setattr(base_mod.ConcurrentRequester, "_get_session", lambda self: session)
         client = ClaudeClient(api_key="test-key", model="claude-sonnet-4-6")
 
         chunks = [

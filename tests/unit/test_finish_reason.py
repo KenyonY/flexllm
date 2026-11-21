@@ -186,7 +186,7 @@ def fake_stream(monkeypatch):
     def factory(lines):
         session = _FakeSession(lines)
         holder["session"] = session
-        monkeypatch.setattr(base_mod, "create_proxied_session", lambda proxy: (session, {}))
+        monkeypatch.setattr(base_mod.ConcurrentRequester, "_get_session", lambda self: session)
         return session
 
     return factory
