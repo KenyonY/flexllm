@@ -1,5 +1,285 @@
 # Changelog
 
+## [0.17.11] - 2026-11-21
+
+### Bug Fixes
+
+- **clients**: Reuse pooled connections for streaming requests
+
+### Miscellaneous
+
+- Bump version to 0.17.11
+
+### Testing
+
+- **clients**: Update streaming session mocks
+
+## [0.17.10] - 2026-10-08
+
+### Features
+
+- **clients**: Support OpenRouter reasoning controls
+- **clients**: Add endpoint-aware reasoning policies
+
+### Miscellaneous
+
+- Bump version to 0.17.10
+
+## [0.17.9] - 2026-09-30
+
+### Bug Fixes
+
+- **pool**: Report provider and model when all endpoints agree
+
+### Miscellaneous
+
+- Bump version to 0.17.9
+
+## [0.17.8] - 2026-09-30
+
+### Features
+
+- **clients**: Add chat_batch_iter, deprecate chat_completions_stream and iter_chat_completions_batch
+
+### Miscellaneous
+
+- Bump version to 0.17.8
+
+## [0.17.7] - 2026-09-29
+
+### Miscellaneous
+
+- Bump version to 0.17.7
+
+### Refactor
+
+- **clients**: Rename complete* entry points to chat*
+
+### Testing
+
+- **media**: Generate the test image instead of reading a gitignored e2e asset
+
+## [0.17.6] - 2026-09-28
+
+### Bug Fixes
+
+- **media**: Keep the unavailable placeholder for skipped missing files
+
+### Documentation
+
+- **media**: Skipped unsupported blocks are not read
+
+### Miscellaneous
+
+- Bump version to 0.17.6
+
+### Performance
+
+- **media**: Skip reading media the target model will drop
+
+## [0.17.5] - 2026-09-28
+
+### Bug Fixes
+
+- **batch**: Build standard file:// URIs in the folder processor
+- **media**: Percent-decode file:// URIs
+
+### Documentation
+
+- **openai**: Note Ollama /v1 ignores the thinking=True switch
+
+### Miscellaneous
+
+- Bump version to 0.17.5
+
+## [0.17.4] - 2026-09-28
+
+### Bug Fixes
+
+- **openai**: Thinking=False actually disables reasoning on Ollama
+- **claude**: Replace video/audio blocks with placeholders instead of document
+- **media**: Skip frame extraction for unreadable local videos
+- **media**: Stable placeholder reason and no error logs for local media failures
+
+### Documentation
+
+- **cli**: --thinking help reflects reasoning_effort on OpenAI-compatible endpoints
+
+### Features
+
+- **openai**: Translate thinking effort strings and thinking=False to reasoning_effort
+- **media**: Make the local-media placeholder opt-in via missing_local_media
+- **media**: Placeholder for unreadable local media and a video capability switch
+
+### Miscellaneous
+
+- Bump version to 0.17.4
+
+## [0.17.3] - 2026-09-24
+
+### Bug Fixes
+
+- **mock**: Sign Gemini 2.x function calls like the real API
+- **gemini**: Handle Gemini 2.x tool images and thought-only replies
+- **gemini**: Send thinking and JSON schema options every model accepts
+- **gemini**: Make multi-turn tool calling work end to end
+
+### Features
+
+- **mock**: Mirror the real Gemini 3 protocol on the Gemini endpoint
+
+### Miscellaneous
+
+- Bump version to 0.17.3
+
+## [0.17.2] - 2026-09-24
+
+### Bug Fixes
+
+- **gemini**: Surface function calls in streaming responses
+- **pool**: Never fall back to another endpoint after a stream has started
+
+### Documentation
+
+- **stream**: Document complete_stream differences and cover edge cases
+- Record where the vision implementation actually landed
+
+### Features
+
+- **clients**: Add complete_stream with typed events and a final result
+
+### Miscellaneous
+
+- Bump version to 0.17.2
+
+## [0.17.1] - 2026-09-23
+
+### Bug Fixes
+
+- **clients**: Never send empty text blocks with tool images
+- **clients**: Measure endpoint latency from the request itself
+- **pool**: Keep cache hits out of latency samples
+- **router**: Address QA findings on latency-aware selection
+
+### Documentation
+
+- **api**: Document ChatCompletionResult.latency
+
+### Features
+
+- **clients**: Accept images in tool results and add a vision switch
+- **router**: Latency-aware endpoint selection
+
+### Miscellaneous
+
+- Bump version to 0.17.1
+
+### Testing
+
+- **image**: Isolate proxy tests from the on-disk image cache
+- **router**: Make the long-idle test actually guard its regression
+
+## [0.17.0] - 2026-09-16
+
+### Bug Fixes
+
+- **clients**: Restore every 0.16.x legacy behaviour verbatim
+- **clients**: Keep legacy batch signatures positionally compatible
+- **stream**: Stop dropping coexisting deltas in the same chunk
+- **clients**: Complete legacy response migration
+- **clients**: Preserve legacy completion returns
+- **clients**: Unify request error contracts
+
+### Miscellaneous
+
+- Bump version to 0.17.0
+
+### Refactor
+
+- **clients**: Make batch results homogeneous and non-raising
+
+## [0.16.6] - 2026-09-08
+
+### Bug Fixes
+
+- **pool**: Support structured errors in multi-endpoint calls
+
+## [0.16.5] - 2026-09-08
+
+### Features
+
+- **config**: Support named multi-endpoint models
+
+### Miscellaneous
+
+- Bump version to 0.16.5
+
+## [0.16.4] - 2026-09-03
+
+### Bug Fixes
+
+- **claude**: Recognize date-only version snapshots
+
+### Miscellaneous
+
+- Bump version to 0.16.4
+
+## [0.16.3] - 2026-09-03
+
+### Features
+
+- **clients**: Adapt reasoning across model versions
+
+### Miscellaneous
+
+- Bump version to 0.16.3
+
+## [0.16.2] - 2026-09-02
+
+### Documentation
+
+- Add repository contributor guidelines
+- CLAUDE.md 同步简化发版流程与 0.16 实际结构
+- **readme**: 同步 proxy/Vertex AI/语音能力与 chat-web 命令
+
+### Features
+
+- **clients**: Preserve structured HTTP errors
+- **cli**: Support Codex skill installation
+
+### Miscellaneous
+
+- Bump version to 0.16.2
+
+## [0.16.1] - 2026-08-19
+
+### Bug Fixes
+
+- **clients**: Claude/Gemini 流式覆写漏掉 extra_headers，身份 header 掉进请求体
+
+### Features
+
+- **clients**: List_models —— 异步、带 per-call header、经代理的模型列表原始条目
+
+### Miscellaneous
+
+- Bump version to 0.16.1
+
+## [0.16.0] - 2026-08-18
+
+### Documentation
+
+- **examples**: 新增 batch CLI 工作流示例
+
+### Features
+
+- **clients**: 透出上游标准信封之外的带外字段
+- **client**: Chat_completions/stream 支持 per-call extra_headers
+
+### Miscellaneous
+
+- Bump version to 0.16.0
+
 ## [0.15.2] - 2026-08-17
 
 ### Features
